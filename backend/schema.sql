@@ -1,0 +1,281 @@
+-- PostgreSQL Schema DDL Script for Pet Adoption System
+-- Database: pet_adoption
+
+BEGIN;
+
+-- Enable UUID extension if available
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Try creating PostGIS extension if available
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'postgis') THEN
+        EXECUTE 'CREATE EXTENSION IF NOT EXISTS postgis;';
+    END IF;
+END $$;
+
+-- -----------------------------------------------------------------------------
+-- ENUM TYPES
+-- -----------------------------------------------------------------------------
+DO $$ BEGIN
+    CREATE TYPE user_role_enum AS ENUM ('admin', 'shelter', 'delivery', 'customer');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE vehicle_type_enum AS ENUM ('two_wheeler', 'car', 'van');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE pet_species_enum AS ENUM ('dog', 'cat', 'other');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE pet_gender_enum AS ENUM ('male', 'female');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE pet_status_enum AS ENUM ('available', 'pending', 'adopted');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE application_status_enum AS ENUM ('submitted', 'approved', 'rejected', 'completed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE payment_method_enum AS ENUM ('unset', 'online', 'cod');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE payment_status_enum AS ENUM ('pending', 'paid', 'failed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE delivery_status_enum AS ENUM ('assigned', 'picked_up', 'in_transit', 'delivered', 'failed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- -----------------------------------------------------------------------------
+-- TABLES (11 TABLES)
+-- -----------------------------------------------------------------------------
+
+-- 1. users
+CREATE TABLE IF NOT EXISTS users (
+    id BIGSERIAL PRIMARY KEY,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    username VARCHAR(150) NOT NULL UNIQUE,
+    email VARCHAR(254) NOT NULL UNIQUE,
+    password VARCHAR(128) NOT NULL,
+    first_name VARCHAR(150) DEFAULT '',
+    last_name VARCHAR(150) DEFAULT '',
+    role VARCHAR(20) NOT NULL DEFAULT 'customer',
+    phone VARCHAR(20) DEFAULT '',
+    address TEXT DEFAULT '',
+    is_staff BOOLEAN NOT NULL DEFAULT FALSE,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    is_superuser BOOLEAN NOT NULL DEFAULT FALSE,
+    last_login TIMESTAMPTZ,
+    date_joined TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. shelter_profiles
+CREATE TABLE IF NOT EXISTS shelter_profiles (
+    id BIGSERIAL PRIMARY KEY,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    user_id BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    organization_name VARCHAR(150) NOT NULL,
+    license_no VARCHAR(50) DEFAULT '',
+    pickup_address TEXT NOT NULL,
+    latitude DECIMAL(9, 6),
+    longitude DECIMAL(9, 6),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. delivery_profiles
+CREATE TABLE IF NOT EXISTS delivery_profiles (
+    id BIGSERIAL PRIMARY KEY,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    user_id BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    shelter_id BIGINT NOT NULL REFERENCES shelter_profiles(id) ON DELETE CASCADE,
+    vehicle_type VARCHAR(20) NOT NULL DEFAULT 'car',
+    vehicle_number VARCHAR(30) NOT NULL,
+    is_available BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4. pets
+CREATE TABLE IF NOT EXISTS pets (
+    id BIGSERIAL PRIMARY KEY,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    shelter_id BIGINT NOT NULL REFERENCES shelter_profiles(id) ON DELETE CASCADE,
+    name VARCHAR(100) NOT NULL,
+    species VARCHAR(20) NOT NULL,
+    breed VARCHAR(100) DEFAULT '',
+    age_months INT NOT NULL CHECK (age_months >= 0),
+    gender VARCHAR(10) NOT NULL,
+    description TEXT DEFAULT '',
+    adoption_fee DECIMAL(8, 2) NOT NULL DEFAULT 100.00,
+    image VARCHAR(255),
+    is_vaccinated BOOLEAN NOT NULL DEFAULT FALSE,
+    is_neutered BOOLEAN NOT NULL DEFAULT FALSE,
+    status VARCHAR(20) NOT NULL DEFAULT 'available',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5. pet_images
+CREATE TABLE IF NOT EXISTS pet_images (
+    id BIGSERIAL PRIMARY KEY,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    pet_id BIGINT NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
+    image_url VARCHAR(255) NOT NULL,
+    caption VARCHAR(255) DEFAULT '',
+    is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 6. pet_medical_records
+CREATE TABLE IF NOT EXISTS pet_medical_records (
+    id BIGSERIAL PRIMARY KEY,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    pet_id BIGINT NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
+    title VARCHAR(200) NOT NULL,
+    description TEXT DEFAULT '',
+    vet_name VARCHAR(150) DEFAULT '',
+    record_date DATE NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 7. adoption_applications
+CREATE TABLE IF NOT EXISTS adoption_applications (
+    id BIGSERIAL PRIMARY KEY,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    pet_id BIGINT NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
+    applicant_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    living_situation VARCHAR(255) NOT NULL,
+    has_other_pets BOOLEAN NOT NULL DEFAULT FALSE,
+    dropoff_address TEXT NOT NULL,
+    customer_latitude DECIMAL(9, 6),
+    customer_longitude DECIMAL(9, 6),
+    contact_phone VARCHAR(20) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'submitted',
+    pet_care_fee DECIMAL(8, 2) NOT NULL DEFAULT 0.00,
+    base_delivery_fee DECIMAL(8, 2) NOT NULL DEFAULT 50.00,
+    distance_km DECIMAL(6, 2) NOT NULL DEFAULT 0.00,
+    distance_fee DECIMAL(8, 2) NOT NULL DEFAULT 0.00,
+    total_amount DECIMAL(8, 2) NOT NULL DEFAULT 0.00,
+    payment_method VARCHAR(20) NOT NULL DEFAULT 'unset',
+    payment_status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    razorpay_order_id VARCHAR(100) DEFAULT '',
+    razorpay_payment_id VARCHAR(100) DEFAULT '',
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 8. pet_deliveries
+CREATE TABLE IF NOT EXISTS pet_deliveries (
+    id BIGSERIAL PRIMARY KEY,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    application_id BIGINT NOT NULL UNIQUE REFERENCES adoption_applications(id) ON DELETE CASCADE,
+    driver_id BIGINT REFERENCES delivery_profiles(id) ON DELETE SET NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'assigned',
+    secret_otp VARCHAR(6) NOT NULL,
+    current_latitude DECIMAL(9, 6),
+    current_longitude DECIMAL(9, 6),
+    last_location_update TIMESTAMPTZ,
+    cash_collected DECIMAL(8, 2) NOT NULL DEFAULT 0.00,
+    is_cash_settled_with_shelter BOOLEAN NOT NULL DEFAULT FALSE,
+    scheduled_date TIMESTAMPTZ,
+    delivered_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 9. payments
+CREATE TABLE IF NOT EXISTS payments (
+    id BIGSERIAL PRIMARY KEY,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    application_id BIGINT NOT NULL REFERENCES adoption_applications(id) ON DELETE CASCADE,
+    amount DECIMAL(8, 2) NOT NULL,
+    payment_method VARCHAR(20) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    transaction_id VARCHAR(100) DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 10. delivery_location_pings
+CREATE TABLE IF NOT EXISTS delivery_location_pings (
+    id BIGSERIAL PRIMARY KEY,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    delivery_id BIGINT NOT NULL REFERENCES pet_deliveries(id) ON DELETE CASCADE,
+    latitude DECIMAL(9, 6) NOT NULL,
+    longitude DECIMAL(9, 6) NOT NULL,
+    pinged_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 11. adoption_reviews
+CREATE TABLE IF NOT EXISTS adoption_reviews (
+    id BIGSERIAL PRIMARY KEY,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    application_id BIGINT NOT NULL UNIQUE REFERENCES adoption_applications(id) ON DELETE CASCADE,
+    reviewer_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    rating INT NOT NULL CHECK (rating >= 1 AND rating <= 5),
+    comment TEXT DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- -----------------------------------------------------------------------------
+-- INDEXES & PARTIAL UNIQUE INDEXES
+-- -----------------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS idx_pets_shelter_status ON pets(shelter_id, status);
+CREATE INDEX IF NOT EXISTS idx_delivery_location_pings_delivery ON delivery_location_pings(delivery_id, pinged_at DESC);
+
+-- Partial unique index: applicant can have only 1 active (submitted/approved) application per pet
+CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_active_application_per_pet 
+ON adoption_applications(applicant_id, pet_id) 
+WHERE status IN ('submitted', 'approved');
+
+-- -----------------------------------------------------------------------------
+-- TRIGGERS & TRIGGER FUNCTIONS (2 TRIGGERS)
+-- -----------------------------------------------------------------------------
+
+-- Trigger 1: Auto-update updated_at on adoption_applications
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_update_application_timestamp ON adoption_applications;
+CREATE TRIGGER trg_update_application_timestamp
+BEFORE UPDATE ON adoption_applications
+FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
+
+-- Trigger 2: Sync pet status automatically based on application status
+CREATE OR REPLACE FUNCTION sync_pet_status_on_application_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.status = 'approved' THEN
+        UPDATE pets SET status = 'pending' WHERE id = NEW.pet_id;
+    ELSIF NEW.status = 'completed' THEN
+        UPDATE pets SET status = 'adopted' WHERE id = NEW.pet_id;
+    ELSIF NEW.status = 'rejected' THEN
+        -- Check if any other active approved application exists for this pet
+        IF NOT EXISTS (
+            SELECT 1 FROM adoption_applications 
+            WHERE pet_id = NEW.pet_id AND status IN ('approved', 'completed') AND id <> NEW.id
+        ) THEN
+            UPDATE pets SET status = 'available' WHERE id = NEW.pet_id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_sync_pet_status ON adoption_applications;
+CREATE TRIGGER trg_sync_pet_status
+AFTER INSERT OR UPDATE ON adoption_applications
+FOR EACH ROW
+EXECUTE FUNCTION sync_pet_status_on_application_change();
+
+COMMIT;

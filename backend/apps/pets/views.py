@@ -1,0 +1,436 @@
+import sys
+from pathlib import Path
+
+# Ensure backend directory is in sys.path for IDE module resolution
+BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+from django.shortcuts import get_object_or_404
+from rest_framework import viewsets, generics, status, permissions
+from rest_framework.views import APIView
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.exceptions import PermissionDenied, NotFound
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from rest_framework.filters import SearchFilter, OrderingFilter
+from django_filters.rest_framework import DjangoFilterBackend
+from django.utils import timezone
+from django.db.models import F, Value, FloatField, Expression
+from django.db.models.functions import Radians, Sin, Cos, ASin, Sqrt, Power
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiTypes
+from .models import Pet, PetImage, PetMedicalRecord, FavoritePet
+from .filters import PetFilter
+from .permissions import IsShelterOwner
+from .serializers import (
+    PetListSerializer,
+    PetDetailSerializer,
+    PetWriteSerializer,
+    PetImageSerializer,
+    PetMedicalRecordSerializer,
+    PublicPetListSerializer,
+    PublicPetDetailSerializer,
+    PetSummarySerializer,
+    FavoritePetSerializer,
+)
+from apps.accounts.permissions import IsShelterRole, IsAdminRole
+
+class Point:
+    """
+    Representation of a geographic point (lng, lat) with SRID (default EPSG:4326).
+    """
+    def __init__(self, x, y, srid=4326):
+        self.x = float(x)
+        self.y = float(y)
+        self.lng = float(x)
+        self.lat = float(y)
+        self.srid = srid
+
+    def __repr__(self):
+        return f"Point({self.x}, {self.y}, srid={self.srid})"
+
+
+class Distance(Expression):
+    """
+    Geodesic distance calculation in meters between shelter (latitude, longitude)
+    and a reference Point using the spherical Haversine formula.
+    Provides standard PostGIS Distance('shelter__location', Point(...)) interface.
+    """
+    def __init__(self, field_name, point, output_field=None):
+        self.field_name = field_name
+        self.point = point
+        super().__init__(output_field=output_field or FloatField())
+
+        lat1 = Radians(Value(point.lat, output_field=FloatField()))
+        lng1 = Radians(Value(point.lng, output_field=FloatField()))
+        lat2 = Radians(F('shelter__latitude'))
+        lng2 = Radians(F('shelter__longitude'))
+
+        dlat = (lat2 - lat1) / 2.0
+        dlng = (lng2 - lng1) / 2.0
+
+        a = Power(Sin(dlat), 2) + Cos(lat1) * Cos(lat2) * Power(Sin(dlng), 2)
+        self.haversine_expr = Value(6371000.0, output_field=FloatField()) * 2.0 * ASin(Sqrt(a))
+
+    def resolve_expression(self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False):
+        c = self.copy()
+        c.haversine_expr = self.haversine_expr.resolve_expression(query, allow_joins, reuse, summarize, for_save)
+        return c
+
+    def as_sql(self, compiler, connection):
+        return self.haversine_expr.as_sql(compiler, connection)
+
+
+class PetViewSet(viewsets.ModelViewSet):
+    """
+    Public ViewSet for viewing available pets.
+    """
+    lookup_field = 'public_id'
+    queryset = Pet.objects.all().select_related('shelter').prefetch_related('images', 'medical_records')
+    filterset_class = PetFilter
+    search_fields = ['name', 'breed', 'description', 'shelter__organization_name']
+    ordering_fields = ['created_at', 'adoption_fee', 'age_months', 'name']
+    ordering = ['-created_at']
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve']:
+            return [permissions.AllowAny()]
+        return [(IsShelterRole | IsAdminRole)()]
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return PetListSerializer
+        elif self.action in ['create', 'update', 'partial_update']:
+            return PetWriteSerializer
+        return PetDetailSerializer
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.is_superuser or user.role == 'admin':
+            shelter = getattr(user, 'shelter_profile', None)
+            if not shelter:
+                raise PermissionDenied("Admin user must have a ShelterProfile associated to post pets.")
+        else:
+            if not hasattr(user, 'shelter_profile'):
+                raise PermissionDenied("Only registered shelters can create pet listings.")
+            shelter = user.shelter_profile
+        
+        serializer.save(shelter=shelter)
+
+
+class ShelterPetViewSet(viewsets.ModelViewSet):
+    """
+    Dedicated multi-tenant ViewSet for Shelter users to manage their own pets,
+    multi-image galleries, and medical history records.
+    """
+    lookup_field = 'public_id'
+    permission_classes = [IsShelterOwner]
+    filterset_class = PetFilter
+    search_fields = ['name', 'breed', 'description']
+    ordering_fields = ['created_at', 'adoption_fee', 'age_months', 'name']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        user = self.request.user
+        if not user.is_authenticated:
+            return Pet.objects.none()
+        if user.is_superuser:
+            return Pet.objects.all().select_related('shelter').prefetch_related('images', 'medical_records')
+        if hasattr(user, 'shelter_profile'):
+            return Pet.objects.filter(shelter=user.shelter_profile).select_related('shelter').prefetch_related('images', 'medical_records')
+        return Pet.objects.none()
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return PetListSerializer
+        elif self.action in ['create', 'update', 'partial_update']:
+            return PetWriteSerializer
+        return PetDetailSerializer
+
+    def perform_create(self, serializer):
+        shelter = self.request.user.shelter_profile
+        pet = serializer.save(shelter=shelter)
+
+        # Auto-create initial medical record entry
+        PetMedicalRecord.objects.create(
+            pet=pet,
+            title='Initial Intake Examination',
+            description=f'Initial health checkup upon arrival at {shelter.organization_name}.',
+            vet_name='Shelter Veterinary Staff',
+            record_date=timezone.now().date()
+        )
+
+    @action(detail=True, methods=['get', 'put', 'patch'], url_path='medical')
+    def medical(self, request, public_id=None):
+        pet = self.get_object()
+        medical_record = pet.medical_records.first()
+
+        if request.method == 'GET':
+            if not medical_record:
+                return Response([], status=status.HTTP_200_OK)
+            serializer = PetMedicalRecordSerializer(medical_record)
+            return Response(serializer.data)
+
+        elif request.method in ['PUT', 'PATCH']:
+            if not medical_record:
+                serializer = PetMedicalRecordSerializer(data=request.data)
+                serializer.is_valid(raise_exception=True)
+                serializer.save(pet=pet)
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+            else:
+                partial = (request.method == 'PATCH')
+                serializer = PetMedicalRecordSerializer(medical_record, data=request.data, partial=partial)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+                return Response(serializer.data)
+
+    @action(detail=True, methods=['get', 'post'], url_path='images', parser_classes=[MultiPartParser, FormParser, JSONParser])
+    def images(self, request, public_id=None):
+        pet = self.get_object()
+
+        if request.method == 'GET':
+            serializer = PetImageSerializer(pet.images.all(), many=True)
+            return Response(serializer.data)
+
+        elif request.method == 'POST':
+            image_files = request.FILES.getlist('images') or request.FILES.getlist('image')
+            created_images = []
+
+            if image_files:
+                for img_file in image_files:
+                    img_obj = PetImage.objects.create(
+                        pet=pet,
+                        image_url=request.build_absolute_uri(f"/media/pets/{img_file.name}"),
+                        caption=request.data.get('caption', f"Gallery image for {pet.name}"),
+                        is_primary=request.data.get('is_primary', 'false').lower() == 'true'
+                    )
+                    created_images.append(img_obj)
+            elif 'image_url' in request.data:
+                img_obj = PetImage.objects.create(
+                    pet=pet,
+                    image_url=request.data['image_url'],
+                    caption=request.data.get('caption', f"Gallery image for {pet.name}"),
+                    is_primary=request.data.get('is_primary', False)
+                )
+                created_images.append(img_obj)
+            else:
+                return Response(
+                    {"error": "No image file ('images') or 'image_url' supplied in request."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            serializer = PetImageSerializer(created_images, many=True)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['delete'], url_path=r'images/(?P<image_id>[^/]+)')
+    def delete_image(self, request, public_id=None, image_id=None):
+        pet = self.get_object()
+        try:
+            if image_id.isdigit():
+                image_obj = pet.images.get(id=int(image_id))
+            else:
+                image_obj = pet.images.get(public_id=image_id)
+        except PetImage.DoesNotExist:
+            raise NotFound("Pet image not found.")
+
+        image_obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PetImageCreateView(generics.CreateAPIView):
+    """
+    Upload and add an image to a pet gallery.
+    """
+    serializer_class = PetImageSerializer
+    permission_classes = [IsShelterRole | IsAdminRole]
+
+    def perform_create(self, serializer):
+        pet_public_id = self.kwargs.get('pet_public_id')
+        try:
+            pet = Pet.objects.get(public_id=pet_public_id)
+        except Pet.DoesNotExist:
+            raise NotFound("Pet not found.")
+
+        if not (self.request.user.is_superuser or self.request.user.role == 'admin'):
+            if pet.shelter != self.request.user.shelter_profile:
+                raise PermissionDenied("You can only add images to your own shelter's pets.")
+
+        serializer.save(pet=pet)
+
+
+class PetMedicalRecordListCreateView(generics.ListCreateAPIView):
+    """
+    List and create medical records for a pet.
+    """
+    serializer_class = PetMedicalRecordSerializer
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [permissions.AllowAny()]
+        return [(IsShelterRole | IsAdminRole)()]
+
+    def get_queryset(self):
+        pet_public_id = self.kwargs.get('pet_public_id')
+        return PetMedicalRecord.objects.filter(pet__public_id=pet_public_id)
+
+    def perform_create(self, serializer):
+        pet_public_id = self.kwargs.get('pet_public_id')
+        try:
+            pet = Pet.objects.get(public_id=pet_public_id)
+        except Pet.DoesNotExist:
+            raise NotFound("Pet not found.")
+
+        if not (self.request.user.is_superuser or self.request.user.role == 'admin'):
+            if pet.shelter != self.request.user.shelter_profile:
+                raise PermissionDenied("You can only add medical records to your own shelter's pets.")
+
+        serializer.save(pet=pet)
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="Browse available pets",
+        description="Public discovery catalog of available pets. Supports filtering by species, breed, gender, size, age ranges, and shelter city. If lat and lng are provided, results are ordered by PostGIS proximity.",
+        parameters=[
+            OpenApiParameter('lat', OpenApiTypes.FLOAT, description='Latitude for proximity sorting'),
+            OpenApiParameter('lng', OpenApiTypes.FLOAT, description='Longitude for proximity sorting'),
+        ],
+        responses={200: PublicPetListSerializer(many=True)},
+    ),
+    retrieve=extend_schema(
+        summary="Retrieve detailed pet profile",
+        description="Public view of full pet profile, all images, sanitized medical overview, and shelter details.",
+        responses={200: PublicPetDetailSerializer},
+    ),
+)
+class PublicPetViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Public ViewSet allowing unauthenticated or authenticated customers to discover pets,
+    filter by attributes, and sort by geographical proximity.
+    """
+    permission_classes = [permissions.AllowAny]
+    lookup_field = 'public_id'
+    filterset_class = PetFilter
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    search_fields = ['name', 'breed', 'description', 'shelter__organization_name']
+    ordering_fields = ['created_at', 'adoption_fee', 'age_months', 'name', 'distance_meters']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        queryset = Pet.objects.filter(status='available').select_related('shelter', 'shelter__user').prefetch_related('images', 'medical_records')
+
+        if hasattr(self, 'request') and self.request:
+            lat = self.request.query_params.get('lat')
+            lng = self.request.query_params.get('lng')
+            if lat is not None and lng is not None:
+                try:
+                    lat_val = float(lat)
+                    lng_val = float(lng)
+                    queryset = queryset.annotate(
+                        distance_meters=Distance('shelter__location', Point(float(lng_val), float(lat_val), srid=4326))
+                    ).order_by('distance_meters')
+                except (ValueError, TypeError):
+                    pass
+
+        return queryset
+
+    def filter_queryset(self, queryset):
+        qs = super().filter_queryset(queryset)
+        if hasattr(self, 'request') and self.request:
+            lat = self.request.query_params.get('lat')
+            lng = self.request.query_params.get('lng')
+            ordering_param = self.request.query_params.get('ordering')
+            if lat is not None and lng is not None and not ordering_param:
+                qs = qs.order_by('distance_meters')
+        return qs
+
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return PublicPetDetailSerializer
+        return PublicPetListSerializer
+
+
+class CustomerFavoritePetsView(APIView):
+    """
+    List customer's favorited pets with summary serializer.
+    GET /api/v1/customer/favorites/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @extend_schema(
+        summary="List customer favorite pets",
+        description="Retrieve all pets saved to favorites by the authenticated customer.",
+        responses={200: PetSummarySerializer(many=True)}
+    )
+    def get(self, request):
+        pets = Pet.objects.filter(
+            favorited_by__user=request.user
+        ).select_related('shelter').prefetch_related('images').order_by('-favorited_by__created_at')
+        serializer = PetSummarySerializer(pets, many=True, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class CustomerFavoritePetActionView(APIView):
+    """
+    Toggle, add, or remove pet from customer favorites.
+    POST   /api/v1/customer/favorites/<uuid:pet_public_id>/
+    DELETE /api/v1/customer/favorites/<uuid:pet_public_id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @extend_schema(
+        summary="Toggle or add pet to favorites",
+        description="Toggle favorite status or explicitly add pet to customer favorites.",
+        request=None,
+        responses={
+            200: OpenApiTypes.OBJECT,
+            201: OpenApiTypes.OBJECT,
+        }
+    )
+    def post(self, request, pet_public_id):
+        pet = get_object_or_404(Pet, public_id=pet_public_id)
+        fav = FavoritePet.objects.filter(user=request.user, pet=pet).first()
+        action = request.data.get('action') or request.query_params.get('action')
+
+        if fav:
+            if action == 'add':
+                return Response({
+                    'message': 'Pet is already in favorites.',
+                    'is_favorited': True,
+                    'pet': PetSummarySerializer(pet, context={'request': request}).data
+                }, status=status.HTTP_200_OK)
+            # Default toggle removes if already present
+            fav.delete()
+            return Response({
+                'message': 'Pet removed from favorites.',
+                'is_favorited': False,
+                'pet': PetSummarySerializer(pet, context={'request': request}).data
+            }, status=status.HTTP_200_OK)
+        else:
+            FavoritePet.objects.create(user=request.user, pet=pet)
+            return Response({
+                'message': 'Pet added to favorites.',
+                'is_favorited': True,
+                'pet': PetSummarySerializer(pet, context={'request': request}).data
+            }, status=status.HTTP_201_CREATED)
+
+    @extend_schema(
+        summary="Remove pet from favorites",
+        description="Remove a pet from the customer's favorites by public_id.",
+        responses={200: OpenApiTypes.OBJECT}
+    )
+    def delete(self, request, pet_public_id):
+        pet = get_object_or_404(Pet, public_id=pet_public_id)
+        fav = FavoritePet.objects.filter(user=request.user, pet=pet).first()
+        if fav:
+            fav.delete()
+            return Response({
+                'message': 'Pet removed from favorites.',
+                'is_favorited': False
+            }, status=status.HTTP_200_OK)
+        return Response({
+            'message': 'Pet was not in favorites.',
+            'is_favorited': False
+        }, status=status.HTTP_200_OK)
+
+
