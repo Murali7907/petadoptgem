@@ -15,7 +15,7 @@ updated: 2026-10-13T21:45:00+05:30
 - [x] Task 0: Git hygiene fixing `.gitignore` bare `apps` pattern (Verified: `bd5ee5e`)
 - [x] Phase 0: Complete inspection of codebase, DB schemas, call sites, and in-flight data (Documented in SPEC.md)
 - [x] Phase 1: Settings fail-closed enforcement (`DEBUG=False` default, secret validation, CORS/CSRF, throttle scopes)
-- [ ] Phase 2: Additive PostgreSQL schema migration (`pickup_otp_hash`, `doorstep_otp_hash`, `doorstep_otp_sent_at`, indexes, CheckConstraints, data migration)
+- [x] Phase 2: Additive PostgreSQL schema migration (`pickup_otp_hash`, `doorstep_otp_hash`, `doorstep_otp_sent_at`, indexes, CheckConstraints, data migration)
 - [ ] Phase 3: Cryptographic OTP helper library (`apps/logistics/otp.py` with HMAC-SHA256, secrets generation, safe issue/check)
 - [ ] Phase 4: Delivery workflow refactoring (assignment OTP decoupled, pickup doorstep issue, shelter reissue endpoint, serializer stripping, `update_status` lock)
 - [ ] Phase 5: Verification endpoints hardening (select_for_update, regex validation, HTTP 400/403/409/410/423, Pet adopted status, payment status evaluation)
@@ -47,13 +47,13 @@ updated: 2026-10-13T21:45:00+05:30
 ---
 
 ### Phase 2: Schema Migrations (Additive, Reversible PostgreSQL)
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 **Objective:** Add cryptographic hash fields, indexes, and DB check constraints, followed by data migration of in-flight deliveries.
 **Tasks:**
-- [ ] Task 2.1: Update `PetDelivery` model in `apps/logistics/models.py` with `pickup_otp_hash`, `doorstep_otp_hash`, `doorstep_otp_sent_at`, indexes `(status)` and `(driver, status)`, and `CheckConstraint`s.
-- [ ] Task 2.2: Generate schema migration and review SQL.
-- [ ] Task 2.3: Author data migration hashing existing in-flight deliveries (`status not in ('delivered', 'failed')`), blanking plaintext, and setting missing expiries. Document reverse as safe no-op.
-- [ ] Task 2.4: Execute `migrate` forward and backward against PostgreSQL and capture logs.
+- [x] Task 2.1: Update `PetDelivery` model in `apps/logistics/models.py` with `pickup_otp_hash`, `doorstep_otp_hash`, `doorstep_otp_sent_at`, indexes `(status)` and `(driver, status)`, and `CheckConstraint`s.
+- [x] Task 2.2: Generate schema migration and review SQL.
+- [x] Task 2.3: Author data migration hashing existing in-flight deliveries (`status not in ('delivered', 'failed')`), blanking plaintext, and setting missing expiries. Document reverse as safe no-op.
+- [x] Task 2.4: Execute `migrate` forward and backward against PostgreSQL and capture logs.
 **Required Proof:** Postgres migration logs forward and backward, `\d pet_deliveries` showing new columns and constraints.
 
 ---

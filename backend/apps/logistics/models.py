@@ -19,6 +19,11 @@ class PetDelivery(models.Model):
     doorstep_otp = models.CharField(max_length=6, blank=True, default='')
     secret_otp = models.CharField(max_length=6, blank=True, default='') # Fallback alias
 
+    # Cryptographic HMAC-SHA256 OTP hashes & dispatch timestamps
+    pickup_otp_hash = models.CharField(max_length=64, null=True, blank=True)
+    doorstep_otp_hash = models.CharField(max_length=64, null=True, blank=True)
+    doorstep_otp_sent_at = models.DateTimeField(null=True, blank=True)
+
     pickup_otp_attempts = models.IntegerField(default=0)
     doorstep_otp_attempts = models.IntegerField(default=0)
 
@@ -43,14 +48,26 @@ class PetDelivery(models.Model):
     class Meta:
         db_table = 'pet_deliveries'
         managed = True
+        indexes = [
+            models.Index(fields=['status'], name='pet_delivery_status_idx'),
+            models.Index(fields=['driver', 'status'], name='pet_delivery_drv_status_idx'),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(pickup_otp_attempts__gte=0),
+                name='check_pickup_otp_attempts_gte_0'
+            ),
+            models.CheckConstraint(
+                condition=models.Q(doorstep_otp_attempts__gte=0),
+                name='check_doorstep_otp_attempts_gte_0'
+            ),
+            models.CheckConstraint(
+                condition=models.Q(status='delivered', delivered_at__isnull=False) | ~models.Q(status='delivered'),
+                name='check_delivered_has_delivered_at'
+            ),
+        ]
 
     def save(self, *args, **kwargs):
-        if not self.pickup_otp:
-            self.pickup_otp = str(secrets.randbelow(900000) + 100000)
-        if not self.doorstep_otp:
-            self.doorstep_otp = str(secrets.randbelow(900000) + 100000)
-        if not self.secret_otp:
-            self.secret_otp = self.doorstep_otp
         super().save(*args, **kwargs)
 
     @property

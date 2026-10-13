@@ -7,20 +7,25 @@ updated: 2026-10-13T21:45:00+05:30
 ## Current Position
 
 **Milestone:** delivery-otp-security-hardening
-**Phase:** Phase 1 - Settings Hardening (Complete) -> Moving to Phase 2 (Schema Migrations)
+**Phase:** Phase 2 - Schema Migrations (Complete) -> Moving to Phase 3 (OTP Cryptographic Helpers)
 **Status:** executing
-**Active Plan:** `.gsd/ROADMAP.md` Phase 2
+**Active Plan:** `.gsd/ROADMAP.md` Phase 3
 
 ## Last Action Completed
 
-- **Phase 1 (Settings Hardening)**: Refactored `backend/config/settings.py` to fail closed when `DEBUG=False` (missing `SECRET_KEY`, `RAZORPAY_*`, or wildcard `*` in `ALLOWED_HOSTS` raises `ImproperlyConfigured`), configured CORS/CSRF reading from env with local defaults, configured `OTP_TTL_MINUTES=1440`, `OTP_MAX_ATTEMPTS=3`, DRF throttle scope `'otp_verify' = '10/min'`, updated `backend/.env.example`, verified media serving with `DEBUG=True`, and passed all 7 settings tests plus 14 logistics regression tests.
+- **Phase 2 (Schema Migrations)**:
+  - Created pg_dump backup `pet_adoption_pre_migration.sql` (79,813 bytes).
+  - Added `pickup_otp_hash`, `doorstep_otp_hash`, `doorstep_otp_sent_at` to `PetDelivery`, along with indexes `(status)` and `(driver, status)`, and check constraints for non-negative attempts and `status='delivered' => delivered_at IS NOT NULL`.
+  - Removed auto-generation of plaintext OTPs from `PetDelivery.save()`.
+  - Created additive reversible migrations `0004_petdelivery_doorstep_otp_hash_and_more.py` and data migration `0005_hash_inflight_otps.py`.
+  - Successfully executed migrations backward to `0003` and forward to `0005` on PostgreSQL.
+  - Verified that in-flight delivery #3 was successfully hashed, plaintext columns blanked, and expiries set.
 
 ## Next Steps
 
-1. Commit Phase 1 settings changes: `fix(settings): fail closed on missing secrets and configure delivery otp throttles`.
-2. Begin Phase 2: Add additive fields (`pickup_otp_hash`, `doorstep_otp_hash`, `doorstep_otp_sent_at`), indexes, and check constraints to `PetDelivery`.
-3. Create and test reversible forward/backward schema migration on PostgreSQL.
-4. Create data migration for existing in-flight delivery #3.
+1. Commit Phase 2 schema and data migrations: `feat(logistics): add otp hash columns, constraints, and data migration for in-flight deliveries`.
+2. Begin Phase 3: Create `apps/logistics/otp.py` implementing `generate_otp()`, `hash_otp()`, `check_otp()`, and `issue_otp()`.
+3. Unit test `otp.py` and remove legacy `generate_secure_otp` references.
 
 ## Active Decisions
 
