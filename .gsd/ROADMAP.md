@@ -16,7 +16,7 @@ updated: 2026-10-13T21:45:00+05:30
 - [x] Phase 0: Complete inspection of codebase, DB schemas, call sites, and in-flight data (Documented in SPEC.md)
 - [x] Phase 1: Settings fail-closed enforcement (`DEBUG=False` default, secret validation, CORS/CSRF, throttle scopes)
 - [x] Phase 2: Additive PostgreSQL schema migration (`pickup_otp_hash`, `doorstep_otp_hash`, `doorstep_otp_sent_at`, indexes, CheckConstraints, data migration)
-- [ ] Phase 3: Cryptographic OTP helper library (`apps/logistics/otp.py` with HMAC-SHA256, secrets generation, safe issue/check)
+- [x] Phase 3: Cryptographic OTP helper library (`apps/logistics/otp.py` with HMAC-SHA256, secrets generation, safe issue/check)
 - [ ] Phase 4: Delivery workflow refactoring (assignment OTP decoupled, pickup doorstep issue, shelter reissue endpoint, serializer stripping, `update_status` lock)
 - [ ] Phase 5: Verification endpoints hardening (select_for_update, regex validation, HTTP 400/403/409/410/423, Pet adopted status, payment status evaluation)
 - [ ] Phase 6: URL routing verification and backward compatibility
@@ -59,12 +59,12 @@ updated: 2026-10-13T21:45:00+05:30
 ---
 
 ### Phase 3: OTP Cryptographic Helpers
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 **Objective:** Create isolated, secure cryptographic OTP library without plaintext storage.
 **Tasks:**
-- [ ] Task 3.1: Create `backend/apps/logistics/otp.py` implementing `generate_otp()`, `hash_otp()`, `check_otp()`, and `issue_otp()`.
-- [ ] Task 3.2: Remove plaintext OTP auto-generation from `PetDelivery.save()`.
-- [ ] Task 3.3: Unit test `otp.py` functions (HMAC validation, constant-time compare, salt/delivery separation).
+- [x] Task 3.1: Create `backend/apps/logistics/otp.py` implementing `generate_otp()`, `hash_otp()`, `check_otp()`, and `issue_otp()`.
+- [x] Task 3.2: Remove plaintext OTP auto-generation from `PetDelivery.save()`.
+- [x] Task 3.3: Unit test `otp.py` functions (HMAC validation, constant-time compare, salt/delivery separation).
 **Required Proof:** Unit test execution and assertion output.
 
 ---

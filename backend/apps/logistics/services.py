@@ -1,3 +1,4 @@
+import hmac
 import logging
 import secrets
 import sys
@@ -15,6 +16,7 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from .models import PetDelivery
+from .otp import generate_otp, check_otp, hash_otp, issue_otp
 from apps.accounts.models import DeliveryProfile
 from apps.adoptions.models import AdoptionApplication
 
@@ -22,9 +24,9 @@ logger = logging.getLogger(__name__)
 
 def generate_secure_otp() -> str:
     """
-    Returns a cryptographically secure 6-digit zero-padded numeric string.
+    Returns a cryptographically secure 6-digit zero-padded numeric string via apps.logistics.otp.
     """
-    return f"{secrets.randbelow(900000) + 100000:06d}"
+    return generate_otp()
 
 def assign_delivery_task(application: AdoptionApplication, driver: DeliveryProfile, payment_method: str = 'unset') -> PetDelivery:
     """
@@ -101,7 +103,13 @@ def verify_pickup_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
     if delivery.pickup_otp_attempts >= 5:
         raise ValidationError("Maximum pickup OTP attempts exceeded. Contact support.")
 
-    if str(submitted_otp).strip() != str(delivery.pickup_otp).strip():
+    is_valid = False
+    if delivery.pickup_otp_hash:
+        is_valid = check_otp(delivery.pickup_otp_hash, delivery.id, 'pickup', submitted_otp)
+    elif delivery.pickup_otp:
+        is_valid = hmac.compare_digest(str(submitted_otp).strip(), str(delivery.pickup_otp).strip())
+
+    if not is_valid:
         delivery.pickup_otp_attempts += 1
         delivery.save()
         raise ValidationError("Invalid pickup OTP.")
@@ -125,7 +133,15 @@ def verify_doorstep_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
     if delivery.doorstep_otp_attempts >= 5:
         raise ValidationError("Maximum OTP attempts exceeded. Contact support.")
 
-    if str(submitted_otp).strip() != str(delivery.doorstep_otp).strip():
+    is_valid = False
+    if delivery.doorstep_otp_hash:
+        is_valid = check_otp(delivery.doorstep_otp_hash, delivery.id, 'doorstep', submitted_otp)
+    elif delivery.doorstep_otp:
+        is_valid = hmac.compare_digest(str(submitted_otp).strip(), str(delivery.doorstep_otp).strip())
+    elif delivery.secret_otp:
+        is_valid = hmac.compare_digest(str(submitted_otp).strip(), str(delivery.secret_otp).strip())
+
+    if not is_valid:
         delivery.doorstep_otp_attempts += 1
         delivery.save()
         if delivery.doorstep_otp_attempts >= 5:
