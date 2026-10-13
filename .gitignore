@@ -65,4 +65,4 @@ backend/staticfiles/
 Thumbs.db
 
 # Root IDE junction
-apps
+/apps
