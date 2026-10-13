@@ -281,3 +281,24 @@ class EndToEndContractFlowTestCase(TestCase):
         self.assertEqual(res_review.data['review']['shelter_rating'], 5)
         self.assertEqual(res_review.data['review']['driver_rating'], 5)
         self.assertEqual(AdoptionReview.objects.filter(application_id=app_id).count(), 1)
+
+    def test_cors_preflight_and_allowed_origins(self):
+        # Preflight OPTIONS request from Next.js origin
+        response = self.client.options(
+            '/api/pets/',
+            HTTP_ORIGIN='http://localhost:3000',
+            HTTP_ACCESS_CONTROL_REQUEST_METHOD='GET',
+            HTTP_ACCESS_CONTROL_REQUEST_HEADERS='authorization,content-type'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.headers.get('Access-Control-Allow-Origin'), 'http://localhost:3000')
+        self.assertEqual(response.headers.get('Access-Control-Allow-Credentials'), 'true')
+
+        # Request from 127.0.0.1:3000
+        res2 = self.client.get('/api/pets/', HTTP_ORIGIN='http://127.0.0.1:3000')
+        self.assertEqual(res2.headers.get('Access-Control-Allow-Origin'), 'http://127.0.0.1:3000')
+
+        # Request from disallowed origin should not include Access-Control-Allow-Origin
+        res_disallowed = self.client.get('/api/pets/', HTTP_ORIGIN='http://malicious-site.com')
+        self.assertNotIn('Access-Control-Allow-Origin', res_disallowed.headers)
+
