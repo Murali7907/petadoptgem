@@ -31,7 +31,8 @@ from .serializers import (
 from .services import (
     assign_delivery_task,
     verify_pickup_otp,
-    verify_doorstep_otp
+    verify_doorstep_otp,
+    dispatch_doorstep_otp
 )
 from .payment_services import (
     create_razorpay_order,
@@ -113,6 +114,7 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
             return Response({"detail": "Driver is not registered under your shelter."}, status=status.HTTP_400_BAD_REQUEST)
 
         delivery = assign_delivery_task(application=application, driver=driver, payment_method=payment_method)
+        dispatch_doorstep_otp(delivery)
         response_serializer = ShelterDeliverySerializer(delivery)
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
@@ -186,12 +188,32 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
         otp_code = serializer.validated_data['otp']
         verify_pickup_otp(delivery, otp_code)
+        dispatch_doorstep_otp(delivery)
 
         updated_serializer = DeliveryDriverTaskSerializer(delivery)
         return Response({
             "message": "Pickup OTP verified successfully. Task is now out for delivery.",
             "delivery": updated_serializer.data
         }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['patch', 'post'], url_path='status', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
+    def update_status(self, request, *args, **kwargs):
+        delivery = self.get_object()
+        new_status = request.data.get('status')
+        if not new_status:
+            return Response({"detail": "Status field is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        normalized_status = 'out_for_delivery' if new_status in ['in_transit', 'out_for_delivery'] else new_status
+        delivery.status = normalized_status
+        if normalized_status == 'out_for_delivery' and not delivery.dispatched_at:
+            delivery.dispatched_at = timezone.now()
+        delivery.save()
+
+        if new_status in ['in_transit', 'out_for_delivery', 'assigned']:
+            dispatch_doorstep_otp(delivery)
+
+        updated_serializer = DeliveryDriverTaskSerializer(delivery)
+        return Response(updated_serializer.data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='verify-doorstep', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
     def verify_doorstep(self, request, *args, **kwargs):

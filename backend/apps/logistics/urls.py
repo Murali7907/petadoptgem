@@ -35,5 +35,8 @@ urlpatterns = [
     path('<str:id>/verify-otp/', DriverDeliveryViewSet.as_view({'post': 'verify_doorstep'}), name='delivery-verify-otp'),
     path('<uuid:public_id>/verify-otp/', DriverDeliveryViewSet.as_view({'post': 'verify_doorstep'}), name='delivery-verify-otp-uuid'),
     path('<str:id>/verify-doorstep/', DriverDeliveryViewSet.as_view({'post': 'verify_doorstep'}), name='delivery-verify-doorstep'),
+    # PATCH/POST /api/deliveries/<id>/status/
+    path('<str:id>/status/', DriverDeliveryViewSet.as_view({'patch': 'update_status', 'post': 'update_status'}), name='delivery-status'),
+    path('<uuid:public_id>/status/', DriverDeliveryViewSet.as_view({'patch': 'update_status', 'post': 'update_status'}), name='delivery-status-uuid'),
     path('', include(router.urls)),
 ]

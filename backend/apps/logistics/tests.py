@@ -11,6 +11,7 @@ import hmac
 from decimal import Decimal
 from unittest.mock import patch, MagicMock
 from django.conf import settings
+from django.core import mail
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -20,7 +21,11 @@ from apps.accounts.models import User, ShelterProfile, DeliveryProfile
 from apps.pets.models import Pet
 from apps.adoptions.models import AdoptionApplication
 from apps.logistics.models import PetDelivery, DeliveryLocationPing, Payment
-from apps.logistics.services import assign_delivery_task, verify_pickup_otp
+from apps.logistics.services import (
+    assign_delivery_task,
+    verify_pickup_otp,
+    dispatch_doorstep_otp
+)
 
 
 class LogisticsTestCase(TestCase):
@@ -338,4 +343,151 @@ class LogisticsTestCase(TestCase):
 
         payment.refresh_from_db()
         self.assertEqual(payment.status, 'failed')
+
+
+class DoorstepOTPDispatchTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+        self.shelter_user = User.objects.create_user(
+            username='alert_shelter',
+            email='shelter@alerts.org',
+            password='password123',
+            role='shelter',
+            phone='1112223333',
+            address='100 Shelter Blvd'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user,
+            organization_name='Alert Shelter',
+            pickup_address='100 Shelter Blvd'
+        )
+
+        self.driver_user = User.objects.create_user(
+            username='alert_driver',
+            email='driver@alerts.org',
+            password='password123',
+            role='delivery',
+            phone='9998887777'
+        )
+        self.driver_profile = DeliveryProfile.objects.create(
+            user=self.driver_user,
+            shelter=self.shelter_profile,
+            vehicle_type='car',
+            vehicle_number='KA-05-CD-5678',
+            is_available=True
+        )
+
+        self.customer_user = User.objects.create_user(
+            username='alert_customer',
+            email='customer@alerts.org',
+            password='password123',
+            role='customer',
+            phone='4445556666',
+            address='200 Adopter Lane'
+        )
+
+        self.pet = Pet.objects.create(
+            shelter=self.shelter_profile,
+            name='Luna',
+            species='cat',
+            breed='Siamese',
+            age_months=12,
+            gender='female',
+            status='available'
+        )
+
+        self.application = AdoptionApplication.objects.create(
+            applicant=self.customer_user,
+            pet=self.pet,
+            status='approved',
+            living_situation='Apartment',
+            dropoff_address=self.customer_user.address,
+            contact_phone=self.customer_user.phone
+        )
+
+    def test_dispatch_doorstep_otp_service_success(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        mail.outbox.clear()
+
+        result = dispatch_doorstep_otp(delivery)
+        self.assertTrue(result)
+        self.assertEqual(len(mail.outbox), 1)
+
+        sent_email = mail.outbox[0]
+        self.assertEqual(sent_email.to, [self.customer_user.email])
+        self.assertIn(self.pet.name, sent_email.subject)
+        self.assertIn(delivery.secret_otp, sent_email.body)
+        self.assertEqual(len(delivery.secret_otp), 6)
+        self.assertIn(self.customer_user.username, sent_email.body)
+        self.assertIn(self.driver_user.username, sent_email.body)
+        self.assertIn(self.driver_user.phone, sent_email.body)
+
+    def test_dispatch_doorstep_otp_triggered_on_assignment_view(self):
+        mail.outbox.clear()
+        self.client.force_authenticate(user=self.shelter_user)
+        url = '/api/v1/shelter/deliveries/assign/'
+        payload = {
+            'application_public_id': str(self.application.public_id),
+            'driver_public_id': str(self.driver_profile.public_id),
+            'payment_method': 'cod'
+        }
+        response = self.client.post(url, payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        delivery = PetDelivery.objects.get(application=self.application)
+        self.assertEqual(len(mail.outbox), 1)
+        sent_email = mail.outbox[0]
+        self.assertEqual(sent_email.to, [self.customer_user.email])
+        self.assertIn(delivery.secret_otp, sent_email.body)
+
+    def test_dispatch_doorstep_otp_triggered_on_pickup_transition_to_in_transit(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        mail.outbox.clear()
+
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+        response = self.client.post(url, {'otp': delivery.pickup_otp}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, 'out_for_delivery')
+        self.assertEqual(len(mail.outbox), 1)
+        sent_email = mail.outbox[0]
+        self.assertEqual(sent_email.to, [self.customer_user.email])
+        self.assertIn(delivery.secret_otp, sent_email.body)
+
+    def test_dispatch_doorstep_otp_triggered_on_status_update_in_transit(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        mail.outbox.clear()
+
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/status/'
+        response = self.client.post(url, {'status': 'in_transit'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, 'out_for_delivery')
+        self.assertEqual(len(mail.outbox), 1)
+        sent_email = mail.outbox[0]
+        self.assertEqual(sent_email.to, [self.customer_user.email])
+        self.assertIn(delivery.secret_otp, sent_email.body)
+
+    def test_dispatch_doorstep_otp_graceful_error_handling(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        mail.outbox.clear()
+
+        # 1. Customer with no email address returns False gracefully
+        self.customer_user.email = ''
+        self.customer_user.save()
+        result = dispatch_doorstep_otp(delivery)
+        self.assertFalse(result)
+        self.assertEqual(len(mail.outbox), 0)
+
+        # 2. send_mail exception is caught and logged, returning False without raising
+        self.customer_user.email = 'customer@alerts.org'
+        self.customer_user.save()
+        with patch('apps.logistics.services.send_mail', side_effect=RuntimeError("SMTP Server down")):
+            result_ex = dispatch_doorstep_otp(delivery)
+            self.assertFalse(result_ex)
 

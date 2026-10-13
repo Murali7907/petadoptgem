@@ -1,3 +1,4 @@
+import logging
 import secrets
 import sys
 from datetime import timedelta
@@ -8,12 +9,16 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from django.conf import settings
+from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from .models import PetDelivery
 from apps.accounts.models import DeliveryProfile
 from apps.adoptions.models import AdoptionApplication
+
+logger = logging.getLogger(__name__)
 
 def generate_secure_otp() -> str:
     """
@@ -143,3 +148,84 @@ def verify_doorstep_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
         application.save()
 
     return True
+
+
+def dispatch_doorstep_otp(delivery: PetDelivery) -> bool:
+    """
+    Automated doorstep verification OTP and status dispatch service for pet deliveries.
+    Extracts customer.email, customer.username, pet.name, driver.user.username,
+    driver.user.phone, and secret_otp, formatting and sending an email alerting the adopter
+    that their delivery is on the way with their confidential verification OTP.
+
+    Returns True if successfully dispatched, False otherwise.
+    """
+    try:
+        application = getattr(delivery, 'application', None)
+        if not application:
+            logger.error(f"Cannot dispatch OTP: Delivery #{getattr(delivery, 'id', 'unknown')} has no linked application.")
+            return False
+
+        customer = getattr(application, 'customer', None) or getattr(application, 'applicant', None)
+        if not customer:
+            logger.error(f"Cannot dispatch OTP: Application #{application.id} has no customer.")
+            return False
+
+        pet = getattr(application, 'pet', None)
+        driver = getattr(delivery, 'driver', None)
+        driver_user = getattr(driver, 'user', None) if driver else None
+
+        customer_email = getattr(customer, 'email', None)
+        customer_username = getattr(customer, 'username', 'Valued Adopter')
+        pet_name = getattr(pet, 'name', 'your pet')
+        driver_username = getattr(driver_user, 'username', 'Assigned Delivery Partner')
+        driver_phone = getattr(driver_user, 'phone', '') or 'Not provided'
+        secret_otp = getattr(delivery, 'secret_otp', None) or getattr(delivery, 'doorstep_otp', None)
+
+        if not secret_otp:
+            logger.error(f"Cannot dispatch OTP: Delivery #{delivery.id} has no secret_otp.")
+            return False
+
+        if not customer_email:
+            logger.warning(f"Delivery #{delivery.id}: Customer {customer_username} has no email address.")
+            return False
+
+        subject = f"Your Pet Delivery for {pet_name} is on the way! Doorstep Verification OTP"
+        message = (
+            f"Hello {customer_username},\n\n"
+            f"Great news! Your pet delivery for {pet_name} is on the way!\n\n"
+            f"Delivery Driver Details:\n"
+            f"- Driver Name: {driver_username}\n"
+            f"- Contact Phone: {driver_phone}\n\n"
+            f"Your confidential 6-digit doorstep verification OTP is: {secret_otp}\n\n"
+            f"Please share this confidential verification OTP with your driver ONLY after they arrive "
+            f"at your doorstep and you have verified the arrival and safety of {pet_name}.\n\n"
+            f"Thank you for adopting through KindHeart Pet Adoption Platform!\n"
+        )
+
+        from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@kindheart.org')
+        send_mail(
+            subject=subject,
+            message=message,
+            from_email=from_email,
+            recipient_list=[customer_email],
+            fail_silently=False,
+        )
+        logger.info(f"Successfully dispatched doorstep OTP for delivery #{delivery.id} to {customer_email}")
+
+        # In-App Notification (if Notification model is available)
+        try:
+            from apps.accounts.models import Notification
+            Notification.objects.create(
+                recipient=customer,
+                title=f"Delivery Alert: {pet_name} is on the way!",
+                message=f"Driver {driver_username} ({driver_phone}) is on the way with {pet_name}. Your 6-digit verification OTP is {secret_otp}.",
+                notification_type='delivery'
+            )
+        except Exception:
+            pass
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to dispatch doorstep OTP for delivery #{getattr(delivery, 'id', 'unknown')}: {str(e)}", exc_info=True)
+        return False
