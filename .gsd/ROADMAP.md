@@ -70,20 +70,20 @@ updated: 2026-10-13T21:45:00+05:30
 ---
 
 ### Phase 4: Delivery Workflow Refactoring & Reissue
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 **Objective:** Align lifecycle transitions so doorstep OTP is issued only upon shelter pickup, remove plaintext leakage from serializers, and introduce shelter reissue.
 **Tasks:**
-- [ ] Task 4.1: Refactor `assign_delivery_task` to issue only pickup OTP, notify adopter without OTP, and return plaintext pickup OTP once to shelter.
-- [ ] Task 4.2: Refactor pickup transition to issue doorstep OTP, send email to customer with sent timestamp, and create in-app notification without OTP text.
-- [ ] Task 4.3: Implement `reissue_otp` endpoint in `ShelterDeliveryViewSet` for pickup and doorstep purposes.
-- [ ] Task 4.4: Strip `pickup_otp` and `doorstep_otp` from `DeliveryDriverTaskSerializer`, `ShelterDeliverySerializer`, and `DeliveryCustomerSerializer`.
-- [ ] Task 4.5: Enforce strict `update_status` transitions (allow only `failed`, reject arbitrary strings and skip-transitions).
-**Required Proof:** API endpoint tests asserting serializer fields, reissue flow, and transition barriers.
+- [x] Task 4.1: Refactor `assign_delivery_task` to issue only pickup OTP, notify adopter without OTP, and return plaintext pickup OTP once to shelter.
+- [x] Task 4.2: Refactor pickup transition to issue doorstep OTP, send email to customer with sent timestamp, and create in-app notification without OTP text.
+- [x] Task 4.3: Implement `reissue_otp` endpoint in `ShelterDeliveryViewSet` for pickup and doorstep purposes.
+- [x] Task 4.4: Strip `pickup_otp` and `doorstep_otp` from `DeliveryDriverTaskSerializer`, `ShelterDeliverySerializer`, and `DeliveryCustomerSerializer`.
+- [x] Task 4.5: Enforce strict `update_status` transitions (allow only `failed`, reject arbitrary strings and skip-transitions).
+**Required Proof:** API endpoint tests asserting serializer fields, reissue flow, and transition barriers (`scratch/test_phase4_workflow.py` passing, commit `263166c`).
 
 ---
 
 ### Phase 5: Verification Endpoints Hardening
-**Status:** ⬜ Not Started
+**Status:** 🔄 In Progress
 **Objective:** Secure verification endpoints with concurrency locking, rate limiting, and distinct status codes.
 **Tasks:**
 - [ ] Task 5.1: Harden `pickup` view with `select_for_update()`, 6-digit regex validation, `'otp_verify'` throttle scope, and attempt tracking.
@@ -122,10 +122,11 @@ updated: 2026-10-13T21:45:00+05:30
 | Phase | Description | Status | Tasks Complete |
 |---|---|---|---|
 | Phase 0 | Inspect & Audit | ✅ Complete | 1/1 |
-| Phase 1 | Settings Hardening | ⬜ Not Started | 0/5 |
-| Phase 2 | Schema Migrations | ⬜ Not Started | 0/4 |
-| Phase 3 | OTP Cryptographic Helpers | ⬜ Not Started | 0/3 |
-| Phase 4 | Workflow Refactoring & Reissue | ⬜ Not Started | 0/5 |
-| Phase 5 | Verify Endpoints Hardening | ⬜ Not Started | 0/4 |
+| Phase 1 | Settings Hardening | ✅ Complete | 5/5 |
+| Phase 2 | Schema Migrations | ✅ Complete | 4/4 |
+| Phase 3 | OTP Cryptographic Helpers | ✅ Complete | 3/3 |
+| Phase 4 | Workflow Refactoring & Reissue | ✅ Complete | 5/5 |
+| Phase 5 | Verify Endpoints Hardening | 🔄 In Progress | 0/4 |
 | Phase 6 | URL Routing | ⬜ Not Started | 0/2 |
 | Phase 7 | Tests & Verification Proof | ⬜ Not Started | 0/5 |
+
