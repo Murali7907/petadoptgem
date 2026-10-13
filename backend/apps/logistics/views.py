@@ -32,7 +32,8 @@ from .services import (
     assign_delivery_task,
     verify_pickup_otp,
     verify_doorstep_otp,
-    dispatch_doorstep_otp
+    dispatch_doorstep_otp,
+    reissue_delivery_otp,
 )
 from .payment_services import (
     create_razorpay_order,
@@ -47,6 +48,7 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
     """
     Endpoints for shelter admins to assign and manage deliveries.
     - POST /api/v1/shelter/deliveries/assign/
+    - POST /api/v1/shelter/deliveries/<id>/reissue-otp/
     - GET  /api/v1/shelter/deliveries/drivers/
     - GET  /api/v1/shelter/deliveries/
     """
@@ -59,6 +61,24 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
         if not hasattr(user, 'shelter_profile') or not user.shelter_profile:
             raise ValidationError({"detail": "User is not associated with a shelter profile."})
         return user.shelter_profile
+
+    def get_object(self):
+        lookup_val = self.kwargs.get(self.lookup_field) or self.kwargs.get('id') or self.kwargs.get('pk')
+        import uuid
+        obj = None
+        if lookup_val:
+            try:
+                val = uuid.UUID(str(lookup_val))
+                obj = PetDelivery.objects.filter(public_id=val).first()
+            except (ValueError, TypeError, AttributeError):
+                pass
+            if not obj and str(lookup_val).isdigit():
+                obj = PetDelivery.objects.filter(id=int(lookup_val)).first()
+            if not obj:
+                obj = PetDelivery.objects.filter(public_id=lookup_val).first()
+        if not obj:
+            raise NotFound({"detail": f"Delivery with ID '{lookup_val}' not found."})
+        return obj
 
     def list(self, request):
         shelter = self.get_shelter_profile()
@@ -114,9 +134,31 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
             return Response({"detail": "Driver is not registered under your shelter."}, status=status.HTTP_400_BAD_REQUEST)
 
         delivery = assign_delivery_task(application=application, driver=driver, payment_method=payment_method)
-        dispatch_doorstep_otp(delivery)
         response_serializer = ShelterDeliverySerializer(delivery)
-        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        data = dict(response_serializer.data)
+        if hasattr(delivery, 'raw_pickup_otp') and delivery.raw_pickup_otp:
+            data['pickup_otp'] = delivery.raw_pickup_otp
+        return Response(data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='reissue-otp')
+    def reissue_otp(self, request, *args, **kwargs):
+        delivery = self.get_object()
+        user = request.user
+        if not (user.is_staff or user.is_superuser):
+            shelter = self.get_shelter_profile()
+            if not delivery.application or not delivery.application.pet or delivery.application.pet.shelter_id != shelter.id:
+                return Response({"detail": "Delivery belongs to a different shelter."}, status=status.HTTP_403_FORBIDDEN)
+
+        purpose = request.data.get('purpose')
+        if not purpose or purpose not in ['pickup', 'doorstep']:
+            return Response({"detail": "Purpose must be 'pickup' or 'doorstep'."}, status=status.HTTP_400_BAD_REQUEST)
+
+        from rest_framework.exceptions import APIException
+        try:
+            result = reissue_delivery_otp(delivery, purpose)
+            return Response(result, status=status.HTTP_200_OK)
+        except APIException as e:
+            return Response({"detail": e.detail}, status=e.status_code)
 
     @action(detail=False, methods=['get'], url_path='drivers')
     def drivers(self, request):
@@ -193,7 +235,6 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
         otp_code = serializer.validated_data['otp']
         verify_pickup_otp(delivery, otp_code)
-        dispatch_doorstep_otp(delivery)
 
         updated_serializer = DeliveryDriverTaskSerializer(delivery)
         return Response({
@@ -204,26 +245,29 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
     @action(detail=True, methods=['patch', 'post'], url_path='status', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
     def update_status(self, request, *args, **kwargs):
         delivery = self.get_object()
-        new_status = request.data.get('status')
-        if not new_status:
+        raw_status = request.data.get('status')
+        if not raw_status:
             return Response({"detail": "Status field is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Do not allow bypassing doorstep OTP verification
-        if new_status in ['delivered', 'completed']:
+        new_status = str(raw_status).strip().lower()
+
+        # Reject any status other than 'failed'
+        if new_status != 'failed':
             return Response({
-                "detail": "Cannot mark delivery as delivered directly. Doorstep OTP verification is required."
+                "detail": "Invalid status transition. Drivers may only report status as 'failed'. Status 'out_for_delivery' requires pickup OTP verification, and status 'delivered' requires doorstep OTP verification."
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        previous_status = delivery.status
-        normalized_status = 'out_for_delivery' if new_status in ['in_transit', 'out_for_delivery'] else new_status
-        delivery.status = normalized_status
-        if normalized_status == 'out_for_delivery' and not delivery.dispatched_at:
-            delivery.dispatched_at = timezone.now()
-        delivery.save()
+        if delivery.status not in ['assigned', 'out_for_delivery']:
+            return Response({
+                "detail": f"Cannot mark delivery as failed from '{delivery.status}' state."
+            }, status=status.HTTP_409_CONFLICT)
 
-        # Dispatch OTP only when newly transitioning into out_for_delivery
-        if normalized_status == 'out_for_delivery' and previous_status != 'out_for_delivery':
-            dispatch_doorstep_otp(delivery)
+        delivery.status = 'failed'
+        delivery.save(update_fields=['status'])
+
+        if delivery.driver:
+            delivery.driver.is_available = True
+            delivery.driver.save(update_fields=['is_available'])
 
         updated_serializer = DeliveryDriverTaskSerializer(delivery)
         return Response(updated_serializer.data, status=status.HTTP_200_OK)

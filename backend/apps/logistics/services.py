@@ -28,9 +28,80 @@ def generate_secure_otp() -> str:
     """
     return generate_otp()
 
+
+def send_driver_assigned_notice(delivery: PetDelivery) -> bool:
+    """
+    Sends an email and in-app notification to the adopter informing them that a driver
+    has been assigned to their pet's delivery, including driver contact and vehicle info.
+    Does NOT include any OTP.
+    """
+    try:
+        application = getattr(delivery, 'application', None)
+        if not application:
+            return False
+
+        customer = getattr(application, 'customer', None) or getattr(application, 'applicant', None)
+        if not customer:
+            return False
+
+        pet = getattr(application, 'pet', None)
+        driver = getattr(delivery, 'driver', None)
+        driver_user = getattr(driver, 'user', None) if driver else None
+
+        customer_email = getattr(customer, 'email', None)
+        customer_username = getattr(customer, 'username', 'Valued Adopter')
+        pet_name = getattr(pet, 'name', 'your pet')
+        driver_username = getattr(driver_user, 'username', 'Assigned Delivery Partner')
+        driver_phone = getattr(driver_user, 'phone', '') or 'Not provided'
+        vehicle_type = driver.get_vehicle_type_display() if driver else 'Vehicle'
+        vehicle_number = getattr(driver, 'vehicle_number', '') or 'Not provided'
+
+        if customer_email:
+            subject = f"Delivery Scheduled for {pet_name} - Driver Assigned"
+            message = (
+                f"Hello {customer_username},\n\n"
+                f"Great news! A delivery driver has been assigned for {pet_name}'s delivery.\n\n"
+                f"Driver Details:\n"
+                f"- Driver Name: {driver_username}\n"
+                f"- Contact Phone: {driver_phone}\n"
+                f"- Vehicle: {vehicle_type} ({vehicle_number})\n\n"
+                f"Your pet is currently being prepared for pickup at the shelter. "
+                f"When the driver picks up {pet_name} and is on the way to your doorstep, "
+                f"you will receive a separate confidential verification OTP.\n\n"
+                f"Thank you for adopting through KindHeart Pet Adoption Platform!\n"
+            )
+            from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@kindheart.org')
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email=from_email,
+                recipient_list=[customer_email],
+                fail_silently=False,
+            )
+
+        # In-app notification (without OTP)
+        try:
+            from apps.accounts.models import Notification
+            Notification.objects.create(
+                recipient=customer,
+                title=f"Delivery Scheduled for {pet_name}",
+                message=f"Driver {driver_username} ({driver_phone}) has been assigned to deliver {pet_name}. You will receive a verification OTP when the driver is on the way.",
+                notification_type='delivery'
+            )
+        except Exception:
+            pass
+
+        return True
+    except Exception as e:
+        logger.error(f"Error sending driver assigned notice for delivery #{delivery.id}: {e}", exc_info=True)
+        return False
+
+
 def assign_delivery_task(application: AdoptionApplication, driver: DeliveryProfile, payment_method: str = 'unset') -> PetDelivery:
     """
     Assigns an approved application to an available driver inside transaction.atomic().
+    Issues pickup OTP (HMAC hash stored, plaintext returned via raw_pickup_otp attribute).
+    Sends driver-assigned notice to adopter with driver details and NO OTP.
     """
     with transaction.atomic():
         if application.status != 'approved':
@@ -50,19 +121,17 @@ def assign_delivery_task(application: AdoptionApplication, driver: DeliveryProfi
             raise ValidationError("Driver already has an active delivery in progress.")
 
         existing_delivery = getattr(application, 'delivery', None)
-        pickup_code = generate_secure_otp()
-        doorstep_code = generate_secure_otp()
-        expiry_time = timezone.now() + timedelta(hours=12)
 
         if existing_delivery:
             delivery = existing_delivery
             delivery.driver = driver
             delivery.status = 'assigned'
-            delivery.pickup_otp = pickup_code
-            delivery.doorstep_otp = doorstep_code
-            delivery.secret_otp = doorstep_code
-            delivery.expires_at = expiry_time
-            delivery.doorstep_otp_expires_at = expiry_time
+            delivery.pickup_otp = ''
+            delivery.doorstep_otp = ''
+            delivery.secret_otp = ''
+            delivery.doorstep_otp_hash = None
+            delivery.doorstep_otp_sent_at = None
+            delivery.doorstep_otp_expires_at = None
             delivery.pickup_otp_attempts = 0
             delivery.doorstep_otp_attempts = 0
             delivery.save()
@@ -71,14 +140,16 @@ def assign_delivery_task(application: AdoptionApplication, driver: DeliveryProfi
                 application=application,
                 driver=driver,
                 status='assigned',
-                pickup_otp=pickup_code,
-                doorstep_otp=doorstep_code,
-                secret_otp=doorstep_code,
-                expires_at=expiry_time,
-                doorstep_otp_expires_at=expiry_time,
+                pickup_otp='',
+                doorstep_otp='',
+                secret_otp='',
                 pickup_otp_attempts=0,
-                doorstep_otp_attempts=0
+                doorstep_otp_attempts=0,
             )
+
+        # Issue pickup OTP via cryptographic helper
+        raw_pickup_otp = issue_otp(delivery, 'pickup')
+        delivery.raw_pickup_otp = raw_pickup_otp
 
         if payment_method and payment_method != 'unset':
             application.payment_method = payment_method
@@ -87,12 +158,25 @@ def assign_delivery_task(application: AdoptionApplication, driver: DeliveryProfi
         driver.is_available = False
         driver.save()
 
+        # Send adopter notice (driver contact info, NO OTP)
+        try:
+            send_driver_assigned_notice(delivery)
+        except Exception as e:
+            logger.error(f"Failed to send driver assigned notice for delivery #{delivery.id}: {e}", exc_info=True)
+
         return delivery
 
 
 def verify_pickup_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
     """
     Verifies pickup OTP submitted by driver at shelter.
+    On success:
+      - Marks delivery status='out_for_delivery', dispatched_at=now.
+      - Clears pickup_otp_hash and plaintext pickup_otp.
+      - Issues doorstep OTP via issue_otp(delivery, 'doorstep').
+      - Emails plaintext doorstep OTP to customer and sets doorstep_otp_sent_at.
+      - In-app notification informs customer delivery is on the way without OTP code.
+      - Email failure logs warning without aborting transition.
     """
     if delivery.status != 'assigned':
         raise ValidationError(f"Cannot verify pickup for delivery in '{delivery.get_status_display()}' state.")
@@ -100,7 +184,8 @@ def verify_pickup_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
     if delivery.expires_at and timezone.now() > delivery.expires_at:
         raise ValidationError("Pickup OTP has expired. Please contact shelter admin.")
 
-    if delivery.pickup_otp_attempts >= 5:
+    max_attempts = getattr(settings, 'OTP_MAX_ATTEMPTS', 3)
+    if delivery.pickup_otp_attempts >= max_attempts:
         raise ValidationError("Maximum pickup OTP attempts exceeded. Contact support.")
 
     is_valid = False
@@ -111,11 +196,27 @@ def verify_pickup_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
 
     if not is_valid:
         delivery.pickup_otp_attempts += 1
-        delivery.save()
+        delivery.save(update_fields=['pickup_otp_attempts'])
         raise ValidationError("Invalid pickup OTP.")
 
     delivery.status = 'out_for_delivery'
     delivery.dispatched_at = timezone.now()
+    delivery.pickup_otp_hash = None
+    delivery.pickup_otp = ''
+
+    # Issue doorstep OTP
+    raw_doorstep_otp = issue_otp(delivery, 'doorstep')
+    delivery.raw_doorstep_otp = raw_doorstep_otp
+
+    # Email customer doorstep OTP (idempotent: only if not already sent)
+    if not delivery.doorstep_otp_sent_at:
+        try:
+            sent = dispatch_doorstep_otp(delivery, raw_otp=raw_doorstep_otp)
+            if sent:
+                delivery.doorstep_otp_sent_at = timezone.now()
+        except Exception as e:
+            logger.error(f"Failed to email doorstep OTP for delivery #{delivery.id}: {e}", exc_info=True)
+
     delivery.save()
     return True
 
@@ -130,7 +231,8 @@ def verify_doorstep_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
     if delivery.doorstep_otp_expires_at and timezone.now() > delivery.doorstep_otp_expires_at:
         raise ValidationError("Doorstep OTP has expired. Contact support.")
 
-    if delivery.doorstep_otp_attempts >= 5:
+    max_attempts = getattr(settings, 'OTP_MAX_ATTEMPTS', 3)
+    if delivery.doorstep_otp_attempts >= max_attempts:
         raise ValidationError("Maximum OTP attempts exceeded. Contact support.")
 
     is_valid = False
@@ -143,35 +245,48 @@ def verify_doorstep_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
 
     if not is_valid:
         delivery.doorstep_otp_attempts += 1
-        delivery.save()
-        if delivery.doorstep_otp_attempts >= 5:
+        delivery.save(update_fields=['doorstep_otp_attempts'])
+        if delivery.doorstep_otp_attempts >= max_attempts:
             raise ValidationError("Maximum OTP attempts exceeded. Contact support.")
         raise ValidationError("Invalid OTP.")
 
     with transaction.atomic():
         delivery.status = 'delivered'
         delivery.delivered_at = timezone.now()
+        delivery.doorstep_otp_hash = None
+        delivery.doorstep_otp = ''
+        delivery.secret_otp = ''
         delivery.save()
 
         if delivery.driver:
             driver = delivery.driver
             driver.is_available = True
-            driver.save()
+            driver.save(update_fields=['is_available'])
 
         application = delivery.application
         application.status = 'completed'
-        application.payment_status = 'paid'
+
+        # Payment status evaluation: paid only if online Payment exists or COD collected
+        payment_verified = False
+        if application.payments.filter(status='paid').exists() or application.payments.filter(status='captured').exists():
+            payment_verified = True
+        elif application.payment_method == 'cod' and delivery.cash_collected > 0:
+            payment_verified = True
+
+        if payment_verified:
+            application.payment_status = 'paid'
+
         application.save()
 
     return True
 
 
-def dispatch_doorstep_otp(delivery: PetDelivery) -> bool:
+def dispatch_doorstep_otp(delivery: PetDelivery, raw_otp: str = None) -> bool:
     """
     Automated doorstep verification OTP and status dispatch service for pet deliveries.
-    Extracts customer.email, customer.username, pet.name, driver.user.username,
-    driver.user.phone, and secret_otp, formatting and sending an email alerting the adopter
-    that their delivery is on the way with their confidential verification OTP.
+    Sends an email with the confidential doorstep verification OTP to the adopter.
+    If raw_otp is not provided, falls back to delivery.raw_doorstep_otp or legacy delivery.secret_otp.
+    Does NOT include OTP in the in-app notification.
 
     Returns True if successfully dispatched, False otherwise.
     """
@@ -195,26 +310,19 @@ def dispatch_doorstep_otp(delivery: PetDelivery) -> bool:
         pet_name = getattr(pet, 'name', 'your pet')
         driver_username = getattr(driver_user, 'username', 'Assigned Delivery Partner')
         driver_phone = getattr(driver_user, 'phone', '') or 'Not provided'
-        secret_otp = getattr(delivery, 'secret_otp', None) or getattr(delivery, 'doorstep_otp', None)
+
+        secret_otp = raw_otp or getattr(delivery, 'raw_doorstep_otp', None) or getattr(delivery, 'secret_otp', None) or getattr(delivery, 'doorstep_otp', None)
 
         if not secret_otp:
-            logger.error(f"Cannot dispatch OTP: Delivery #{delivery.id} has no secret_otp.")
+            logger.error(f"Cannot dispatch OTP: Delivery #{delivery.id} has no raw OTP.")
             return False
 
         if not customer_email:
             logger.warning(f"Delivery #{delivery.id}: Customer {customer_username} has no email address.")
             return False
 
-        delivery_status = getattr(delivery, 'status', 'assigned')
-        if delivery_status in ['out_for_delivery', 'in_transit']:
-            subject = f"Your Pet Delivery for {pet_name} is on the way! Doorstep Verification OTP"
-            stage_message = f"Great news! Your pet delivery for {pet_name} is now on the way to your doorstep!"
-        elif delivery_status == 'assigned':
-            subject = f"Delivery Scheduled for {pet_name} - Doorstep Verification OTP"
-            stage_message = f"Great news! Driver {driver_username} has been assigned for {pet_name}'s delivery."
-        else:
-            subject = f"Delivery Update for {pet_name} - Doorstep Verification OTP"
-            stage_message = f"Your delivery for {pet_name} has updated to status '{delivery_status}'."
+        subject = f"Your Pet Delivery for {pet_name} is on the way! Doorstep Verification OTP"
+        stage_message = f"Great news! Your pet delivery for {pet_name} is now on the way to your doorstep!"
 
         message = (
             f"Hello {customer_username},\n\n"
@@ -242,13 +350,13 @@ def dispatch_doorstep_otp(delivery: PetDelivery) -> bool:
 
         logger.info(f"Successfully dispatched doorstep OTP for delivery #{delivery.id} to {customer_email}")
 
-        # In-App Notification (if Notification model is available)
+        # In-App Notification (without OTP code!)
         try:
             from apps.accounts.models import Notification
             Notification.objects.create(
                 recipient=customer,
                 title=f"Delivery Alert: {pet_name} is on the way!",
-                message=f"Driver {driver_username} ({driver_phone}) is on the way with {pet_name}. Your 6-digit verification OTP is {secret_otp}.",
+                message=f"Driver {driver_username} ({driver_phone}) is on the way with {pet_name}. Check your email for your confidential verification OTP.",
                 notification_type='delivery'
             )
         except Exception:
@@ -259,3 +367,52 @@ def dispatch_doorstep_otp(delivery: PetDelivery) -> bool:
     except Exception as e:
         logger.error(f"Failed to dispatch doorstep OTP for delivery #{getattr(delivery, 'id', 'unknown')}: {str(e)}", exc_info=True)
         return False
+
+
+def reissue_delivery_otp(delivery: PetDelivery, purpose: str) -> dict:
+    """
+    Reissues an OTP for either 'pickup' or 'doorstep' verification.
+    Resets attempt counter and extends expiry time.
+    For doorstep, sends plaintext OTP via email to adopter and updates doorstep_otp_sent_at.
+    """
+    if purpose not in ['pickup', 'doorstep']:
+        raise ValidationError("Purpose must be 'pickup' or 'doorstep'.")
+
+    from rest_framework.exceptions import APIException
+    class Conflict(APIException):
+        status_code = 409
+        default_detail = "Action not valid for current delivery state."
+
+    if purpose == 'pickup':
+        if delivery.status != 'assigned':
+            raise Conflict(detail=f"Cannot reissue pickup OTP for delivery in '{delivery.status}' status.")
+
+        raw_pickup_otp = issue_otp(delivery, 'pickup')
+        return {
+            "detail": "Pickup OTP reissued successfully.",
+            "purpose": "pickup",
+            "pickup_otp": raw_pickup_otp,
+            "expires_at": delivery.expires_at.isoformat() if delivery.expires_at else None
+        }
+
+    elif purpose == 'doorstep':
+        if delivery.status != 'out_for_delivery':
+            raise Conflict(detail=f"Cannot reissue doorstep OTP for delivery in '{delivery.status}' status.")
+
+        raw_doorstep_otp = issue_otp(delivery, 'doorstep')
+        email_sent = False
+        try:
+            email_sent = dispatch_doorstep_otp(delivery, raw_otp=raw_doorstep_otp)
+            if email_sent:
+                delivery.doorstep_otp_sent_at = timezone.now()
+                delivery.save(update_fields=['doorstep_otp_sent_at'])
+        except Exception as e:
+            logger.error(f"Failed to email reissued doorstep OTP for delivery #{delivery.id}: {e}", exc_info=True)
+
+        return {
+            "detail": "Doorstep OTP reissued and emailed to adopter.",
+            "purpose": "doorstep",
+            "email_dispatched": email_sent,
+            "expires_at": delivery.doorstep_otp_expires_at.isoformat() if delivery.doorstep_otp_expires_at else None
+        }
+
