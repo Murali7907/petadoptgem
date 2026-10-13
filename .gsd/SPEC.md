@@ -1,0 +1,267 @@
+# SPEC.md — Pet Delivery OTP & Backend Security Hardening Specification
+
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Spec approved and finalized.
+
+---
+
+## 1. Vision & Background
+The platform is an existing Django 6.1.2 / Django REST Framework 3.18.3 pet adoption and delivery service running on PostgreSQL with SimpleJWT authentication. This specification defines a backend and database security refactoring for the pet delivery workflow, replacing insecure plaintext OTP storage and flawed lifecycle transitions with HMAC-SHA256 hashed one-time passwords, atomic race-condition protected verifications, fail-closed production settings, and automated cryptographic OTP issuance.
+
+---
+
+## 2. Phase 0 — Inspection Findings (Audit Report)
+
+### 2.1 Django and DRF Versions
+- **Django**: `6.1.2`
+- **Django REST Framework**: `3.18.3`
+- **Database Engine**: PostgreSQL (`pet_adoption`, port 5432)
+
+### 2.2 Pre-existing Defect Confirmations
+All 8 defects reported in the prompt were inspected in the codebase and confirmed:
+
+1. **Defect 1: Status Transition Bypass in `update_status`**:
+   - Confirmed in `backend/apps/logistics/views.py` (`DeliveryDriverTaskViewSet.update_status`, lines 205–223).
+   - Allows a driver to PATCH `status="out_for_delivery"` from `assigned`, bypassing shelter pickup OTP verification. Accepts arbitrary status strings (e.g., `"in_transit"`, `"random_string"`).
+2. **Defect 2: Plaintext OTP Exposure in Serializers**:
+   - Confirmed in `backend/apps/logistics/serializers.py`:
+     - `DeliveryDriverTaskSerializer` (line 50) includes `pickup_otp` in exposed fields, allowing the driver to read the shelter's secret code.
+     - `ShelterDeliverySerializer` (lines 199–200) exposes both `pickup_otp` and `doorstep_otp` to the shelter.
+     - `DeliveryCustomerSerializer` (line 145) exposes `doorstep_otp` to the customer via tracking endpoints.
+3. **Defect 3: Doorstep OTP Premature Dispatch & Plaintext Leaks**:
+   - Confirmed in `backend/apps/logistics/views.py` and `services.py`:
+     - `dispatch_doorstep_otp` is called at assignment (`assign_driver`, line 117), pickup (`pickup`, line 196), and status update (`update_status`, line 226).
+     - Customer receives doorstep verification OTP via email before the pet has even been picked up from the shelter.
+     - `services.py` (lines 232–237) creates an in-app `Notification` containing the plaintext OTP in the message body: `"Your 6-digit verification OTP is {secret_otp}"`.
+4. **Defect 4: Plaintext Storage, Hardcoded 5-Attempt Limit, Missing Locks & Throttling**:
+   - Confirmed in `backend/apps/logistics/services.py`:
+     - Plaintext equality comparison: `str(submitted_otp).strip() == str(delivery.doorstep_otp).strip()`.
+     - Hardcoded limit of 5 attempts (`delivery.pickup_otp_attempts >= 5`, `delivery.doorstep_otp_attempts >= 5`).
+     - No `select_for_update()` on verification queries.
+     - All verification errors raise `rest_framework.exceptions.ValidationError` resulting in uniform HTTP 400 responses.
+     - No DRF view throttling scope on verification actions.
+5. **Defect 5: Missing Reissue Mechanism**:
+   - Confirmed: No reissue endpoint exists. If an OTP expires or is locked out after failed attempts, the delivery is permanently stuck, and the driver remains unavailable (`driver.is_available = False`).
+6. **Defect 6: Premature Expiry Timestamp Initialization**:
+   - Confirmed in `backend/apps/logistics/services.py` (`assign_delivery_task`, line 63, 76): `doorstep_otp_expires_at` is set at shelter assignment time (12 hours) instead of when the delivery actually transitions to `out_for_delivery`.
+   - `PetDelivery.save()` in `backend/apps/logistics/models.py` (lines 47–54) auto-generates plaintext `pickup_otp`, `doorstep_otp`, and `secret_otp` on every model save if empty.
+7. **Defect 7: Unconditional Payment Status Mutation & Missing Pet Status Update**:
+   - Confirmed in `backend/apps/logistics/services.py` (`verify_doorstep_otp`, lines 145–149):
+     - `application.payment_status = 'paid'` is set unconditionally regardless of whether online payment succeeded or COD was collected.
+     - `pet = application.pet` is never updated to `status = 'adopted'`.
+8. **Defect 8: Permissive Settings Defaults**:
+   - Confirmed in `backend/config/settings.py`:
+     - `DEBUG` defaults to `True` (line 15).
+     - `ALLOWED_HOSTS` defaults to `'*'` (line 18).
+     - `SECRET_KEY` falls back to `'django-insecure-pet-adoption-secret-key'` (line 12).
+     - `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` fall back to mock strings unconditionally without checking `DEBUG`.
+     - `CORS_ALLOWED_ORIGINS` hardcoded to localhost (lines 229–232); `CSRF_TRUSTED_ORIGINS` absent.
+
+### 2.3 Call Sites of `dispatch_doorstep_otp`
+- `backend/apps/logistics/views.py`:
+  - Line 117: inside `ShelterDeliveryViewSet.assign_driver`
+  - Line 196: inside `DeliveryDriverTaskViewSet.pickup`
+  - Line 226: inside `DeliveryDriverTaskViewSet.update_status`
+- `backend/apps/logistics/services.py`:
+  - Line 153: function definition
+- `backend/apps/logistics/tests.py`:
+  - Lines 409, 426, 444, 460, 476 (legacy tests asserting old dispatch behavior)
+
+### 2.4 Existing Logistics Tests Asserting OTP Behavior
+- `test_driver_assignment_and_availability_toggle` (lines 116–117): asserts 6-digit plaintext OTPs generated on assignment.
+- `test_pickup_otp_verification` (line 173): submits `delivery.pickup_otp`.
+- `test_doorstep_otp_brute_force_protection` (lines 180–204): asserts 5-attempt limit returns 400.
+- `test_successful_doorstep_otp_verification` (lines 205–225): asserts doorstep completion.
+- `test_dispatch_doorstep_otp_*` (lines 409–494): 5 tests asserting OTP dispatch email content and triggers.
+
+### 2.5 Pet and Application Status Transitions
+- `application.status`:
+  - `adoptions/views.py`: line 132 set to `'approved'` on shelter approval.
+  - `adoptions/views.py`: line 166, 377 status validation.
+  - `logistics/services.py`: line 146 set to `'completed'` upon doorstep delivery.
+- `Pet.status`:
+  - `adoptions/views.py`: line 138 set to `'pending'` on shelter approval.
+  - `backend/schema.sql` (line 261): Trigger had `UPDATE pets SET status = 'adopted' WHERE id = NEW.pet_id`, but in Django application code `pet.status = 'adopted'` was **never set**.
+
+### 2.6 Existing Indexes and Constraints on `pet_deliveries`
+- **Postgres Indexes**:
+  - `pet_deliveries_pkey`: UNIQUE btree (`id`)
+  - `pet_deliveries_public_id_key`: UNIQUE btree (`public_id`)
+  - `pet_deliveries_application_id_key`: UNIQUE btree (`application_id`)
+  - No index on `(status)` or `(driver, status)`.
+- **Postgres Constraints**:
+  - Primary key, foreign keys, not-null constraints.
+  - Zero check constraints.
+- **Data Validation**:
+  - Existing DB rows satisfy `attempts >= 0` and `status = 'delivered' implies delivered_at IS NOT NULL`.
+
+### 2.7 In-Flight Deliveries in Dev Database
+- **Total Deliveries in PostgreSQL**: 2
+  - Delivery ID 4: `status = 'delivered'`, `delivered_at = 2026-10-05 18:02:06 UTC`.
+  - Delivery ID 3: `status = 'out_for_delivery'`, `pickup_otp = '582910'`, `doorstep_otp = '419283'`, `secret_otp = '419283'`, `expires_at = None`, `doorstep_otp_expires_at = None`.
+- **Confirmation**: Dev data contains 1 active in-flight delivery holding plaintext OTPs and missing expiries. The data migration in Phase 2 must hash these values, blank the plaintext fields, and populate sensible expiries.
+
+### 2.8 Payment Representation (COD vs Online)
+- `AdoptionApplication.payment_method`: `'unset'`, `'online'`, `'cod'`
+- `AdoptionApplication.payment_status`: `'pending'`, `'paid'`, `'failed'`
+- `Payment` model: `amount`, `payment_method`, `status` (`'created'`, `'paid'`, `'failed'`), `razorpay_payment_id`
+- `PetDelivery`: `cash_collected` (Decimal), `is_cash_settled_with_shelter` (Boolean)
+- **Phase 5 Payment Decision**: When doorstep OTP is verified:
+  - If `application.payment_method == 'online'`: check if a verified `Payment` row with `status='paid'` exists. If yes, set `application.payment_status = 'paid'`.
+  - If `application.payment_method == 'cod'`: check if `delivery.cash_collected >= application.total_amount` (and total > 0). If yes, set `application.payment_status = 'paid'`.
+  - Otherwise, leave `application.payment_status` unchanged (e.g. `'pending'`).
+
+---
+
+## 3. Goals & Requirements by Phase
+
+### Phase 1 — Settings Hardening (Fail-Closed)
+1. `DEBUG`: defaults to `False`. Local dev `.env` and `backend/.env.example` explicitly set `DEBUG=True`.
+2. `ALLOWED_HOSTS`: read from env. When `DEBUG=False`, wildcard `*` is forbidden and raises `ImproperlyConfigured` or requires explicit hosts. When `DEBUG=True`, defaults to `['localhost', '127.0.0.1']`.
+3. Secrets: `SECRET_KEY`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` must raise `django.core.exceptions.ImproperlyConfigured` if missing or empty when `DEBUG=False`. Mock fallbacks allowed only when `DEBUG=True`.
+4. CORS & CSRF: `CORS_ALLOWED_ORIGINS` and `CSRF_TRUSTED_ORIGINS` read from env as comma-separated lists, defaulting to `http://localhost:3000,http://127.0.0.1:3000` in dev. Include code comment noting that authentication is JWT-only (stateless SimpleJWT headers) so CSRF cookies do not apply to DRF API endpoints.
+5. Rate Limiting & TTL:
+   - `OTP_TTL_MINUTES`: default `1440` (24 hours).
+   - `OTP_MAX_ATTEMPTS`: default `3`.
+   - DRF Throttle: Add `'otp_verify': os.getenv('OTP_THROTTLE_RATE', '10/min')` to `DEFAULT_THROTTLE_RATES`.
+6. Confirm local media serving still works with `DEBUG=True`.
+
+### Phase 2 — Schema Migrations (Additive, Reversible PostgreSQL)
+1. Additive fields on `PetDelivery`:
+   - `pickup_otp_hash = models.CharField(max_length=64, null=True, blank=True)`
+   - `doorstep_otp_hash = models.CharField(max_length=64, null=True, blank=True)`
+   - `doorstep_otp_sent_at = models.DateTimeField(null=True, blank=True)`
+2. Preserve legacy fields: `pickup_otp`, `doorstep_otp`, `secret_otp` remain in schema (`blank=True, default=''`), never dropped or renamed.
+3. Indexes:
+   - Index on `(status)`
+   - Index on `(driver, status)`
+4. CheckConstraints:
+   - `check_pickup_otp_attempts_gte_0`: `pickup_otp_attempts >= 0`
+   - `check_doorstep_otp_attempts_gte_0`: `doorstep_otp_attempts >= 0`
+   - `check_delivered_has_delivered_at`: `Q(status='delivered', delivered_at__isnull=False) | ~Q(status='delivered')`
+5. Data Migration:
+   - Forward: inspect existing deliveries with status not in `('delivered', 'failed')` having non-empty plaintext OTPs. Hash them using `hash_otp(delivery.id, purpose, otp)`, populate `pickup_otp_hash` and `doorstep_otp_hash`, blank the plaintext fields, and set missing `expires_at` / `doorstep_otp_expires_at` to `now + OTP_TTL_MINUTES`.
+   - Backward: reversible no-op with documented explanation.
+6. Verify forward and backward migration on PostgreSQL.
+
+### Phase 3 — OTP Cryptographic Helpers (`backend/apps/logistics/otp.py`)
+1. `generate_otp() -> str`: Generate cryptographically secure 6-digit decimal string (`secrets.choice(string.digits)` or `secrets.randbelow(900000) + 100000`).
+2. `hash_otp(delivery_id: int | str, purpose: str, otp: str) -> str`: HMAC-SHA256 keyed by `settings.SECRET_KEY.encode('utf-8')`. Message formatted as `f"{delivery_id}:{purpose}:{otp}".encode('utf-8')`. Returns 64-character hex digest.
+3. `check_otp(stored_hash: str | None, delivery_id: int | str, purpose: str, submitted: str) -> bool`: Computes HMAC-SHA256 and uses `hmac.compare_digest(stored_hash, computed_hash)`.
+4. `issue_otp(delivery: PetDelivery, purpose: str) -> str`:
+   - Validates purpose in `('pickup', 'doorstep')`.
+   - Generates 6-digit OTP plaintext.
+   - Computes hash and saves to `pickup_otp_hash` or `doorstep_otp_hash`.
+   - Sets `pickup_otp_attempts = 0` or `doorstep_otp_attempts = 0`.
+   - Sets `expires_at` or `doorstep_otp_expires_at` to `now + timedelta(minutes=settings.OTP_TTL_MINUTES)`.
+   - Blanks plaintext legacy columns (`pickup_otp = ''` or `doorstep_otp = ''`, `secret_otp = ''`).
+   - Persists changes without logging or printing plaintext.
+   - Returns plaintext string to caller for single-use dispatch.
+5. Clean up `PetDelivery.save()`: Remove auto-generation of plaintext OTPs.
+
+### Phase 4 — Delivery Workflow Refactoring & Reissue
+1. **Assignment Flow (`assign_delivery_task`)**:
+   - Issue pickup OTP via `issue_otp(delivery, 'pickup')`.
+   - Return plaintext pickup OTP once to the shelter in the assign response.
+   - Do **NOT** generate or email doorstep OTP at assignment.
+   - Send Adopter notification (email + in-app `Notification`): Inform them driver has been assigned with driver name, vehicle details, and contact number. Contains **NO OTP**.
+   - Remove legacy `dispatch_doorstep_otp` calls from assignment.
+2. **Pickup Verification Flow (`pickup`)**:
+   - Driver submits pickup OTP at shelter.
+   - On successful verification:
+     - Delivery transitions to `out_for_delivery`, `dispatched_at = timezone.now()`.
+     - Call `issue_otp(delivery, 'doorstep')` (expiry = now + `OTP_TTL_MINUTES`).
+     - Email doorstep OTP plaintext to customer.
+     - Set `doorstep_otp_sent_at = timezone.now()`.
+     - In-app notification text: `"Driver is on the way with {pet_name}. Check your email for your confidential verification OTP."` (contains **no code**).
+     - Idempotent: if `doorstep_otp_sent_at` is already set, do not re-email.
+     - Email failure resilience: log exception, do not abort transition, leave `doorstep_otp_sent_at` NULL so shelter reissue can resend.
+3. **Reissue Endpoint**:
+   - Route: `POST /api/v1/shelter/deliveries/<id>/reissue-otp/`
+   - Permissions: Authenticated shelter owning the delivery, or platform admin.
+   - Payload: `{"purpose": "pickup" | "doorstep"}`
+   - Action:
+     - If purpose is `pickup`: issue new pickup OTP, return plaintext in response body `{"pickup_otp": "...", "expires_at": "..."}`.
+     - If purpose is `doorstep`: issue new doorstep OTP, email plaintext to customer, set `doorstep_otp_sent_at`, return `{"detail": "Doorstep OTP reissued and emailed to adopter."}`.
+4. **Serializer Hardening**:
+   - `DeliveryDriverTaskSerializer`: Remove `pickup_otp`.
+   - `ShelterDeliverySerializer`: Remove `pickup_otp` and `doorstep_otp`. Expose `pickup_otp_attempts`, `doorstep_otp_attempts`, `expires_at`, `doorstep_otp_expires_at`, `doorstep_otp_sent_at`.
+   - `DeliveryCustomerSerializer`: Remove `doorstep_otp`.
+5. **Strict `update_status` Transition Rules**:
+   - Drivers may only set `'failed'` (from `'assigned'` or `'out_for_delivery'`), which frees the driver (`is_available = True`).
+   - Reject `'out_for_delivery'`, `'delivered'`, `'in_transit'`, or case variations with HTTP 400.
+   - `'out_for_delivery'` reachable ONLY via pickup OTP verification.
+   - `'delivered'` reachable ONLY via doorstep OTP verification.
+
+### Phase 5 — Verification Endpoints Hardening
+For both `pickup` and `verify_doorstep` (canonical and legacy aliases):
+1. **Permission**: Assigned driver only (HTTP 403 otherwise).
+2. **Input Validation**: Exactly 6 numeric digits via regex `^\d{6}$`. Malformed input returns HTTP 400 without incrementing attempt counter.
+3. **Concurrency Control**: `transaction.atomic()` with `select_for_update()` on `PetDelivery`.
+4. **State Machine Checks**:
+   - Pickup: requires `status == 'assigned'`.
+   - Doorstep: requires `status == 'out_for_delivery'`. If already `'delivered'`, return HTTP 200 idempotently without re-executing transitions. Other states return HTTP 409 Conflict.
+5. **Lockout & Expiry**:
+   - `attempts >= OTP_MAX_ATTEMPTS`: HTTP 423 Locked (`{"detail": "Maximum OTP verification attempts exceeded. Please contact the shelter to reissue an OTP."}`).
+   - Expired (`now > expires_at`): HTTP 410 Gone (`{"detail": "OTP has expired. Please contact the shelter to reissue an OTP."}`).
+6. **Failed Attempt Handling**:
+   - Increment attempt counter and commit immediately.
+   - Compute `attempts_remaining = max(0, OTP_MAX_ATTEMPTS - attempts)`.
+   - Return HTTP 400 Bad Request with remaining attempts.
+7. **Successful Doorstep Verification**:
+   - Atomic update:
+     - `delivery.status = 'delivered'`
+     - `delivery.delivered_at = timezone.now()`
+     - `delivery.doorstep_otp_hash = None` (clear hash)
+     - `delivery.driver.is_available = True`
+     - `delivery.application.pet.status = 'adopted'`
+     - `delivery.application.status = 'completed'`
+     - Payment evaluation: set `application.payment_status = 'paid'` if verified `Payment(status='paid')` exists or COD `cash_collected >= total_amount`; otherwise leave unchanged.
+     - Send completion notification to customer.
+8. **Rate Limiting**: Apply DRF throttle scope `'otp_verify'` (`10/min`).
+
+### Phase 6 — URL Routing & Backward Compatibility
+- Canonical routes: `/api/v1/shelter/deliveries/...` and `/api/v1/delivery/tasks/...`
+- Maintain full compatibility with legacy routes (`/api/deliveries/...`, `/api/v1/deliveries/...`).
+- Document legacy paths in routing module.
+
+### Phase 7 — Comprehensive Testing & Validation Proof
+- Write complete unit and API test suite in `apps/logistics/tests.py`.
+- Verify every success and error status code (200, 201, 400, 403, 409, 410, 423).
+- Test settings fail-closed behavior.
+- Capture all execution outputs.
+
+---
+
+## 4. API Contract & Error Code Matrix
+
+| Endpoint | Method | Role | Status Codes | Description |
+|---|---|---|---|---|
+| `/api/v1/shelter/deliveries/assign/` | POST | Shelter | 201, 400, 403, 404 | Assigns driver; returns plaintext `pickup_otp` once to shelter; no doorstep OTP created. |
+| `/api/v1/shelter/deliveries/<id>/reissue-otp/` | POST | Shelter | 200, 400, 403, 404 | Reissues pickup or doorstep OTP; resets attempts & expiry; emails customer if doorstep. |
+| `/api/v1/delivery/tasks/<id>/pickup/` | POST | Driver | 200, 400, 403, 409, 410, 423, 429 | Verifies pickup OTP; issues doorstep OTP & emails customer; moves to `out_for_delivery`. |
+| `/api/v1/delivery/tasks/<id>/verify-doorstep/` | POST | Driver | 200, 400, 403, 409, 410, 423, 429 | Verifies customer doorstep OTP; marks `delivered`, `adopted`, `completed`. |
+| `/api/v1/delivery/tasks/<id>/status/` | PATCH/POST | Driver | 200, 400, 403, 404 | Allows ONLY `status='failed'`; rejects `out_for_delivery`, `delivered`, or arbitrary strings. |
+
+### HTTP Status Code Specifications:
+- **200 OK**: Successful verification or idempotent retry of already delivered task.
+- **201 Created**: Successful task assignment with initial pickup OTP issued.
+- **400 Bad Request**: Malformed 6-digit input, invalid OTP with attempts remaining, or invalid status transition.
+- **403 Forbidden**: Caller is not the assigned driver or authorized shelter owner.
+- **409 Conflict**: Action not valid in current delivery state (e.g., verifying doorstep while still in `assigned`).
+- **410 Gone**: OTP has expired beyond TTL.
+- **423 Locked**: Maximum attempts (3) exceeded; requires shelter reissue.
+- **429 Too Many Requests**: DRF throttle exceeded (10/min).
+
+---
+
+## 5. Non-Goals & Scope Lock
+- No frontend files or tooling touched.
+- No modifications to payments gateway logic beyond settings fail-closed enforcement and `payment_status` conditional evaluation.
+- No dropping or renaming of database tables or columns.
+- No plaintext OTP logging or storage.
+
+---
+
+*Last updated: 2026-10-13*
