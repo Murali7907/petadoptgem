@@ -416,3 +416,53 @@ def reissue_delivery_otp(delivery: PetDelivery, purpose: str) -> dict:
             "expires_at": delivery.doorstep_otp_expires_at.isoformat() if delivery.doorstep_otp_expires_at else None
         }
 
+
+def send_delivery_completed_notice(delivery: PetDelivery) -> bool:
+    """
+    Sends email and in-app notification to customer when delivery is completed.
+    """
+    try:
+        application = getattr(delivery, 'application', None)
+        if not application:
+            return False
+        customer = getattr(application, 'customer', None) or getattr(application, 'applicant', None)
+        if not customer:
+            return False
+        pet = getattr(application, 'pet', None)
+        pet_name = getattr(pet, 'name', 'your pet')
+        customer_email = getattr(customer, 'email', None)
+
+        if customer_email:
+            subject = f"Delivery Completed: Welcome {pet_name} home!"
+            message = (
+                f"Hello {customer.username},\n\n"
+                f"Congratulations! Your delivery for {pet_name} has been completed successfully.\n\n"
+                f"We are thrilled to welcome {pet_name} to their forever home!\n\n"
+                f"Thank you for adopting through KindHeart Pet Adoption Platform!\n"
+            )
+            from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@kindheart.org')
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email=from_email,
+                recipient_list=[customer_email],
+                fail_silently=False,
+            )
+
+        try:
+            from apps.accounts.models import Notification
+            Notification.objects.create(
+                recipient=customer,
+                title=f"Delivery Completed: Welcome {pet_name} home!",
+                message=f"Congratulations! Delivery for {pet_name} has been completed successfully. Welcome {pet_name} home!",
+                notification_type='delivery'
+            )
+        except Exception:
+            pass
+
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send completion notice for delivery #{delivery.id}: {e}", exc_info=True)
+        return False
+
+

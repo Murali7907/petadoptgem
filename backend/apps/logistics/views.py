@@ -1,4 +1,8 @@
+import hmac
+import logging
+import re
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 # Ensure backend directory is in sys.path
@@ -6,6 +10,8 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from django.conf import settings
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import viewsets, status
@@ -13,6 +19,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import ValidationError, NotFound
+from rest_framework.throttling import ScopedRateThrottle
 
 from .models import PetDelivery, DeliveryLocationPing, Payment
 from .permissions import IsShelterForDelivery, IsAssignedDeliveryDriver, IsDeliveryParticipant
@@ -28,12 +35,14 @@ from .serializers import (
     PaymentVerifySerializer,
     PaymentLedgerSerializer
 )
+from .otp import check_otp, issue_otp
 from .services import (
     assign_delivery_task,
     verify_pickup_otp,
     verify_doorstep_otp,
     dispatch_doorstep_otp,
     reissue_delivery_otp,
+    send_delivery_completed_notice,
 )
 from .payment_services import (
     create_razorpay_order,
@@ -42,6 +51,13 @@ from .payment_services import (
 )
 from apps.accounts.models import DeliveryProfile, ShelterProfile
 from apps.adoptions.models import AdoptionApplication
+
+logger = logging.getLogger(__name__)
+
+
+class OTPVerifyRateThrottle(ScopedRateThrottle):
+    scope = 'otp_verify'
+
 
 
 class ShelterDeliveryViewSet(viewsets.GenericViewSet):
@@ -227,14 +243,73 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
     def driver_active(self, request):
         return self.active(request)
 
-    @action(detail=True, methods=['post'], url_path='pickup', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
+    @action(detail=True, methods=['post'], url_path='pickup',
+            permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver],
+            throttle_classes=[OTPVerifyRateThrottle])
     def pickup(self, request, *args, **kwargs):
-        delivery = self.get_object()
-        serializer = OTPVerificationSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        raw_otp = request.data.get('otp') or request.data.get('code') or request.data.get('secret_otp')
+        if not raw_otp:
+            return Response({"detail": "OTP is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        otp_code = serializer.validated_data['otp']
-        verify_pickup_otp(delivery, otp_code)
+        val = str(raw_otp).strip()
+        if not re.match(r'^\d{6}$', val):
+            return Response({"detail": "OTP must be a 6-digit numeric string."}, status=status.HTTP_400_BAD_REQUEST)
+
+        delivery_obj = self.get_object()
+
+        with transaction.atomic():
+            delivery = PetDelivery.objects.select_for_update().get(id=delivery_obj.id)
+
+            if delivery.status != 'assigned':
+                return Response({
+                    "detail": f"Cannot verify pickup for delivery in '{delivery.status}' state."
+                }, status=status.HTTP_409_CONFLICT)
+
+            max_attempts = getattr(settings, 'OTP_MAX_ATTEMPTS', 3)
+            if delivery.pickup_otp_attempts >= max_attempts:
+                return Response({
+                    "detail": "Maximum OTP verification attempts exceeded. Please contact the shelter to reissue an OTP."
+                }, status=423)
+
+            now = timezone.now()
+            if delivery.expires_at and now > delivery.expires_at:
+                return Response({
+                    "detail": "OTP has expired. Please contact the shelter to reissue an OTP."
+                }, status=status.HTTP_410_GONE)
+
+            is_valid = False
+            if delivery.pickup_otp_hash:
+                is_valid = check_otp(delivery.pickup_otp_hash, delivery.id, 'pickup', val)
+            elif delivery.pickup_otp:
+                is_valid = hmac.compare_digest(val, str(delivery.pickup_otp).strip())
+
+            if not is_valid:
+                delivery.pickup_otp_attempts += 1
+                delivery.save(update_fields=['pickup_otp_attempts'])
+                attempts_remaining = max(0, max_attempts - delivery.pickup_otp_attempts)
+                return Response({
+                    "detail": "Invalid pickup OTP.",
+                    "attempts_remaining": attempts_remaining
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            delivery.status = 'out_for_delivery'
+            delivery.dispatched_at = now
+            delivery.pickup_otp_hash = None
+            delivery.pickup_otp = ''
+
+            # Issue doorstep OTP
+            raw_doorstep_otp = issue_otp(delivery, 'doorstep')
+            delivery.raw_doorstep_otp = raw_doorstep_otp
+
+            if not delivery.doorstep_otp_sent_at:
+                try:
+                    sent = dispatch_doorstep_otp(delivery, raw_otp=raw_doorstep_otp)
+                    if sent:
+                        delivery.doorstep_otp_sent_at = timezone.now()
+                except Exception as e:
+                    logger.error(f"Failed to email doorstep OTP for delivery #{delivery.id}: {e}", exc_info=True)
+
+            delivery.save()
 
         updated_serializer = DeliveryDriverTaskSerializer(delivery)
         return Response({
@@ -272,14 +347,99 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         updated_serializer = DeliveryDriverTaskSerializer(delivery)
         return Response(updated_serializer.data, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=['post'], url_path='verify-doorstep', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
+    @action(detail=True, methods=['post'], url_path='verify-doorstep',
+            permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver],
+            throttle_classes=[OTPVerifyRateThrottle])
     def verify_doorstep(self, request, *args, **kwargs):
-        delivery = self.get_object()
-        serializer = OTPVerificationSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        raw_otp = request.data.get('otp') or request.data.get('code') or request.data.get('secret_otp')
+        if not raw_otp:
+            return Response({"detail": "OTP is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        otp_code = serializer.validated_data['otp']
-        verify_doorstep_otp(delivery, otp_code)
+        val = str(raw_otp).strip()
+        if not re.match(r'^\d{6}$', val):
+            return Response({"detail": "OTP must be a 6-digit numeric string."}, status=status.HTTP_400_BAD_REQUEST)
+
+        delivery_obj = self.get_object()
+
+        with transaction.atomic():
+            delivery = PetDelivery.objects.select_for_update().get(id=delivery_obj.id)
+
+            if delivery.status == 'delivered':
+                updated_serializer = DeliveryDriverTaskSerializer(delivery)
+                return Response({
+                    "message": "Delivery already completed.",
+                    "delivery": updated_serializer.data
+                }, status=status.HTTP_200_OK)
+
+            if delivery.status != 'out_for_delivery':
+                return Response({
+                    "detail": f"Cannot verify doorstep OTP for delivery in '{delivery.status}' state."
+                }, status=status.HTTP_409_CONFLICT)
+
+            max_attempts = getattr(settings, 'OTP_MAX_ATTEMPTS', 3)
+            if delivery.doorstep_otp_attempts >= max_attempts:
+                return Response({
+                    "detail": "Maximum OTP verification attempts exceeded. Please contact the shelter to reissue an OTP."
+                }, status=423)
+
+            now = timezone.now()
+            if delivery.doorstep_otp_expires_at and now > delivery.doorstep_otp_expires_at:
+                return Response({
+                    "detail": "OTP has expired. Please contact the shelter to reissue an OTP."
+                }, status=status.HTTP_410_GONE)
+
+            is_valid = False
+            if delivery.doorstep_otp_hash:
+                is_valid = check_otp(delivery.doorstep_otp_hash, delivery.id, 'doorstep', val)
+            elif delivery.doorstep_otp:
+                is_valid = hmac.compare_digest(val, str(delivery.doorstep_otp).strip())
+            elif delivery.secret_otp:
+                is_valid = hmac.compare_digest(val, str(delivery.secret_otp).strip())
+
+            if not is_valid:
+                delivery.doorstep_otp_attempts += 1
+                delivery.save(update_fields=['doorstep_otp_attempts'])
+                attempts_remaining = max(0, max_attempts - delivery.doorstep_otp_attempts)
+                return Response({
+                    "detail": "Invalid doorstep OTP.",
+                    "attempts_remaining": attempts_remaining
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            delivery.status = 'delivered'
+            delivery.delivered_at = now
+            delivery.doorstep_otp_hash = None
+            delivery.doorstep_otp = ''
+            delivery.secret_otp = ''
+            delivery.save()
+
+            if delivery.driver:
+                delivery.driver.is_available = True
+                delivery.driver.save(update_fields=['is_available'])
+
+            application = delivery.application
+            if application:
+                if application.pet:
+                    application.pet.status = 'adopted'
+                    application.pet.save(update_fields=['status'])
+
+                application.status = 'completed'
+
+                total_amount = getattr(application, 'total_amount', Decimal('0.00')) or Decimal('0.00')
+                payment_verified = False
+                if application.payments.filter(status__in=['paid', 'captured']).exists():
+                    payment_verified = True
+                elif application.payment_method == 'cod' and delivery.cash_collected >= total_amount and delivery.cash_collected > Decimal('0.00'):
+                    payment_verified = True
+
+                if payment_verified:
+                    application.payment_status = 'paid'
+
+                application.save()
+
+                try:
+                    send_delivery_completed_notice(delivery)
+                except Exception as e:
+                    logger.error(f"Error sending delivery completed notice for delivery #{delivery.id}: {e}", exc_info=True)
 
         updated_serializer = DeliveryDriverTaskSerializer(delivery)
         return Response({
@@ -287,7 +447,9 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
             "delivery": updated_serializer.data
         }, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=['post'], url_path='verify-otp', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
+    @action(detail=True, methods=['post'], url_path='verify-otp',
+            permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver],
+            throttle_classes=[OTPVerifyRateThrottle])
     def verify_otp(self, request, *args, **kwargs):
         return self.verify_doorstep(request, *args, **kwargs)
 
