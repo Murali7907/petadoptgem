@@ -73,6 +73,15 @@ class PetImage(models.Model):
     def __str__(self):
         return f"Image for {self.pet.name}"
 
+    @property
+    def image(self):
+        """Image URL or local storage path alias."""
+        return self.image_url
+
+    @image.setter
+    def image(self, value):
+        self.image_url = str(value)
+
 
 class PetMedicalRecord(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
@@ -89,6 +98,13 @@ class PetMedicalRecord(models.Model):
 
     def __str__(self):
         return f"{self.title} - {self.pet.name}"
+
+    @property
+    def document(self):
+        """Document URL or path attached in record description if present."""
+        if self.description and "Document: " in self.description:
+            return self.description.split("Document: ")[-1].strip()
+        return None
 
 
 class FavoritePet(models.Model):

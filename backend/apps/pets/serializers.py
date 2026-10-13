@@ -11,20 +11,44 @@ from .models import Pet, PetImage, PetMedicalRecord, FavoritePet
 from apps.accounts.serializers import ShelterProfileSerializer
 
 class PetImageSerializer(serializers.ModelSerializer):
+    image = serializers.FileField(required=False, write_only=True)
+
     class Meta:
         model = PetImage
-        fields = ['id', 'public_id', 'image_url', 'caption', 'is_primary', 'created_at']
+        fields = ['id', 'public_id', 'image', 'image_url', 'caption', 'is_primary', 'created_at']
         read_only_fields = ['id', 'public_id', 'created_at']
+        extra_kwargs = {
+            'image_url': {'required': False}
+        }
+
+    def create(self, validated_data):
+        image_file = validated_data.pop('image', None)
+        if image_file:
+            from django.core.files.storage import default_storage
+            pet = validated_data.get('pet')
+            prefix = f"pets/{pet.id if pet else 'gallery'}"
+            saved_path = default_storage.save(f"{prefix}/{image_file.name}", image_file)
+            validated_data['image_url'] = default_storage.url(saved_path)
+        elif not validated_data.get('image_url'):
+            raise serializers.ValidationError({"image": "Either image file or image_url is required."})
+        return super().create(validated_data)
 
 
 class PetMedicalRecordSerializer(serializers.ModelSerializer):
     record_date = serializers.DateField(required=False)
     administered_date = serializers.DateField(required=False, write_only=True)
+    document = serializers.FileField(required=False, write_only=True)
+    document_url = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = PetMedicalRecord
-        fields = ['id', 'public_id', 'title', 'description', 'vet_name', 'record_date', 'administered_date', 'created_at']
+        fields = ['id', 'public_id', 'title', 'description', 'vet_name', 'record_date', 'administered_date', 'document', 'document_url', 'created_at']
         read_only_fields = ['id', 'public_id', 'created_at']
+
+    def get_document_url(self, obj):
+        if obj.description and "Document: " in obj.description:
+            return obj.description.split("Document: ")[-1].strip()
+        return None
 
     def validate(self, attrs):
         if 'record_date' not in attrs:
@@ -36,6 +60,21 @@ class PetMedicalRecordSerializer(serializers.ModelSerializer):
         else:
             attrs.pop('administered_date', None)
         return attrs
+
+    def create(self, validated_data):
+        doc_file = validated_data.pop('document', None)
+        if doc_file:
+            from django.core.files.storage import default_storage
+            pet = validated_data.get('pet')
+            prefix = f"medical/{pet.id if pet else 'records'}"
+            saved_path = default_storage.save(f"{prefix}/{doc_file.name}", doc_file)
+            doc_url = default_storage.url(saved_path)
+            desc = validated_data.get('description', '')
+            if desc:
+                validated_data['description'] = f"{desc}\nDocument: {doc_url}"
+            else:
+                validated_data['description'] = f"Document: {doc_url}"
+        return super().create(validated_data)
 
 
 class PetListSerializer(serializers.ModelSerializer):

@@ -197,14 +197,23 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
             return Response(serializer.data)
 
         elif request.method in ['PUT', 'PATCH']:
+            doc_file = request.FILES.get('document') or request.FILES.get('file')
+            data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+            if doc_file:
+                from django.core.files.storage import default_storage
+                saved_path = default_storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
+                doc_url = default_storage.url(saved_path)
+                curr_desc = data.get('description', '')
+                data['description'] = f"{curr_desc}\nDocument: {doc_url}".strip() if curr_desc else f"Document: {doc_url}"
+
             if not medical_record:
-                serializer = PetMedicalRecordSerializer(data=request.data)
+                serializer = PetMedicalRecordSerializer(data=data)
                 serializer.is_valid(raise_exception=True)
                 serializer.save(pet=pet)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             else:
                 partial = (request.method == 'PATCH')
-                serializer = PetMedicalRecordSerializer(medical_record, data=request.data, partial=partial)
+                serializer = PetMedicalRecordSerializer(medical_record, data=data, partial=partial)
                 serializer.is_valid(raise_exception=True)
                 serializer.save()
                 return Response(serializer.data)
@@ -218,16 +227,21 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
             return Response(serializer.data)
 
         elif request.method == 'POST':
+            from django.core.files.storage import default_storage
             image_files = request.FILES.getlist('images') or request.FILES.getlist('image')
             created_images = []
 
             if image_files:
+                caption = request.data.get('caption', f"Gallery image for {pet.name}")
+                is_primary = str(request.data.get('is_primary', 'false')).lower() in ('true', '1') if isinstance(request.data.get('is_primary'), str) else bool(request.data.get('is_primary', False))
                 for img_file in image_files:
+                    saved_path = default_storage.save(f"pets/{pet.id}/{img_file.name}", img_file)
+                    file_url = default_storage.url(saved_path)
                     img_obj = PetImage.objects.create(
                         pet=pet,
-                        image_url=request.build_absolute_uri(f"/media/pets/{img_file.name}"),
-                        caption=request.data.get('caption', f"Gallery image for {pet.name}"),
-                        is_primary=request.data.get('is_primary', 'false').lower() == 'true'
+                        image_url=request.build_absolute_uri(file_url),
+                        caption=caption,
+                        is_primary=is_primary
                     )
                     created_images.append(img_obj)
             elif 'image_url' in request.data:
@@ -235,7 +249,7 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
                     pet=pet,
                     image_url=request.data['image_url'],
                     caption=request.data.get('caption', f"Gallery image for {pet.name}"),
-                    is_primary=request.data.get('is_primary', False)
+                    is_primary=str(request.data.get('is_primary', 'false')).lower() in ('true', '1') if isinstance(request.data.get('is_primary'), str) else bool(request.data.get('is_primary', False))
                 )
                 created_images.append(img_obj)
             else:
@@ -287,8 +301,10 @@ class PetImageCreateView(generics.CreateAPIView):
     """
     serializer_class = PetImageSerializer
     permission_classes = [IsShelterRole | IsAdminRole]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def create(self, request, *args, **kwargs):
+        from django.core.files.storage import default_storage
         pet = resolve_pet_from_kwargs(self.kwargs)
 
         if not (self.request.user.is_superuser or self.request.user.role == 'admin'):
@@ -299,8 +315,17 @@ class PetImageCreateView(generics.CreateAPIView):
         files = request.FILES.getlist('images') or request.FILES.getlist('image')
         if files:
             created_images = []
+            caption = request.data.get('caption', f"Gallery image for {pet.name}")
+            is_primary = str(request.data.get('is_primary', 'false')).lower() in ('true', '1') if isinstance(request.data.get('is_primary'), str) else bool(request.data.get('is_primary', False))
             for f in files:
-                img_obj = PetImage.objects.create(pet=pet, image_url=f.name)
+                saved_path = default_storage.save(f"pets/{pet.id}/{f.name}", f)
+                file_url = default_storage.url(saved_path)
+                img_obj = PetImage.objects.create(
+                    pet=pet,
+                    image_url=request.build_absolute_uri(file_url),
+                    caption=caption,
+                    is_primary=is_primary
+                )
                 created_images.append(img_obj)
             return Response(PetImageSerializer(created_images, many=True).data, status=status.HTTP_201_CREATED)
 
@@ -327,6 +352,7 @@ class PetMedicalRecordListCreateView(generics.ListCreateAPIView):
     POST /api/pets/<id>/medical/
     """
     serializer_class = PetMedicalRecordSerializer
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_permissions(self):
         if self.request.method == 'GET':
@@ -334,6 +360,8 @@ class PetMedicalRecordListCreateView(generics.ListCreateAPIView):
         return [(IsShelterRole | IsAdminRole)()]
 
     def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False):
+            return PetMedicalRecord.objects.none()
         pet = resolve_pet_from_kwargs(self.kwargs)
         return PetMedicalRecord.objects.filter(pet=pet).order_by('-record_date')
 
@@ -343,7 +371,16 @@ class PetMedicalRecordListCreateView(generics.ListCreateAPIView):
             if not hasattr(self.request.user, 'shelter_profile') or pet.shelter != self.request.user.shelter_profile:
                 raise PermissionDenied("You can only add medical records to your own shelter's pets.")
 
-        serializer.save(pet=pet)
+        doc_file = self.request.FILES.get('document') or self.request.FILES.get('file')
+        if doc_file and 'document' not in serializer.validated_data:
+            from django.core.files.storage import default_storage
+            saved_path = default_storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
+            doc_url = default_storage.url(saved_path)
+            desc = serializer.validated_data.get('description', '')
+            desc_with_doc = f"{desc}\nDocument: {doc_url}".strip() if desc else f"Document: {doc_url}"
+            serializer.save(pet=pet, description=desc_with_doc)
+        else:
+            serializer.save(pet=pet)
 
 
 @extend_schema_view(

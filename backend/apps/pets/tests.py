@@ -11,6 +11,9 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 from apps.accounts.models import User, ShelterProfile
 from apps.pets.models import Pet, PetImage, PetMedicalRecord
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.files.storage import default_storage
+from django.conf import settings
 
 class PetManagementAPITests(APITestCase):
     def setUp(self):
@@ -512,5 +515,83 @@ class CustomerFavoritePetsAPITests(APITestCase):
 
         list_res3 = self.client.get(self.favorites_url)
         self.assertEqual(len(list_res3.data), 0)
+
+
+class MediaStoragePipelineTests(APITestCase):
+    def setUp(self):
+        self.shelter_user = User.objects.create_user(
+            username='storage_shelter',
+            email='storage@shelter.org',
+            password='shelterpass123',
+            role='shelter'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user,
+            organization_name='Storage Pipeline Shelter',
+            pickup_address='789 Storage Rd',
+            latitude=12.9716,
+            longitude=77.5946
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter_profile,
+            name='Bella',
+            species='dog',
+            breed='Labrador',
+            age_months=18,
+            gender='female',
+            description='Friendly Labrador',
+            adoption_fee=150.00
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+
+    def test_media_and_static_settings_configuration(self):
+        self.assertEqual(settings.MEDIA_URL, '/media/')
+        self.assertEqual(settings.MEDIA_ROOT, settings.BASE_DIR / 'media')
+        self.assertEqual(settings.STATIC_URL, '/static/')
+        self.assertEqual(settings.STATIC_ROOT, settings.BASE_DIR / 'staticfiles')
+        self.assertIn('CLOUD_NAME', settings.CLOUDINARY_STORAGE)
+        self.assertIn('API_KEY', settings.CLOUDINARY_STORAGE)
+        self.assertIn('API_SECRET', settings.CLOUDINARY_STORAGE)
+
+    def test_pet_gallery_image_upload_saves_to_storage(self):
+        url = f"/api/pets/{self.pet.id}/images/"
+        fake_image = SimpleUploadedFile("bella_gallery.jpg", b"fake_image_binary_data", content_type="image/jpeg")
+        response = self.client.post(url, {'image': fake_image, 'caption': 'Bella at park'}, format='multipart')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(len(response.data) > 0)
+        created_image = PetImage.objects.filter(pet=self.pet).first()
+        self.assertIsNotNone(created_image)
+        self.assertIn('/media/pets/', created_image.image_url)
+        self.assertEqual(created_image.image, created_image.image_url)
+
+    def test_pet_medical_record_document_upload_saves_to_storage(self):
+        url = f"/api/pets/{self.pet.id}/medical/"
+        fake_doc = SimpleUploadedFile("rabies_cert.pdf", b"fake_pdf_binary_content", content_type="application/pdf")
+        response = self.client.post(url, {
+            'title': 'Rabies Vaccination',
+            'record_date': '2026-05-10',
+            'vet_name': 'Dr. Sharma',
+            'document': fake_doc
+        }, format='multipart')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        med_rec = PetMedicalRecord.objects.filter(pet=self.pet, title='Rabies Vaccination').first()
+        self.assertIsNotNone(med_rec)
+        self.assertIsNotNone(med_rec.document)
+        self.assertIn('/media/medical/', med_rec.document)
+
+    def test_shelter_pet_images_action_upload(self):
+        url = f"/api/v1/shelter/pets/{self.pet.public_id}/images/"
+        fake_image = SimpleUploadedFile("bella_action.jpg", b"fake_binary_jpeg", content_type="image/jpeg")
+        response = self.client.post(url, {'images': fake_image, 'caption': 'Action Photo'}, format='multipart')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIn('/media/pets/', response.data[0]['image_url'])
+
+    def test_cloudinary_storage_config_dual_mode(self):
+        # In current test environment (USE_CLOUDINARY=False), storage backend is FileSystemStorage
+        self.assertFalse(settings.USE_CLOUDINARY)
+        self.assertEqual(settings.STORAGES['default']['BACKEND'], 'django.core.files.storage.FileSystemStorage')
 
 
