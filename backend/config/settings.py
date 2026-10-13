@@ -32,6 +32,7 @@ INSTALLED_APPS = [
     'apps.pets',
     'apps.adoptions',
     'apps.logistics',
+    'apps.reviews',
 ]
 
 AUTH_USER_MODEL = 'accounts.User'

@@ -104,6 +104,31 @@ class PetViewSet(viewsets.ModelViewSet):
             return PetWriteSerializer
         return PetDetailSerializer
 
+    def get_object(self):
+        queryset = self.filter_queryset(self.get_queryset())
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        lookup_val = self.kwargs[lookup_url_kwarg]
+
+        obj = None
+        try:
+            import uuid
+            uuid_val = uuid.UUID(str(lookup_val))
+            obj = queryset.filter(public_id=uuid_val).first()
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+        if not obj and str(lookup_val).isdigit():
+            obj = queryset.filter(id=int(lookup_val)).first()
+
+        if not obj:
+            obj = queryset.filter(public_id=lookup_val).first()
+
+        if not obj:
+            raise NotFound("Pet not found.")
+
+        self.check_object_permissions(self.request, obj)
+        return obj
+
     def perform_create(self, serializer):
         user = self.request.user
         if user.is_superuser or user.role == 'admin':
@@ -237,30 +262,69 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def resolve_pet_from_kwargs(kwargs):
+    pet_identifier = kwargs.get('pet_public_id') or kwargs.get('pet_id') or kwargs.get('id') or kwargs.get('pk')
+    pet = None
+    try:
+        import uuid
+        val = uuid.UUID(str(pet_identifier))
+        pet = Pet.objects.filter(public_id=val).first()
+    except (ValueError, TypeError, AttributeError):
+        pass
+    if not pet and str(pet_identifier).isdigit():
+        pet = Pet.objects.filter(id=int(pet_identifier)).first()
+    if not pet:
+        pet = Pet.objects.filter(public_id=pet_identifier).first()
+    if not pet:
+        raise NotFound("Pet not found.")
+    return pet
+
+
 class PetImageCreateView(generics.CreateAPIView):
     """
-    Upload and add an image to a pet gallery.
+    Upload and add an image or multiple images to a pet gallery.
+    POST /api/pets/<id>/images/
     """
     serializer_class = PetImageSerializer
     permission_classes = [IsShelterRole | IsAdminRole]
 
-    def perform_create(self, serializer):
-        pet_public_id = self.kwargs.get('pet_public_id')
-        try:
-            pet = Pet.objects.get(public_id=pet_public_id)
-        except Pet.DoesNotExist:
-            raise NotFound("Pet not found.")
+    def create(self, request, *args, **kwargs):
+        pet = resolve_pet_from_kwargs(self.kwargs)
 
         if not (self.request.user.is_superuser or self.request.user.role == 'admin'):
-            if pet.shelter != self.request.user.shelter_profile:
+            if not hasattr(self.request.user, 'shelter_profile') or pet.shelter != self.request.user.shelter_profile:
                 raise PermissionDenied("You can only add images to your own shelter's pets.")
 
+        # Support multi-image files in request.FILES
+        files = request.FILES.getlist('images') or request.FILES.getlist('image')
+        if files:
+            created_images = []
+            for f in files:
+                img_obj = PetImage.objects.create(pet=pet, image_url=f.name)
+                created_images.append(img_obj)
+            return Response(PetImageSerializer(created_images, many=True).data, status=status.HTTP_201_CREATED)
+
+        # Support array of image dicts in request.data['images']
+        if isinstance(request.data.get('images'), list):
+            created_images = []
+            for item in request.data['images']:
+                serializer = self.get_serializer(data=item)
+                serializer.is_valid(raise_exception=True)
+                img_obj = serializer.save(pet=pet)
+                created_images.append(img_obj)
+            return Response(PetImageSerializer(created_images, many=True).data, status=status.HTTP_201_CREATED)
+
+        # Standard single image upload fallback
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         serializer.save(pet=pet)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 class PetMedicalRecordListCreateView(generics.ListCreateAPIView):
     """
     List and create medical records for a pet.
+    POST /api/pets/<id>/medical/
     """
     serializer_class = PetMedicalRecordSerializer
 
@@ -270,18 +334,13 @@ class PetMedicalRecordListCreateView(generics.ListCreateAPIView):
         return [(IsShelterRole | IsAdminRole)()]
 
     def get_queryset(self):
-        pet_public_id = self.kwargs.get('pet_public_id')
-        return PetMedicalRecord.objects.filter(pet__public_id=pet_public_id)
+        pet = resolve_pet_from_kwargs(self.kwargs)
+        return PetMedicalRecord.objects.filter(pet=pet).order_by('-record_date')
 
     def perform_create(self, serializer):
-        pet_public_id = self.kwargs.get('pet_public_id')
-        try:
-            pet = Pet.objects.get(public_id=pet_public_id)
-        except Pet.DoesNotExist:
-            raise NotFound("Pet not found.")
-
+        pet = resolve_pet_from_kwargs(self.kwargs)
         if not (self.request.user.is_superuser or self.request.user.role == 'admin'):
-            if pet.shelter != self.request.user.shelter_profile:
+            if not hasattr(self.request.user, 'shelter_profile') or pet.shelter != self.request.user.shelter_profile:
                 raise PermissionDenied("You can only add medical records to your own shelter's pets.")
 
         serializer.save(pet=pet)

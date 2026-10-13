@@ -13,9 +13,22 @@ from apps.adoptions.models import AdoptionApplication
 
 
 class DeliveryAssignSerializer(serializers.Serializer):
-    application_public_id = serializers.UUIDField()
-    driver_public_id = serializers.UUIDField()
+    application_public_id = serializers.UUIDField(required=False)
+    application_id = serializers.CharField(required=False)
+    driver_public_id = serializers.UUIDField(required=False)
+    driver_id = serializers.CharField(required=False)
     payment_method = serializers.CharField(required=False, default='unset')
+
+    def validate(self, attrs):
+        app_ref = attrs.get('application_public_id') or attrs.get('application_id')
+        driver_ref = attrs.get('driver_public_id') or attrs.get('driver_id')
+        if not app_ref:
+            raise serializers.ValidationError("Either application_id or application_public_id is required.")
+        if not driver_ref:
+            raise serializers.ValidationError("Either driver_id or driver_public_id is required.")
+        attrs['application_ref'] = str(app_ref)
+        attrs['driver_ref'] = str(driver_ref)
+        return attrs
 
 
 class DeliveryDriverTaskSerializer(serializers.ModelSerializer):
@@ -257,13 +270,19 @@ class LocationPingSerializer(serializers.ModelSerializer):
 
 
 class OTPVerificationSerializer(serializers.Serializer):
-    otp = serializers.CharField(max_length=6, min_length=6)
+    otp = serializers.CharField(max_length=6, min_length=6, required=False)
+    secret_otp = serializers.CharField(max_length=6, min_length=6, required=False)
+    code = serializers.CharField(max_length=6, min_length=6, required=False)
 
-    def validate_otp(self, value):
-        val = str(value).strip()
+    def validate(self, attrs):
+        otp = attrs.get('otp') or attrs.get('secret_otp') or attrs.get('code')
+        if not otp:
+            raise serializers.ValidationError({"otp": "OTP is required."})
+        val = str(otp).strip()
         if not val.isdigit() or len(val) != 6:
-            raise serializers.ValidationError("OTP must be a 6-digit numeric string.")
-        return val
+            raise serializers.ValidationError({"otp": "OTP must be a 6-digit numeric string."})
+        attrs['otp'] = val
+        return attrs
 
 
 class PaymentOrderCreateSerializer(serializers.Serializer):

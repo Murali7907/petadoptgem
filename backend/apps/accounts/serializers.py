@@ -4,7 +4,7 @@ from .models import User, ShelterProfile, DeliveryProfile, Notification
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     """
-    Custom JWT serializer that embeds user_id, public_id, email, and role into the JWT payload.
+    Custom JWT serializer that embeds user_id, public_id, email, role, shelter_id, and delivery_id into the JWT payload.
     """
     @classmethod
     def get_token(cls, user):
@@ -16,17 +16,47 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         token['email'] = user.email
         token['role'] = user.role
 
+        shelter_id = None
+        if hasattr(user, 'shelter_profile') and user.shelter_profile:
+            shelter_id = user.shelter_profile.id
+        elif hasattr(user, 'delivery_profile') and user.delivery_profile:
+            shelter_id = user.delivery_profile.shelter_id
+        token['shelter_id'] = shelter_id
+
+        delivery_id = None
+        if hasattr(user, 'delivery_profile') and user.delivery_profile:
+            delivery_id = user.delivery_profile.id
+        token['delivery_id'] = delivery_id
+
         return token
 
     def validate(self, attrs):
         data = super().validate(attrs)
+        user = self.user
+        shelter_id = None
+        if hasattr(user, 'shelter_profile') and user.shelter_profile:
+            shelter_id = user.shelter_profile.id
+        elif hasattr(user, 'delivery_profile') and user.delivery_profile:
+            shelter_id = user.delivery_profile.shelter_id
+
+        delivery_id = None
+        if hasattr(user, 'delivery_profile') and user.delivery_profile:
+            delivery_id = user.delivery_profile.id
+
         # Add user identity details to the login response payload
+        data['role'] = user.role
+        data['shelter_id'] = shelter_id
+        data['delivery_id'] = delivery_id
+        data['user_id'] = user.id
+        data['public_id'] = str(user.public_id)
         data['user'] = {
-            'id': self.user.id,
-            'public_id': str(self.user.public_id),
-            'username': self.user.username,
-            'email': self.user.email,
-            'role': self.user.role,
+            'id': user.id,
+            'public_id': str(user.public_id),
+            'username': user.username,
+            'email': user.email,
+            'role': user.role,
+            'shelter_id': shelter_id,
+            'delivery_id': delivery_id,
         }
         return data
 
@@ -34,7 +64,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 class ShelterProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = ShelterProfile
-        fields = ['public_id', 'organization_name', 'license_no', 'pickup_address', 'latitude', 'longitude', 'is_active', 'created_at']
+        fields = ['public_id', 'organization_name', 'license_no', 'pickup_address', 'city', 'latitude', 'longitude', 'is_active', 'is_verified', 'created_at']
         read_only_fields = ['public_id', 'created_at']
 
 
@@ -43,7 +73,7 @@ class DeliveryProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DeliveryProfile
-        fields = ['public_id', 'shelter', 'shelter_name', 'vehicle_type', 'vehicle_number', 'is_available', 'created_at']
+        fields = ['public_id', 'shelter', 'shelter_name', 'vehicle_type', 'vehicle_number', 'is_available', 'current_latitude', 'current_longitude', 'created_at']
         read_only_fields = ['public_id', 'created_at']
 
 
@@ -73,6 +103,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=6)
+    organization_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    license_no = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    pickup_address = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    city = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    latitude = serializers.DecimalField(max_digits=9, decimal_places=6, write_only=True, required=False, allow_null=True)
+    longitude = serializers.DecimalField(max_digits=9, decimal_places=6, write_only=True, required=False, allow_null=True)
 
     class Meta:
         model = User
@@ -84,15 +120,70 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             'last_name', 
             'role', 
             'phone', 
-            'address'
+            'address',
+            'organization_name',
+            'license_no',
+            'pickup_address',
+            'city',
+            'latitude',
+            'longitude',
         ]
 
+    def validate_role(self, value):
+        if value not in ('customer', 'shelter'):
+            raise serializers.ValidationError("Public registration is only permitted for 'customer' and 'shelter' roles.")
+        return value
+
     def create(self, validated_data):
+        from django.db import transaction
+        org_name = validated_data.pop('organization_name', None)
+        lic_no = validated_data.pop('license_no', '')
+        pickup_addr = validated_data.pop('pickup_address', '')
+        city_val = validated_data.pop('city', '')
+        lat_val = validated_data.pop('latitude', None)
+        lon_val = validated_data.pop('longitude', None)
         password = validated_data.pop('password')
-        user = User(**validated_data)
-        user.set_password(password)
-        user.save()
+
+        with transaction.atomic():
+            user = User(**validated_data)
+            user.set_password(password)
+            user.save()
+
+            if user.role == 'shelter':
+                ShelterProfile.objects.create(
+                    user=user,
+                    organization_name=org_name or f"{user.username}'s Shelter",
+                    license_no=lic_no or '',
+                    pickup_address=pickup_addr or user.address or 'Shelter Address',
+                    city=city_val or '',
+                    latitude=lat_val,
+                    longitude=lon_val,
+                    is_active=True,
+                    is_verified=False
+                )
         return user
+
+
+class DriverCreateSerializer(serializers.Serializer):
+    username = serializers.CharField(max_length=150)
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=6)
+    first_name = serializers.CharField(max_length=150, required=False, default='')
+    last_name = serializers.CharField(max_length=150, required=False, default='')
+    phone = serializers.CharField(max_length=20, required=False, default='')
+    address = serializers.CharField(required=False, default='')
+    vehicle_type = serializers.ChoiceField(choices=DeliveryProfile.VEHICLE_CHOICES, default='car')
+    vehicle_number = serializers.CharField(max_length=30)
+
+    def validate_username(self, value):
+        if User.objects.filter(username=value).exists():
+            raise serializers.ValidationError("A user with this username already exists.")
+        return value
+
+    def validate_email(self, value):
+        if User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return value
 
 
 class AdminShelterDetailSerializer(serializers.ModelSerializer):

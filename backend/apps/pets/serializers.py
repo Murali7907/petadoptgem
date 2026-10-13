@@ -18,10 +18,24 @@ class PetImageSerializer(serializers.ModelSerializer):
 
 
 class PetMedicalRecordSerializer(serializers.ModelSerializer):
+    record_date = serializers.DateField(required=False)
+    administered_date = serializers.DateField(required=False, write_only=True)
+
     class Meta:
         model = PetMedicalRecord
-        fields = ['id', 'public_id', 'title', 'description', 'vet_name', 'record_date', 'created_at']
+        fields = ['id', 'public_id', 'title', 'description', 'vet_name', 'record_date', 'administered_date', 'created_at']
         read_only_fields = ['id', 'public_id', 'created_at']
+
+    def validate(self, attrs):
+        if 'record_date' not in attrs:
+            if 'administered_date' in attrs:
+                attrs['record_date'] = attrs.pop('administered_date')
+            else:
+                from django.utils import timezone
+                attrs['record_date'] = timezone.now().date()
+        else:
+            attrs.pop('administered_date', None)
+        return attrs
 
 
 class PetListSerializer(serializers.ModelSerializer):
@@ -54,7 +68,8 @@ class PetListSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'public_id', 'created_at']
 
     def get_primary_image(self, obj):
-        primary = obj.images.filter(is_primary=True).first()
+        all_images = obj.images.all()
+        primary = next((img for img in all_images if img.is_primary), None)
         if primary:
             return primary.image_url
         if obj.image:
@@ -62,7 +77,7 @@ class PetListSerializer(serializers.ModelSerializer):
             if request:
                 return request.build_absolute_uri(obj.image.url)
             return obj.image.url
-        first_img = obj.images.first()
+        first_img = next(iter(all_images), None)
         return first_img.image_url if first_img else None
 
 

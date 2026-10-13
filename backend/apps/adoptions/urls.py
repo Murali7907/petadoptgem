@@ -5,7 +5,11 @@ from .views import (
     ShelterApplicationViewSet,
     ApplicationReviewCreateView,
     ShelterReviewListView,
-    DeliveryReviewListView
+    DeliveryReviewListView,
+    CustomerApplicationApplyView,
+    CustomerMyApplicationsView,
+    ShelterApplicationsListView,
+    AdoptionStatusUpdateView,
 )
 
 router = DefaultRouter()
@@ -13,6 +17,10 @@ router.register(r'applications', CustomerApplicationViewSet, basename='customer-
 router.register(r'shelter/applications', ShelterApplicationViewSet, basename='shelter-applications')
 
 urlpatterns = [
+    path('apply/', CustomerApplicationApplyView.as_view(), name='adoption_apply'),
+    path('my-applications/', CustomerMyApplicationsView.as_view(), name='my_applications'),
+    path('shelter-applications/', ShelterApplicationsListView.as_view(), name='shelter_applications_list'),
+    path('<str:id>/status/', AdoptionStatusUpdateView.as_view(), name='adoption_status_update'),
     path('adoptions/applications/<uuid:public_id>/review/', ApplicationReviewCreateView.as_view(), name='application-review-prefixed'),
     path('applications/<uuid:public_id>/review/', ApplicationReviewCreateView.as_view(), name='application-review'),
     path('shelter/reviews/', ShelterReviewListView.as_view(), name='shelter-reviews'),

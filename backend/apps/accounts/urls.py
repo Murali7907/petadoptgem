@@ -5,6 +5,7 @@ from .views import (
     CustomTokenObtainPairView, 
     RegisterView, 
     UserProfileView,
+    ShelterDriverCreateView,
     AdminShelterVerificationViewSet,
     AdminPlatformDashboardView,
     NotificationListView,
@@ -18,6 +19,7 @@ router.register(r'admin/shelters', AdminShelterVerificationViewSet, basename='ad
 urlpatterns = [
     path('register/', RegisterView.as_view(), name='auth_register'),
     path('login/', CustomTokenObtainPairView.as_view(), name='auth_login'),
+    path('drivers/create/', ShelterDriverCreateView.as_view(), name='auth_driver_create'),
     path('token/refresh/', TokenRefreshView.as_view(), name='auth_token_refresh'),
     path('token/verify/', TokenVerifyView.as_view(), name='auth_token_verify'),
     path('me/', UserProfileView.as_view(), name='auth_me'),

@@ -277,3 +277,135 @@ class DeliveryReviewListView(APIView):
             "reviews": AdoptionReviewDetailSerializer(reviews, many=True).data
         }, status=status.HTTP_200_OK)
 
+
+def resolve_application(identifier):
+    app = None
+    try:
+        import uuid
+        val = uuid.UUID(str(identifier))
+        app = AdoptionApplication.objects.filter(public_id=val).first()
+    except (ValueError, TypeError, AttributeError):
+        pass
+    if not app and str(identifier).isdigit():
+        app = AdoptionApplication.objects.filter(id=int(identifier)).first()
+    if not app:
+        app = AdoptionApplication.objects.filter(public_id=identifier).first()
+    if not app:
+        raise NotFound("Adoption application not found.")
+    return app
+
+
+class CustomerApplicationApplyView(APIView):
+    """
+    POST /api/adoptions/apply/
+    Customer application submission with duplicate checks and distance calculation.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsCustomer]
+
+    def post(self, request):
+        serializer = ApplicationCreateSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        application = serializer.save()
+        return Response(CustomerApplicationSerializer(application, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+
+class CustomerMyApplicationsView(APIView):
+    """
+    GET /api/adoptions/my-applications/
+    Returns authenticated customer's application history.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsCustomer]
+
+    def get(self, request):
+        applications = AdoptionApplication.objects.filter(applicant=request.user).select_related('pet', 'pet__shelter').order_by('-submitted_at')
+        return Response(CustomerApplicationSerializer(applications, many=True, context={'request': request}).data, status=status.HTTP_200_OK)
+
+
+class ShelterApplicationsListView(APIView):
+    """
+    GET /api/adoptions/shelter-applications/
+    Returns applications for pets belonging to the shelter.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsShelterOwner]
+
+    def get(self, request):
+        if not hasattr(request.user, 'shelter_profile') or not request.user.shelter_profile:
+            return Response({"detail": "User is not associated with a shelter profile."}, status=status.HTTP_403_FORBIDDEN)
+
+        qs = AdoptionApplication.objects.filter(pet__shelter=request.user.shelter_profile).select_related('applicant', 'pet', 'pet__shelter').order_by('-submitted_at')
+        app_status = request.query_params.get('status')
+        if app_status:
+            qs = qs.filter(status=app_status)
+        pet_id = request.query_params.get('pet_id') or request.query_params.get('pet_public_id')
+        if pet_id:
+            try:
+                import uuid
+                val = uuid.UUID(str(pet_id))
+                qs = qs.filter(pet__public_id=val)
+            except (ValueError, TypeError):
+                if str(pet_id).isdigit():
+                    qs = qs.filter(pet_id=int(pet_id))
+                else:
+                    qs = qs.filter(pet__public_id=pet_id)
+        return Response(ShelterApplicationSerializer(qs, many=True).data, status=status.HTTP_200_OK)
+
+
+class AdoptionStatusUpdateView(APIView):
+    """
+    PATCH /api/adoptions/<id>/status/
+    Shelter approve/reject action.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsShelterOwner]
+
+    def patch(self, request, id):
+        application = resolve_application(id)
+        if not hasattr(request.user, 'shelter_profile') or application.pet.shelter_id != request.user.shelter_profile.id:
+            raise PermissionDenied("You can only modify applications submitted to your shelter.")
+
+        new_status = request.data.get('status')
+        notes = request.data.get('notes') or request.data.get('application_notes') or ''
+
+        if new_status not in ['approved', 'rejected', 'reviewing']:
+            raise ValidationError({"status": "Status must be 'approved', 'rejected', or 'reviewing'."})
+
+        if new_status == 'approved':
+            with transaction.atomic():
+                pet = Pet.objects.select_for_update().get(id=application.pet_id)
+                if pet.status != 'available':
+                    raise ValidationError(f"Pet '{pet.name}' is no longer available for adoption.")
+
+                application.status = 'approved'
+                if notes:
+                    application.application_notes = f"{application.application_notes}\n[Shelter Note]: {notes}".strip()
+                application.save()
+
+                pet.status = 'pending'
+                pet.save(update_fields=['status'])
+
+                # Auto-reject competing active applications
+                competing_apps = AdoptionApplication.objects.filter(
+                    pet=pet,
+                    status__in=['submitted', 'reviewing']
+                ).exclude(id=application.id)
+                for comp in competing_apps:
+                    comp.status = 'rejected'
+                    comp.application_notes = f"{comp.application_notes}\n[System Note]: Pet has been adopted by another applicant.".strip()
+                    comp.save()
+
+        elif new_status == 'rejected':
+            application.status = 'rejected'
+            if notes:
+                application.application_notes = f"{application.application_notes}\n[Rejection Reason]: {notes}".strip()
+            application.save()
+
+        elif new_status == 'reviewing':
+            application.status = 'reviewing'
+            if notes:
+                application.application_notes = f"{application.application_notes}\n[Shelter Note]: {notes}".strip()
+            application.save()
+
+        return Response({
+            "message": f"Application status updated to '{new_status}'.",
+            "application": ShelterApplicationSerializer(application).data
+        }, status=status.HTTP_200_OK)
+

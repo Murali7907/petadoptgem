@@ -39,7 +39,8 @@ class ApplicantSummarySerializer(serializers.ModelSerializer):
 
 
 class ApplicationCreateSerializer(serializers.Serializer):
-    pet_public_id = serializers.UUIDField(write_only=True)
+    pet_public_id = serializers.UUIDField(write_only=True, required=False)
+    pet_id = serializers.CharField(write_only=True, required=False)
     living_situation = serializers.CharField(max_length=255)
     has_other_pets = serializers.BooleanField(default=False)
     other_pets_description = serializers.CharField(required=False, allow_blank=True, default='')
@@ -58,23 +59,34 @@ class ApplicationCreateSerializer(serializers.Serializer):
     contact_phone = serializers.CharField(max_length=20)
     application_notes = serializers.CharField(required=False, allow_blank=True, default='')
 
-    def validate_pet_public_id(self, value):
-        try:
-            pet = Pet.objects.get(public_id=value)
-        except Pet.DoesNotExist:
-            raise serializers.ValidationError("Target pet not found.")
-
-        if pet.status != 'available':
-            raise serializers.ValidationError(f"Pet '{pet.name}' is currently unavailable for adoption (status: {pet.get_status_display()}).")
-
-        return value
-
     def validate(self, attrs):
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             raise serializers.ValidationError("Authentication required.")
 
-        pet = Pet.objects.get(public_id=attrs['pet_public_id'])
+        pet_ref = attrs.get('pet_public_id') or attrs.get('pet_id')
+        if not pet_ref:
+            raise serializers.ValidationError({"pet_id": "Either pet_id or pet_public_id is required."})
+
+        pet = None
+        import uuid
+        try:
+            val = uuid.UUID(str(pet_ref))
+            pet = Pet.objects.filter(public_id=val).first()
+        except (ValueError, TypeError, AttributeError):
+            pass
+        if not pet and str(pet_ref).isdigit():
+            pet = Pet.objects.filter(id=int(pet_ref)).first()
+        if not pet:
+            pet = Pet.objects.filter(public_id=pet_ref).first()
+
+        if not pet:
+            raise serializers.ValidationError({"pet_id": "Target pet not found."})
+
+        err_key = 'pet_public_id' if 'pet_public_id' in attrs else 'pet_id'
+        if pet.status != 'available':
+            raise serializers.ValidationError({err_key: f"Pet '{pet.name}' is currently unavailable for adoption (status: {pet.get_status_display()})."})
+
         active_app = AdoptionApplication.objects.filter(
             applicant=request.user,
             pet=pet,
@@ -82,7 +94,7 @@ class ApplicationCreateSerializer(serializers.Serializer):
         ).exists()
 
         if active_app:
-            raise serializers.ValidationError({"pet_public_id": "You already have an active application for this pet."})
+            raise serializers.ValidationError({err_key: "You already have an active application for this pet."})
 
         # Ensure either delivery_address or dropoff_address is supplied
         addr = attrs.get('delivery_address') or attrs.get('dropoff_address')
@@ -108,7 +120,8 @@ class ApplicationCreateSerializer(serializers.Serializer):
 
     def create(self, validated_data):
         pet = validated_data.pop('pet_obj')
-        validated_data.pop('pet_public_id')
+        validated_data.pop('pet_public_id', None)
+        validated_data.pop('pet_id', None)
         user = self.context['request'].user
 
         try:
@@ -130,6 +143,7 @@ class CustomerApplicationSerializer(serializers.ModelSerializer):
     class Meta:
         model = AdoptionApplication
         fields = [
+            'id',
             'public_id',
             'status',
             'living_situation',
@@ -158,7 +172,7 @@ class CustomerApplicationSerializer(serializers.ModelSerializer):
             'submitted_at',
             'updated_at'
         ]
-        read_only_fields = ['public_id', 'status', 'submitted_at', 'updated_at']
+        read_only_fields = ['id', 'public_id', 'status', 'submitted_at', 'updated_at']
 
 
 class ShelterApplicationSerializer(serializers.ModelSerializer):
@@ -168,6 +182,7 @@ class ShelterApplicationSerializer(serializers.ModelSerializer):
     class Meta:
         model = AdoptionApplication
         fields = [
+            'id',
             'public_id',
             'status',
             'living_situation',
@@ -197,7 +212,7 @@ class ShelterApplicationSerializer(serializers.ModelSerializer):
             'submitted_at',
             'updated_at'
         ]
-        read_only_fields = ['public_id', 'status', 'submitted_at', 'updated_at']
+        read_only_fields = ['id', 'public_id', 'status', 'submitted_at', 'updated_at']
 
 
 class ApplicationDecisionSerializer(serializers.Serializer):

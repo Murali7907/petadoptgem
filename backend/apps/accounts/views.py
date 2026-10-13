@@ -6,8 +6,9 @@ from rest_framework.exceptions import NotFound
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from django.db.models import Sum, Avg
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiTypes
-from .models import User, ShelterProfile, Notification
-from .permissions import IsAdminRole
+from django.db import transaction
+from .models import User, ShelterProfile, DeliveryProfile, Notification
+from .permissions import IsAdminRole, IsShelterRole
 from apps.pets.models import Pet
 from apps.logistics.models import PetDelivery, Payment
 from apps.adoptions.models import AdoptionReview
@@ -18,6 +19,7 @@ from .serializers import (
     AdminShelterDetailSerializer,
     AdminPlatformStatsSerializer,
     NotificationSerializer,
+    DriverCreateSerializer,
 )
 
 class CustomTokenObtainPairView(TokenObtainPairView):
@@ -58,6 +60,58 @@ class UserProfileView(generics.RetrieveAPIView):
 
     def get_object(self):
         return self.request.user
+
+
+class ShelterDriverCreateView(views.APIView):
+    """
+    Dedicated Fleets: Delivery partners belong strictly to a single shelter.
+    Drivers cannot self-register; they are created by their shelter.
+    POST /api/auth/drivers/create/
+    """
+    permission_classes = [IsAuthenticated, IsShelterRole]
+
+    @extend_schema(
+        summary="Create a new delivery driver for shelter fleet",
+        request=DriverCreateSerializer,
+        responses={201: UserProfileSerializer}
+    )
+    def post(self, request):
+        if not hasattr(request.user, 'shelter_profile') or not request.user.shelter_profile:
+            return Response(
+                {"detail": "Authenticated user is not associated with a shelter profile."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        serializer = DriverCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        data = serializer.validated_data
+        with transaction.atomic():
+            driver_user = User.objects.create(
+                username=data['username'],
+                email=data['email'],
+                first_name=data.get('first_name', ''),
+                last_name=data.get('last_name', ''),
+                phone=data.get('phone', ''),
+                address=data.get('address', ''),
+                role='delivery'
+            )
+            driver_user.set_password(data['password'])
+            driver_user.save()
+
+            delivery_profile = DeliveryProfile.objects.create(
+                user=driver_user,
+                shelter=request.user.shelter_profile,
+                vehicle_type=data.get('vehicle_type', 'car'),
+                vehicle_number=data['vehicle_number'],
+                is_available=True
+            )
+
+        response_serializer = UserProfileSerializer(driver_user)
+        return Response({
+            "message": "Delivery driver created successfully and assigned to your shelter fleet.",
+            "driver": response_serializer.data
+        }, status=status.HTTP_201_CREATED)
 
 
 @extend_schema_view(

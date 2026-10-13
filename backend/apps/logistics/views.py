@@ -71,15 +71,44 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
         serializer.is_valid(raise_exception=True)
 
         shelter = self.get_shelter_profile()
-        app_public_id = serializer.validated_data['application_public_id']
-        driver_public_id = serializer.validated_data['driver_public_id']
+        app_ref = serializer.validated_data.get('application_ref') or serializer.validated_data.get('application_public_id') or serializer.validated_data.get('application_id')
+        driver_ref = serializer.validated_data.get('driver_ref') or serializer.validated_data.get('driver_public_id') or serializer.validated_data.get('driver_id')
         payment_method = serializer.validated_data.get('payment_method', 'unset')
 
-        application = get_object_or_404(AdoptionApplication, public_id=app_public_id)
+        import uuid
+        application = None
+        if app_ref:
+            try:
+                val = uuid.UUID(str(app_ref))
+                application = AdoptionApplication.objects.filter(public_id=val).first()
+            except (ValueError, TypeError, AttributeError):
+                pass
+            if not application and str(app_ref).isdigit():
+                application = AdoptionApplication.objects.filter(id=int(app_ref)).first()
+            if not application:
+                application = AdoptionApplication.objects.filter(public_id=app_ref).first()
+        if not application:
+            raise NotFound({"detail": f"Application '{app_ref}' not found."})
+
         if application.pet.shelter_id != shelter.id:
             return Response({"detail": "Application belongs to a different shelter."}, status=status.HTTP_403_FORBIDDEN)
 
-        driver = get_object_or_404(DeliveryProfile, public_id=driver_public_id)
+        driver = None
+        if driver_ref:
+            try:
+                val = uuid.UUID(str(driver_ref))
+                driver = DeliveryProfile.objects.filter(public_id=val).first()
+            except (ValueError, TypeError, AttributeError):
+                pass
+            if not driver and str(driver_ref).isdigit():
+                driver = DeliveryProfile.objects.filter(id=int(driver_ref)).first()
+            if not driver:
+                driver = DeliveryProfile.objects.filter(public_id=driver_ref).first()
+            if not driver and str(driver_ref).isdigit():
+                driver = DeliveryProfile.objects.filter(user_id=int(driver_ref)).first()
+        if not driver:
+            raise NotFound({"detail": f"Driver '{driver_ref}' not found."})
+
         if driver.shelter_id != shelter.id:
             return Response({"detail": "Driver is not registered under your shelter."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -98,16 +127,35 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
 class DriverDeliveryViewSet(viewsets.GenericViewSet):
     """
     Endpoints for delivery drivers and tracking.
-    - GET  /api/v1/delivery/tasks/active/
-    - POST /api/v1/delivery/tasks/<uuid:public_id>/pickup/
-    - POST /api/v1/delivery/tasks/<uuid:public_id>/verify-doorstep/
-    - POST /api/v1/delivery/tasks/<uuid:public_id>/ping/
-    - GET  /api/v1/delivery/tasks/<uuid:public_id>/tracking/
+    - GET  /api/v1/delivery/tasks/active/ or GET /api/deliveries/driver-active/
+    - POST /api/v1/delivery/tasks/<id>/pickup/
+    - POST /api/v1/delivery/tasks/<id>/verify-doorstep/ or POST /api/deliveries/<id>/verify-otp/
+    - POST /api/v1/delivery/tasks/<id>/ping/ or POST /api/deliveries/<id>/ping/
+    - GET  /api/v1/delivery/tasks/<id>/tracking/ or GET /api/deliveries/<id>/track/
     """
     serializer_class = DeliveryDriverTaskSerializer
     permission_classes = [IsAuthenticated]
     queryset = PetDelivery.objects.all()
     lookup_field = 'public_id'
+
+    def get_object(self):
+        lookup_val = self.kwargs.get(self.lookup_field) or self.kwargs.get('id') or self.kwargs.get('pk')
+        import uuid
+        obj = None
+        if lookup_val:
+            try:
+                val = uuid.UUID(str(lookup_val))
+                obj = PetDelivery.objects.filter(public_id=val).first()
+            except (ValueError, TypeError, AttributeError):
+                pass
+            if not obj and str(lookup_val).isdigit():
+                obj = PetDelivery.objects.filter(id=int(lookup_val)).first()
+            if not obj:
+                obj = PetDelivery.objects.filter(public_id=lookup_val).first()
+        if not obj:
+            raise NotFound({"detail": f"Delivery with ID '{lookup_val}' not found."})
+        self.check_object_permissions(self.request, obj)
+        return obj
 
     @action(detail=False, methods=['get'], url_path='active')
     def active(self, request):
@@ -126,8 +174,12 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         serializer = DeliveryDriverTaskSerializer(delivery)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=['get'], url_path='driver-active')
+    def driver_active(self, request):
+        return self.active(request)
+
     @action(detail=True, methods=['post'], url_path='pickup', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
-    def pickup(self, request, public_id=None):
+    def pickup(self, request, *args, **kwargs):
         delivery = self.get_object()
         serializer = OTPVerificationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -142,7 +194,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='verify-doorstep', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
-    def verify_doorstep(self, request, public_id=None):
+    def verify_doorstep(self, request, *args, **kwargs):
         delivery = self.get_object()
         serializer = OTPVerificationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -156,8 +208,12 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
             "delivery": updated_serializer.data
         }, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post'], url_path='verify-otp', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
+    def verify_otp(self, request, *args, **kwargs):
+        return self.verify_doorstep(request, *args, **kwargs)
+
     @action(detail=True, methods=['post'], url_path='ping', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
-    def ping(self, request, public_id=None):
+    def ping(self, request, *args, **kwargs):
         delivery = self.get_object()
         serializer = LocationPingSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -173,18 +229,18 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
             longitude=lon
         )
 
-        # Update delivery coordinates
+        # Update delivery coordinates with update_fields for high-frequency performance
         delivery.current_latitude = lat
         delivery.current_longitude = lon
         delivery.last_location_update = now
-        delivery.save()
+        delivery.save(update_fields=['current_latitude', 'current_longitude', 'last_location_update'])
 
         # Update driver profile coordinates
         if delivery.driver:
             driver = delivery.driver
             driver.current_latitude = lat
             driver.current_longitude = lon
-            driver.save()
+            driver.save(update_fields=['current_latitude', 'current_longitude'])
 
         ping_serializer = LocationPingSerializer(ping_record)
         return Response({
@@ -198,7 +254,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         }, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['get'], url_path='tracking', permission_classes=[IsAuthenticated, IsDeliveryParticipant])
-    def tracking(self, request, public_id=None):
+    def tracking(self, request, *args, **kwargs):
         delivery = self.get_object()
         pings = delivery.location_pings.order_by('-pinged_at')[:50]
         pings_serializer = LocationPingSerializer(pings, many=True)
@@ -221,6 +277,10 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
             },
             "breadcrumbs": pings_serializer.data
         }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='track', permission_classes=[IsAuthenticated, IsDeliveryParticipant])
+    def track(self, request, *args, **kwargs):
+        return self.tracking(request, *args, **kwargs)
 
 
 class PaymentViewSet(viewsets.GenericViewSet):
