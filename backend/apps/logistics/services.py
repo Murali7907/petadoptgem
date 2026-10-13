@@ -189,10 +189,20 @@ def dispatch_doorstep_otp(delivery: PetDelivery) -> bool:
             logger.warning(f"Delivery #{delivery.id}: Customer {customer_username} has no email address.")
             return False
 
-        subject = f"Your Pet Delivery for {pet_name} is on the way! Doorstep Verification OTP"
+        delivery_status = getattr(delivery, 'status', 'assigned')
+        if delivery_status in ['out_for_delivery', 'in_transit']:
+            subject = f"Your Pet Delivery for {pet_name} is on the way! Doorstep Verification OTP"
+            stage_message = f"Great news! Your pet delivery for {pet_name} is now on the way to your doorstep!"
+        elif delivery_status == 'assigned':
+            subject = f"Delivery Scheduled for {pet_name} - Doorstep Verification OTP"
+            stage_message = f"Great news! Driver {driver_username} has been assigned for {pet_name}'s delivery."
+        else:
+            subject = f"Delivery Update for {pet_name} - Doorstep Verification OTP"
+            stage_message = f"Your delivery for {pet_name} has updated to status '{delivery_status}'."
+
         message = (
             f"Hello {customer_username},\n\n"
-            f"Great news! Your pet delivery for {pet_name} is on the way!\n\n"
+            f"{stage_message}\n\n"
             f"Delivery Driver Details:\n"
             f"- Driver Name: {driver_username}\n"
             f"- Contact Phone: {driver_phone}\n\n"
@@ -203,13 +213,17 @@ def dispatch_doorstep_otp(delivery: PetDelivery) -> bool:
         )
 
         from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@kindheart.org')
-        send_mail(
+        sent_count = send_mail(
             subject=subject,
             message=message,
             from_email=from_email,
             recipient_list=[customer_email],
             fail_silently=False,
         )
+        if sent_count <= 0:
+            logger.warning(f"Delivery #{delivery.id}: send_mail dispatched 0 messages to {customer_email}")
+            return False
+
         logger.info(f"Successfully dispatched doorstep OTP for delivery #{delivery.id} to {customer_email}")
 
         # In-App Notification (if Notification model is available)

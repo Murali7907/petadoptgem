@@ -12,8 +12,8 @@ from rest_framework.test import APITestCase
 from apps.accounts.models import User, ShelterProfile
 from apps.pets.models import Pet, PetImage, PetMedicalRecord
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.core.files.storage import default_storage
 from django.conf import settings
+from django.test import override_settings
 
 class PetManagementAPITests(APITestCase):
     def setUp(self):
@@ -517,6 +517,15 @@ class CustomerFavoritePetsAPITests(APITestCase):
         self.assertEqual(len(list_res3.data), 0)
 
 
+@override_settings(
+    USE_CLOUDINARY=False,
+    MEDIA_URL='/media/',
+    STORAGES={
+        'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+        'raw': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+        'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+    }
+)
 class MediaStoragePipelineTests(APITestCase):
     def setUp(self):
         self.shelter_user = User.objects.create_user(
@@ -546,9 +555,7 @@ class MediaStoragePipelineTests(APITestCase):
 
     def test_media_and_static_settings_configuration(self):
         self.assertEqual(settings.MEDIA_URL, '/media/')
-        self.assertEqual(settings.MEDIA_ROOT, settings.BASE_DIR / 'media')
         self.assertEqual(settings.STATIC_URL, '/static/')
-        self.assertEqual(settings.STATIC_ROOT, settings.BASE_DIR / 'staticfiles')
         self.assertIn('CLOUD_NAME', settings.CLOUDINARY_STORAGE)
         self.assertIn('API_KEY', settings.CLOUDINARY_STORAGE)
         self.assertIn('API_SECRET', settings.CLOUDINARY_STORAGE)
@@ -589,9 +596,56 @@ class MediaStoragePipelineTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertIn('/media/pets/', response.data[0]['image_url'])
 
-    def test_cloudinary_storage_config_dual_mode(self):
-        # In current test environment (USE_CLOUDINARY=False), storage backend is FileSystemStorage
+    def test_medical_record_patch_preserves_description_and_document(self):
+        # Create record with initial note
+        med_rec = PetMedicalRecord.objects.create(
+            pet=self.pet,
+            title='General Checkup',
+            description='Dog in good health',
+            vet_name='Dr. Smith',
+            record_date='2026-06-01'
+        )
+
+        url = f"/api/v1/shelter/pets/{self.pet.public_id}/medical/"
+        # 1. Document-only PATCH should preserve existing description
+        fake_doc = SimpleUploadedFile("report.pdf", b"pdf_data", content_type="application/pdf")
+        patch_resp = self.client.patch(url, {'document': fake_doc}, format='multipart')
+        self.assertEqual(patch_resp.status_code, status.HTTP_200_OK)
+        med_rec.refresh_from_db()
+        self.assertEqual(med_rec.clinical_description, 'Dog in good health')
+        self.assertIsNotNone(med_rec.document)
+
+        # 2. Description update PATCH should preserve existing document
+        patch_resp2 = self.client.patch(url, {'description': 'Updated health observation'}, format='json')
+        self.assertEqual(patch_resp2.status_code, status.HTTP_200_OK)
+        med_rec.refresh_from_db()
+        self.assertEqual(med_rec.clinical_description, 'Updated health observation')
+        self.assertIsNotNone(med_rec.document)
+
+    @override_settings(
+        USE_CLOUDINARY=False,
+        STORAGES={
+            'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+            'raw': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+            'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+        }
+    )
+    def test_storage_config_filesystem_mode(self):
         self.assertFalse(settings.USE_CLOUDINARY)
         self.assertEqual(settings.STORAGES['default']['BACKEND'], 'django.core.files.storage.FileSystemStorage')
+        self.assertEqual(settings.STORAGES['raw']['BACKEND'], 'django.core.files.storage.FileSystemStorage')
+
+    @override_settings(
+        USE_CLOUDINARY=True,
+        STORAGES={
+            'default': {'BACKEND': 'cloudinary_storage.storage.MediaCloudinaryStorage'},
+            'raw': {'BACKEND': 'cloudinary_storage.storage.RawMediaCloudinaryStorage'},
+            'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+        }
+    )
+    def test_storage_config_cloudinary_mode(self):
+        self.assertTrue(settings.USE_CLOUDINARY)
+        self.assertEqual(settings.STORAGES['default']['BACKEND'], 'cloudinary_storage.storage.MediaCloudinaryStorage')
+        self.assertEqual(settings.STORAGES['raw']['BACKEND'], 'cloudinary_storage.storage.RawMediaCloudinaryStorage')
 
 

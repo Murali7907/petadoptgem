@@ -159,6 +159,11 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         self.check_object_permissions(self.request, obj)
         return obj
 
+    def get_permissions(self):
+        if self.action in ['pickup', 'verify_doorstep', 'update_status', 'ping']:
+            return [IsAuthenticated(), IsAssignedDeliveryDriver()]
+        return super().get_permissions()
+
     @action(detail=False, methods=['get'], url_path='active')
     def active(self, request):
         if not hasattr(request.user, 'delivery_profile'):
@@ -203,13 +208,21 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         if not new_status:
             return Response({"detail": "Status field is required."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Do not allow bypassing doorstep OTP verification
+        if new_status in ['delivered', 'completed']:
+            return Response({
+                "detail": "Cannot mark delivery as delivered directly. Doorstep OTP verification is required."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        previous_status = delivery.status
         normalized_status = 'out_for_delivery' if new_status in ['in_transit', 'out_for_delivery'] else new_status
         delivery.status = normalized_status
         if normalized_status == 'out_for_delivery' and not delivery.dispatched_at:
             delivery.dispatched_at = timezone.now()
         delivery.save()
 
-        if new_status in ['in_transit', 'out_for_delivery', 'assigned']:
+        # Dispatch OTP only when newly transitioning into out_for_delivery
+        if normalized_status == 'out_for_delivery' and previous_status != 'out_for_delivery':
             dispatch_doorstep_otp(delivery)
 
         updated_serializer = DeliveryDriverTaskSerializer(delivery)

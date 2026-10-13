@@ -8,6 +8,8 @@ if str(BACKEND_DIR) not in sys.path:
 
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from rest_framework.permissions import IsAuthenticated
+from .permissions import IsAssignedDeliveryDriver
 from .views import ShelterDeliveryViewSet, DriverDeliveryViewSet, PaymentViewSet
 
 router = DefaultRouter()
@@ -36,7 +38,7 @@ urlpatterns = [
     path('<uuid:public_id>/verify-otp/', DriverDeliveryViewSet.as_view({'post': 'verify_doorstep'}), name='delivery-verify-otp-uuid'),
     path('<str:id>/verify-doorstep/', DriverDeliveryViewSet.as_view({'post': 'verify_doorstep'}), name='delivery-verify-doorstep'),
     # PATCH/POST /api/deliveries/<id>/status/
-    path('<str:id>/status/', DriverDeliveryViewSet.as_view({'patch': 'update_status', 'post': 'update_status'}), name='delivery-status'),
-    path('<uuid:public_id>/status/', DriverDeliveryViewSet.as_view({'patch': 'update_status', 'post': 'update_status'}), name='delivery-status-uuid'),
+    path('<str:id>/status/', DriverDeliveryViewSet.as_view({'patch': 'update_status', 'post': 'update_status'}, permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver]), name='delivery-status'),
+    path('<uuid:public_id>/status/', DriverDeliveryViewSet.as_view({'patch': 'update_status', 'post': 'update_status'}, permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver]), name='delivery-status-uuid'),
     path('', include(router.urls)),
 ]

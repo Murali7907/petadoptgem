@@ -21,6 +21,12 @@ class PetImageSerializer(serializers.ModelSerializer):
             'image_url': {'required': False}
         }
 
+    def validate_image(self, value):
+        max_size_mb = 10
+        if hasattr(value, 'size') and value.size > max_size_mb * 1024 * 1024:
+            raise serializers.ValidationError(f"Image file size must not exceed {max_size_mb}MB.")
+        return value
+
     def create(self, validated_data):
         image_file = validated_data.pop('image', None)
         if image_file:
@@ -46,9 +52,13 @@ class PetMedicalRecordSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'public_id', 'created_at']
 
     def get_document_url(self, obj):
-        if obj.description and "Document: " in obj.description:
-            return obj.description.split("Document: ")[-1].strip()
-        return None
+        return obj.document
+
+    def validate_document(self, value):
+        max_size_mb = 15
+        if hasattr(value, 'size') and value.size > max_size_mb * 1024 * 1024:
+            raise serializers.ValidationError(f"Document file size must not exceed {max_size_mb}MB.")
+        return value
 
     def validate(self, attrs):
         if 'record_date' not in attrs:
@@ -64,17 +74,42 @@ class PetMedicalRecordSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         doc_file = validated_data.pop('document', None)
         if doc_file:
-            from django.core.files.storage import default_storage
+            from django.core.files.storage import default_storage, storages
+            try:
+                storage = storages['raw']
+            except Exception:
+                storage = default_storage
             pet = validated_data.get('pet')
             prefix = f"medical/{pet.id if pet else 'records'}"
-            saved_path = default_storage.save(f"{prefix}/{doc_file.name}", doc_file)
-            doc_url = default_storage.url(saved_path)
+            saved_path = storage.save(f"{prefix}/{doc_file.name}", doc_file)
+            doc_url = storage.url(saved_path)
             desc = validated_data.get('description', '')
             if desc:
                 validated_data['description'] = f"{desc}\nDocument: {doc_url}"
             else:
                 validated_data['description'] = f"Document: {doc_url}"
         return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        doc_file = validated_data.pop('document', None)
+        if doc_file:
+            from django.core.files.storage import default_storage, storages
+            try:
+                storage = storages['raw']
+            except Exception:
+                storage = default_storage
+            pet = instance.pet
+            prefix = f"medical/{pet.id if pet else 'records'}"
+            saved_path = storage.save(f"{prefix}/{doc_file.name}", doc_file)
+            doc_url = storage.url(saved_path)
+            desc = validated_data.get('description', instance.clinical_description)
+            validated_data['description'] = f"{desc}\nDocument: {doc_url}".strip() if desc else f"Document: {doc_url}"
+        elif 'description' in validated_data and instance.document:
+            existing_doc = instance.document
+            desc = validated_data['description']
+            if existing_doc and "Document: " not in desc:
+                validated_data['description'] = f"{desc}\nDocument: {existing_doc}".strip()
+        return super().update(instance, validated_data)
 
 
 class PetListSerializer(serializers.ModelSerializer):

@@ -102,9 +102,28 @@ class PetMedicalRecord(models.Model):
     @property
     def document(self):
         """Document URL or path attached in record description if present."""
-        if self.description and "Document: " in self.description:
-            return self.description.split("Document: ")[-1].strip()
+        if not self.description:
+            return None
+        for line in self.description.splitlines():
+            if line.strip().startswith("Document: "):
+                return line.strip()[len("Document: "):].strip()
         return None
+
+    @document.setter
+    def document(self, url):
+        clean = self.clinical_description
+        if url:
+            self.description = f"{clean}\nDocument: {str(url).strip()}".strip() if clean else f"Document: {str(url).strip()}"
+        else:
+            self.description = clean
+
+    @property
+    def clinical_description(self):
+        """Clinical medical notes excluding the appended Document: reference tag."""
+        if not self.description:
+            return ""
+        lines = [line for line in self.description.splitlines() if not line.strip().startswith("Document: ")]
+        return "\n".join(lines).strip()
 
 
 class FavoritePet(models.Model):

@@ -164,10 +164,26 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # Cloudinary CDN & Media Storage Configuration
 USE_CLOUDINARY = os.getenv('USE_CLOUDINARY', 'False').lower() in ('true', '1', 't')
 
+CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME', '').strip()
+CLOUDINARY_API_KEY = os.getenv('CLOUDINARY_API_KEY', '').strip()
+CLOUDINARY_API_SECRET = os.getenv('CLOUDINARY_API_SECRET', '').strip()
+
+if USE_CLOUDINARY:
+    missing_creds = [
+        name for name, val in [
+            ('CLOUDINARY_CLOUD_NAME', CLOUDINARY_CLOUD_NAME),
+            ('CLOUDINARY_API_KEY', CLOUDINARY_API_KEY),
+            ('CLOUDINARY_API_SECRET', CLOUDINARY_API_SECRET),
+        ] if not val
+    ]
+    if missing_creds:
+        from django.core.exceptions import ImproperlyConfigured
+        raise ImproperlyConfigured(f"USE_CLOUDINARY is True, but required credentials are missing or empty: {', '.join(missing_creds)}")
+
 CLOUDINARY_STORAGE = {
-    'CLOUD_NAME': os.getenv('CLOUDINARY_CLOUD_NAME', 'mock_cloud'),
-    'API_KEY': os.getenv('CLOUDINARY_API_KEY', 'mock_key'),
-    'API_SECRET': os.getenv('CLOUDINARY_API_SECRET', 'mock_secret'),
+    'CLOUD_NAME': CLOUDINARY_CLOUD_NAME or 'mock_cloud',
+    'API_KEY': CLOUDINARY_API_KEY or 'mock_key',
+    'API_SECRET': CLOUDINARY_API_SECRET or 'mock_secret',
 }
 
 if USE_CLOUDINARY:
@@ -175,6 +191,9 @@ if USE_CLOUDINARY:
     STORAGES = {
         'default': {
             'BACKEND': 'cloudinary_storage.storage.MediaCloudinaryStorage',
+        },
+        'raw': {
+            'BACKEND': 'cloudinary_storage.storage.RawMediaCloudinaryStorage',
         },
         'staticfiles': {
             'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
@@ -186,6 +205,9 @@ else:
         'default': {
             'BACKEND': 'django.core.files.storage.FileSystemStorage',
         },
+        'raw': {
+            'BACKEND': 'django.core.files.storage.FileSystemStorage',
+        },
         'staticfiles': {
             'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
         },
@@ -195,6 +217,8 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Email Configuration
 EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'KindHeart Pet Adoption <no-reply@kindheart.org>')
+SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
 # Razorpay Payment Gateway Configuration
 RAZORPAY_KEY_ID = os.getenv('RAZORPAY_KEY_ID', 'rzp_test_mock_key_id')
