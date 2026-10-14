@@ -213,6 +213,7 @@ class EndToEndContractFlowTestCase(TestCase):
         res_assign = self.client.post('/api/deliveries/assign/', data=assign_payload, format='json')
         self.assertEqual(res_assign.status_code, status.HTTP_201_CREATED)
         delivery_public_id = res_assign.data['public_id']
+        pickup_code = res_assign.data['pickup_otp']
         delivery_obj = PetDelivery.objects.get(public_id=delivery_public_id)
 
         # 4.2 Driver Logs In and Views Active Task (/api/deliveries/driver-active/)
@@ -227,11 +228,11 @@ class EndToEndContractFlowTestCase(TestCase):
         self.assertEqual(res_drv_active.status_code, status.HTTP_200_OK)
         self.assertEqual(res_drv_active.data['public_id'], str(delivery_public_id))
 
-        # 4.3 Driver verifies Pickup OTP at shelter (returned once to shelter in assign response body)
-        pickup_code = res_assign.data['pickup_otp']
-        res_pickup = self.client.post(f'/api/deliveries/{delivery_public_id}/pickup/', data={
-            'otp': pickup_code
-        }, format='json')
+        # 4.3 Driver Verifies Pickup OTP at shelter (returned once to shelter in assign response body)
+        with self.captureOnCommitCallbacks(execute=True):
+            res_pickup = self.client.post(f'/api/deliveries/{delivery_public_id}/pickup/', data={
+                'otp': pickup_code
+            }, format='json')
         self.assertEqual(res_pickup.status_code, status.HTTP_200_OK)
 
         # 4.4 Driver Sends Location Breadcrumbs (/api/deliveries/<id>/ping/)
@@ -259,9 +260,10 @@ class EndToEndContractFlowTestCase(TestCase):
 
         # 4.6 Driver Verifies Doorstep OTP (/api/deliveries/<id>/verify-otp/)
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {driver_token}')
-        res_verify_otp = self.client.post(f'/api/deliveries/{delivery_public_id}/verify-otp/', data={
-            'otp': customer_doorstep_otp
-        }, format='json')
+        with self.captureOnCommitCallbacks(execute=True):
+            res_verify_otp = self.client.post(f'/api/deliveries/{delivery_public_id}/verify-otp/', data={
+                'otp': customer_doorstep_otp
+            }, format='json')
         self.assertEqual(res_verify_otp.status_code, status.HTTP_200_OK)
 
         # Verify delivery is delivered and application is completed

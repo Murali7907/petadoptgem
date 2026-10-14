@@ -179,11 +179,17 @@ def assign_delivery_task(application: AdoptionApplication, driver: DeliveryProfi
         driver.is_available = False
         driver.save()
 
-        # Send adopter notice (driver contact info, NO OTP)
-        try:
-            send_driver_assigned_notice(delivery)
-        except Exception as e:
-            logger.error(f"Failed to send driver assigned notice for delivery #{delivery.id}: {e}", exc_info=True)
+        # Send adopter notice (driver contact info, NO OTP) via transaction.on_commit
+        deliv_id = delivery.id
+        def _send_assigned_notice():
+            try:
+                deliv = PetDelivery.objects.filter(id=deliv_id).first()
+                if deliv:
+                    send_driver_assigned_notice(deliv)
+            except Exception as e:
+                logger.error(f"Failed to send driver assigned notice for delivery #{deliv_id}: {e}", exc_info=True)
+
+        transaction.on_commit(_send_assigned_notice)
 
         return delivery
 
@@ -252,18 +258,23 @@ def verify_pickup_service(delivery_id: int | str, submitted_otp: str) -> OTPVeri
 
         # Issue doorstep OTP
         raw_doorstep_otp = issue_otp(delivery, 'doorstep')
-        delivery.raw_doorstep_otp = raw_doorstep_otp
         delivery.save()
 
-        # Send doorstep OTP email to customer
-        if not delivery.doorstep_otp_sent_at:
+        # Send doorstep OTP email to customer via transaction.on_commit
+        deliv_id = delivery.id
+        def _send_doorstep_email():
             try:
-                sent = dispatch_doorstep_otp(delivery, raw_otp=raw_doorstep_otp)
-                if sent:
-                    PetDelivery.objects.filter(id=delivery.id).update(doorstep_otp_sent_at=timezone.now())
-                    delivery.doorstep_otp_sent_at = timezone.now()
+                deliv = PetDelivery.objects.filter(id=deliv_id).first()
+                if deliv:
+                    sent = dispatch_doorstep_otp(deliv, raw_otp=raw_doorstep_otp)
+                    if sent:
+                        PetDelivery.objects.filter(id=deliv_id).update(doorstep_otp_sent_at=timezone.now())
+                    else:
+                        logger.error(f"Failed to dispatch doorstep OTP for delivery #{deliv_id}: dispatch returned False.")
             except Exception as e:
-                logger.error(f"Failed to email doorstep OTP for delivery #{delivery.id}: {e}", exc_info=True)
+                logger.error(f"Failed to email doorstep OTP for delivery #{deliv_id}: {e}", exc_info=True)
+
+        transaction.on_commit(_send_doorstep_email)
 
         return OTPVerificationResult(
             outcome=OTPVerificationOutcome.SUCCESS,
@@ -275,9 +286,6 @@ def verify_pickup_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
     """Thin wrapper around verify_pickup_service for backwards compatibility."""
     res = verify_pickup_service(delivery.id, submitted_otp)
     if res.outcome == OTPVerificationOutcome.SUCCESS:
-        if res.delivery:
-            delivery.refresh_from_db()
-            delivery.raw_doorstep_otp = getattr(res.delivery, 'raw_doorstep_otp', None)
         return True
     raise ValidationError(res.detail or "Invalid pickup OTP.")
 
@@ -405,10 +413,16 @@ def verify_doorstep_service(delivery_id: int | str, submitted_otp: str) -> OTPVe
             resolve_delivery_payment_status(delivery)
             application.save()
 
-        try:
-            send_delivery_completed_notice(delivery)
-        except Exception as e:
-            logger.error(f"Error sending delivery completed notice for delivery #{delivery.id}: {e}", exc_info=True)
+        deliv_id = delivery.id
+        def _send_completed_notice():
+            try:
+                deliv = PetDelivery.objects.filter(id=deliv_id).first()
+                if deliv:
+                    send_delivery_completed_notice(deliv)
+            except Exception as e:
+                logger.error(f"Error sending delivery completed notice for delivery #{deliv_id}: {e}", exc_info=True)
+
+        transaction.on_commit(_send_completed_notice)
 
         return OTPVerificationResult(
             outcome=OTPVerificationOutcome.SUCCESS,
