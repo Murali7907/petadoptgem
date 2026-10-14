@@ -934,25 +934,40 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
 
     def test_otp_verify_throttle_rate_limit_429(self):
         """
-        Confirms that the 'otp_verify' throttle scope is enforced:
-        Rate is 10/min. Requests 1-10 are processed (returning 400 for bad input),
+        Confirms that the 'otp_verify' throttle scope is enforced for BOTH
+        /api/v1/ and legacy /api/deliveries/ routes:
+        Rate is 10/min. Requests 1-10 are processed,
         and the 11th request in that same minute returns HTTP 429 Too Many Requests.
         """
         from django.core.cache import cache
         cache.clear()
 
+        # 1. Test /api/v1/ route
         delivery = assign_delivery_task(self.application, self.driver_profile)
         self.client.force_authenticate(user=self.driver_user)
-        url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+        url_v1 = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
 
         for i in range(1, 11):
-            res = self.client.post(url, {'otp': '000000'}, format='json')
+            res = self.client.post(url_v1, {'otp': '000000'}, format='json')
             self.assertIn(res.status_code, [status.HTTP_400_BAD_REQUEST, 423], f"Request {i} unexpectedly failed with status {res.status_code}")
 
-        # 11th request must be throttled -> 429 Too Many Requests
-        res_throttled = self.client.post(url, {'otp': '000000'}, format='json')
-        self.assertEqual(res_throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
-        self.assertIn('Request was throttled', str(res_throttled.data))
+        res_throttled_v1 = self.client.post(url_v1, {'otp': '000000'}, format='json')
+        self.assertEqual(res_throttled_v1.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertIn('Request was throttled', str(res_throttled_v1.data))
+
+        # 2. Test legacy /api/deliveries/ route
+        cache.clear()
+        delivery.pickup_otp_attempts = 0
+        delivery.save(update_fields=['pickup_otp_attempts'])
+        url_legacy = f'/api/deliveries/{delivery.public_id}/pickup/'
+
+        for i in range(1, 11):
+            res = self.client.post(url_legacy, {'otp': '000000'}, format='json')
+            self.assertIn(res.status_code, [status.HTTP_400_BAD_REQUEST, 423], f"Legacy request {i} failed with {res.status_code}")
+
+        res_throttled_legacy = self.client.post(url_legacy, {'otp': '000000'}, format='json')
+        self.assertEqual(res_throttled_legacy.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertIn('Request was throttled', str(res_throttled_legacy.data))
 
     def test_pet_delivery_admin_security_configuration(self):
         """

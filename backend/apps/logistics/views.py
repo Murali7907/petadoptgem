@@ -273,8 +273,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
     @extend_schema(request=OTPVerificationSerializer, responses={200: DeliveryPickupResponseSerializer})
     @action(detail=True, methods=['post'], url_path='pickup',
-            permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver],
-            throttle_classes=[ScopedRateThrottle])
+            permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
     def pickup(self, request, *args, **kwargs):
         raw_otp = request.data.get('otp') or request.data.get('code') or request.data.get('secret_otp')
         if not raw_otp:
@@ -340,8 +339,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
     @extend_schema(request=OTPVerificationSerializer, responses={200: DeliveryDoorstepResponseSerializer})
     @action(detail=True, methods=['post'], url_path='verify-doorstep',
-            permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver],
-            throttle_classes=[ScopedRateThrottle])
+            permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
     def verify_doorstep(self, request, *args, **kwargs):
         raw_otp = request.data.get('otp') or request.data.get('code') or request.data.get('secret_otp')
         if not raw_otp:
@@ -382,8 +380,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
     @extend_schema(request=OTPVerificationSerializer, responses={200: DeliveryDoorstepResponseSerializer})
     @action(detail=True, methods=['post'], url_path='verify-otp',
-            permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver],
-            throttle_classes=[ScopedRateThrottle])
+            permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
     def verify_otp(self, request, *args, **kwargs):
         return self.verify_doorstep(request, *args, **kwargs)
 
