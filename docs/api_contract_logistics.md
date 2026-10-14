@@ -1,0 +1,262 @@
+# Logistics & OTP Verification API Contract
+
+## Overview
+
+This document specifies the canonical and legacy API contracts for the pet delivery and doorstep verification lifecycle in the Pet Adoption Platform backend (Django REST Framework).
+
+---
+
+## Security Model & Cryptographic Guarantees
+
+1. **Zero Plaintext Persistence**: Plaintext OTPs (6 numeric digits) are never persisted in the database. Instead, HMAC-SHA256 digests (`hash = HMAC_SHA256(key=settings.SECRET_KEY, msg=f"{delivery.id}:{purpose}:{otp}")`) are stored in `pickup_otp_hash` and `doorstep_otp_hash`.
+2. **Zero Serializer Leakage**: Serializers (`DeliveryDriverTaskSerializer`, `ShelterDeliverySerializer`, `DeliveryCustomerSerializer`) never include plaintext `pickup_otp` or `doorstep_otp`. Tracking endpoints expose timestamps (`doorstep_otp_sent_at`, `doorstep_otp_expires_at`) but never verification codes.
+3. **Decoupled Verification Lifecycle**:
+   - `assign`: Generates **only** the pickup OTP (returned once in response to the shelter). Doorstep OTP is **not** created at assignment.
+   - `pickup`: Validates pickup OTP, transitions delivery to `out_for_delivery`, and issues the doorstep OTP, dispatching it to the adopter via email.
+   - `verify_doorstep`: Validates doorstep OTP, transitions delivery to `delivered`, marks pet `adopted`, marks adoption `completed`, and frees the driver.
+4. **Concurrency & Rate Protection**:
+   - All verification endpoints employ row-level locking via `select_for_update()`.
+   - Dedicated DRF throttle scope: `'otp_verify': '10/min'`.
+   - Max attempt limit: `OTP_MAX_ATTEMPTS = 3` before permanent task lockout (`423 Locked`).
+   - OTP Expiry: Configurable `OTP_TTL_MINUTES = 1440` (24h default). Expired OTPs return `410 Gone`.
+
+---
+
+## Canonical Endpoints
+
+### 1. Assign Delivery Task
+- **URL**: `POST /api/v1/deliveries/assign/` (Legacy alias: `POST /api/deliveries/assign/`)
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: Shelter Profile required (must own the shelter managing the adoption pet)
+- **Request Body**:
+  ```json
+  {
+    "application_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "driver_id": "4fa85f64-5717-4562-b3fc-2c963f66afa7",
+    "payment_method": "cod"
+  }
+  ```
+- **Responses**:
+  - `201 Created`: Driver assigned successfully.
+    ```json
+    {
+      "message": "Delivery task assigned successfully.",
+      "public_id": "5fa85f64-5717-4562-b3fc-2c963f66afa8",
+      "status": "assigned",
+      "pickup_otp": "654321",
+      "pickup_otp_expires_at": "2026-10-15T12:00:00Z"
+    }
+    ```
+    *(Note: `pickup_otp` is returned in plaintext ONCE upon creation so shelter staff can verify driver handoff).*
+  - `400 Bad Request`: Validation failure or driver unavailable.
+  - `403 Forbidden`: User does not possess a shelter profile or does not own the pet's shelter.
+  - `404 Not Found`: Application or Driver not found.
+
+---
+
+### 2. Get Active Driver Task
+- **URL**: `GET /api/v1/deliveries/driver-active/` (Legacy alias: `GET /api/deliveries/driver-active/`)
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: Delivery Driver Profile required
+- **Responses**:
+  - `200 OK`: Active task returned.
+    ```json
+    {
+      "public_id": "5fa85f64-5717-4562-b3fc-2c963f66afa8",
+      "status": "assigned",
+      "customer_name": "Adopter Name",
+      "customer_phone": "+919876543210",
+      "destination_address": "123 Main St, City",
+      "destination_pincode": "560001",
+      "destination_latitude": "12.971600",
+      "destination_longitude": "77.594600",
+      "pet_summary": "Rocky (Dog, Golden Retriever)",
+      "total_amount": "250.00",
+      "payment_method": "cod",
+      "cash_collected": "0.00",
+      "pickup_otp_attempts": 0,
+      "doorstep_otp_attempts": 0,
+      "doorstep_otp_sent_at": null,
+      "doorstep_otp_expires_at": null
+    }
+    ```
+    *(Note: Plaintext OTP fields are strictly omitted).*
+  - `404 Not Found`: No active assigned or in-transit delivery task.
+
+---
+
+### 3. Verify Pickup OTP at Shelter
+- **URL**: `POST /api/v1/deliveries/{id}/pickup/` (Legacy alias: `POST /api/deliveries/{id}/pickup/`)
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: Delivery Driver assigned to this specific delivery
+- **Rate Limit**: 10 requests / minute
+- **Request Body**:
+  ```json
+  {
+    "otp": "654321"
+  }
+  ```
+- **Responses**:
+  - `200 OK`: Pickup verified. Delivery transitioned to `out_for_delivery`. Doorstep OTP generated and emailed to customer.
+    ```json
+    {
+      "message": "Pet picked up successfully. Status transitioned to out_for_delivery.",
+      "status": "out_for_delivery",
+      "doorstep_otp_sent_at": "2026-10-14T10:00:00Z",
+      "doorstep_otp_expires_at": "2026-10-15T10:00:00Z"
+    }
+    ```
+  - `400 Bad Request`: OTP format invalid (not 6 digits) or incorrect OTP code (`attempts_left` decremented).
+    ```json
+    {
+      "error": "Invalid verification code.",
+      "attempts_left": 2
+    }
+    ```
+  - `403 Forbidden`: Authenticated driver is not assigned to this delivery task.
+  - `409 Conflict`: Delivery is not in `assigned` status (e.g. already picked up).
+  - `410 Gone`: Pickup OTP has expired. Reissue required via shelter.
+  - `423 Locked`: Maximum verification attempts (3) exceeded.
+  - `429 Too Many Requests`: Rate limit throttled.
+
+---
+
+### 4. Verify Doorstep OTP with Adopter
+- **URL**: `POST /api/v1/deliveries/{id}/verify-doorstep/` (Legacy alias: `POST /api/v1/deliveries/{id}/verify-otp/`, `POST /api/deliveries/{id}/verify-otp/`)
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: Delivery Driver assigned to this specific delivery
+- **Rate Limit**: 10 requests / minute
+- **Request Body**:
+  ```json
+  {
+    "otp": "123456"
+  }
+  ```
+- **Responses**:
+  - `200 OK`: Verification successful. Delivery transitioned to `delivered`.
+    ```json
+    {
+      "message": "Doorstep delivery verified successfully.",
+      "status": "delivered",
+      "delivered_at": "2026-10-14T11:30:00Z"
+    }
+    ```
+    *(Idempotent: Subsequent calls on already `delivered` tasks return `200 OK` with `{"message": "Delivery already completed."}`).*
+  - `400 Bad Request`: OTP format invalid or incorrect code with attempts remaining.
+  - `403 Forbidden`: Driver not assigned to this delivery.
+  - `409 Conflict`: Delivery is not `out_for_delivery` or `in_transit`.
+  - `410 Gone`: Doorstep OTP has expired.
+  - `423 Locked`: Maximum attempts (3) exceeded.
+  - `429 Too Many Requests`: Rate limit throttled.
+
+---
+
+### 5. Shelter Reissue OTP Endpoint
+- **URL**: `POST /api/v1/shelter/deliveries/{id}/reissue-otp/` (Legacy alias: `POST /api/deliveries/shelter/deliveries/{id}/reissue-otp/`)
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: Shelter Profile owner of the pet's shelter
+- **Request Body**:
+  ```json
+  {
+    "purpose": "pickup"
+  }
+  ```
+  *(Supported purposes: `"pickup"` or `"doorstep"`).*
+- **Responses**:
+  - `200 OK (purpose="pickup")`:
+    ```json
+    {
+      "message": "Pickup OTP reissued successfully.",
+      "purpose": "pickup",
+      "pickup_otp": "789123",
+      "expires_at": "2026-10-15T12:00:00Z"
+    }
+    ```
+  - `200 OK (purpose="doorstep")`:
+    ```json
+    {
+      "message": "Doorstep OTP reissued and emailed to adopter.",
+      "purpose": "doorstep",
+      "recipient": "adopter@example.com",
+      "doorstep_otp_sent_at": "2026-10-14T12:00:00Z",
+      "expires_at": "2026-10-15T12:00:00Z"
+    }
+    ```
+  - `400 Bad Request`: Invalid purpose (must be `"pickup"` or `"doorstep"`).
+  - `403 Forbidden`: User is not associated with the managing shelter.
+  - `409 Conflict`: State invariant violation (e.g. attempting pickup reissue when already out for delivery, or doorstep reissue while still in assigned status).
+
+---
+
+### 6. Driver Manual Status Update
+- **URL**: `POST /api/v1/deliveries/{id}/status/` (Legacy alias: `POST /api/deliveries/{id}/status/`)
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: Assigned Driver
+- **Request Body**:
+  ```json
+  {
+    "status": "failed",
+    "failure_reason": "Customer unavailable at address after repeated contact."
+  }
+  ```
+- **Responses**:
+  - `200 OK`: Status updated to `failed`, driver marked available (`is_available=True`).
+  - `400 Bad Request`: Any status other than `"failed"` is rejected. Intermediate transitions (`out_for_delivery`, `delivered`) MUST use cryptographic OTP endpoints.
+
+---
+
+### 7. Delivery Tracking (Customer / Shelter / Driver)
+- **URL**: `GET /api/v1/deliveries/{id}/track/` (Legacy alias: `GET /api/deliveries/{id}/track/`)
+- **Authentication**: Required
+- **Permissions**: Adopter, Shelter Staff, or Assigned Driver
+- **Responses**:
+  - `200 OK`:
+    ```json
+    {
+      "delivery": {
+        "public_id": "5fa85f64-5717-4562-b3fc-2c963f66afa8",
+        "status": "out_for_delivery",
+        "driver_name": "John Driver",
+        "driver_phone": "+919876543210",
+        "vehicle_number": "KA-01-AB-1234",
+        "doorstep_otp_sent_at": "2026-10-14T10:00:00Z",
+        "doorstep_otp_expires_at": "2026-10-15T10:00:00Z"
+      },
+      "current_coordinates": {
+        "latitude": "12.950000",
+        "longitude": "77.660000",
+        "recorded_at": "2026-10-14T10:15:00Z"
+      }
+    }
+    ```
+    *(Note: Plaintext OTP is never returned).*
+
+---
+
+## HTTP Status Code Summary Matrix
+
+| Status Code | Meaning | Endpoint Scenarios |
+|---|---|---|
+| `200 OK` | Success / Idempotent | Verification succeeded, OTP reissued, or repeat verification on completed task. |
+| `201 Created` | Resource Created | Delivery task assigned, breadcrumb ping saved. |
+| `400 Bad Request` | Client Error | Malformed payload, non-6-digit OTP regex failure, invalid status transition, incorrect OTP with attempts remaining. |
+| `403 Forbidden` | Access Denied | Authenticated user is not the assigned driver or authorized shelter profile. |
+| `404 Not Found` | Resource Missing | Delivery task or driver does not exist. |
+| `409 Conflict` | Invalid Lifecycle State | Attempting doorstep verification before pickup, or reissuing OTP in mismatched delivery status. |
+| `410 Gone` | OTP Expired | The submitted OTP has passed its configured TTL expiry. |
+| `423 Locked` | Security Lockout | Verification attempts exceeded (`OTP_MAX_ATTEMPTS = 3`). |
+| `429 Too Many Requests` | Rate Limited | Exceeded `otp_verify` throttle rate (10 requests/min). |
+
+---
+
+## Breaking Changes from Legacy Behavior
+
+1. **Serializer Schema Changes**:
+   - `pickup_otp` removed from `DeliveryDriverTaskSerializer` and `ShelterDeliverySerializer`.
+   - `doorstep_otp` removed from `ShelterDeliverySerializer`, `DeliveryCustomerSerializer`, and tracking endpoints.
+   - Introduced read-only timestamp fields: `doorstep_otp_sent_at` and `doorstep_otp_expires_at`.
+2. **Doorstep OTP Generation Timing**:
+   - In legacy code, doorstep OTP was generated at task assignment.
+   - In hardened architecture, doorstep OTP is generated **only** when the driver successfully verifies pickup at the shelter.
+3. **Status Update Restrictions**:
+   - `POST /deliveries/<id>/status/` no longer accepts `out_for_delivery` or `delivered`. Transitions can only occur via OTP verification endpoints or explicit failure declaration (`failed`).

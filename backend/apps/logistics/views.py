@@ -75,7 +75,8 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
     def get_shelter_profile(self):
         user = self.request.user
         if not hasattr(user, 'shelter_profile') or not user.shelter_profile:
-            raise ValidationError({"detail": "User is not associated with a shelter profile."})
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("User is not associated with a shelter profile.")
         return user.shelter_profile
 
     def get_object(self):

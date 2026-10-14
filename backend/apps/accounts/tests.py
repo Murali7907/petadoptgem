@@ -9,6 +9,7 @@ if str(BACKEND_DIR) not in sys.path:
 import jwt
 from django.conf import settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 from apps.accounts.models import User, ShelterProfile, DeliveryProfile
@@ -308,6 +309,7 @@ class AdminPlatformOversightAPITests(APITestCase):
             application=app_completed,
             driver=self.delivery_profile,
             status='delivered',
+            delivered_at=timezone.now(),
             pickup_otp='555666',
             doorstep_otp='777888'
         )

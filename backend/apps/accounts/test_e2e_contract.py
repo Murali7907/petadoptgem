@@ -227,8 +227,8 @@ class EndToEndContractFlowTestCase(TestCase):
         self.assertEqual(res_drv_active.status_code, status.HTTP_200_OK)
         self.assertEqual(res_drv_active.data['public_id'], str(delivery_public_id))
 
-        # 4.3 Driver verifies Pickup OTP at shelter
-        pickup_code = delivery_obj.pickup_otp
+        # 4.3 Driver verifies Pickup OTP at shelter (returned once to shelter in assign response body)
+        pickup_code = res_assign.data['pickup_otp']
         res_pickup = self.client.post(f'/api/deliveries/{delivery_public_id}/pickup/', data={
             'otp': pickup_code
         }, format='json')
@@ -248,7 +248,13 @@ class EndToEndContractFlowTestCase(TestCase):
         self.assertEqual(res_track.status_code, status.HTTP_200_OK)
         self.assertEqual(res_track.data['current_coordinates']['latitude'], '12.950000')
         self.assertEqual(res_track.data['current_coordinates']['longitude'], '77.660000')
-        customer_doorstep_otp = res_track.data['delivery']['doorstep_otp']
+        # Hardened architecture: plaintext OTP stripped from tracking payload; dispatched via secure email
+        self.assertNotIn('doorstep_otp', res_track.data['delivery'])
+        self.assertTrue(bool(res_track.data['delivery']['doorstep_otp_sent_at']))
+        import re
+        from django.core import mail
+        match = re.search(r'\b\d{6}\b', mail.outbox[-1].body)
+        customer_doorstep_otp = match.group(0) if match else ''
         self.assertTrue(bool(customer_doorstep_otp))
 
         # 4.6 Driver Verifies Doorstep OTP (/api/deliveries/<id>/verify-otp/)

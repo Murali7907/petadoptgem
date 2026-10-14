@@ -8,6 +8,8 @@ if str(BACKEND_DIR) not in sys.path:
 
 import hashlib
 import hmac
+import re
+from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch, MagicMock
 from django.conf import settings
@@ -17,14 +19,22 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
 
-from apps.accounts.models import User, ShelterProfile, DeliveryProfile
+from apps.accounts.models import User, ShelterProfile, DeliveryProfile, Notification
 from apps.pets.models import Pet
 from apps.adoptions.models import AdoptionApplication
 from apps.logistics.models import PetDelivery, DeliveryLocationPing, Payment
+from apps.logistics.serializers import (
+    DeliveryDriverTaskSerializer,
+    DeliveryCustomerSerializer,
+    ShelterDeliverySerializer
+)
 from apps.logistics.services import (
     assign_delivery_task,
     verify_pickup_otp,
-    dispatch_doorstep_otp
+    verify_doorstep_otp,
+    dispatch_doorstep_otp,
+    send_driver_assigned_notice,
+    reissue_delivery_otp,
 )
 
 
@@ -96,10 +106,19 @@ class LogisticsTestCase(TestCase):
             delivery_pincode='560001',
             destination_latitude=Decimal('12.971600'),
             destination_longitude=Decimal('77.594600'),
-            contact_phone=self.customer_user.phone
+            contact_phone=self.customer_user.phone,
+            total_amount=Decimal('150.00'),
+            payment_status='pending'
         )
 
     def test_driver_assignment_and_availability_toggle(self):
+        """
+        Tests driver assignment:
+        - Delivery created in 'assigned' status.
+        - Plaintext OTPs in database are empty (cryptographic hash stored).
+        - Single-use pickup_otp is returned once in response data.
+        - Driver availability toggled to False.
+        """
         self.client.force_authenticate(user=self.shelter_user)
         url = '/api/v1/shelter/deliveries/assign/'
         payload = {
@@ -110,11 +129,17 @@ class LogisticsTestCase(TestCase):
         response = self.client.post(url, payload, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
-        # Verify delivery created
+        # Verify pickup_otp is provided once in response body
+        self.assertIn('pickup_otp', response.data)
+        self.assertEqual(len(response.data['pickup_otp']), 6)
+
+        # Verify delivery created in DB without plaintext OTP storage
         delivery = PetDelivery.objects.get(application=self.application)
         self.assertEqual(delivery.status, 'assigned')
-        self.assertEqual(len(delivery.pickup_otp), 6)
-        self.assertEqual(len(delivery.doorstep_otp), 6)
+        self.assertEqual(delivery.pickup_otp, '')
+        self.assertEqual(delivery.doorstep_otp, '')
+        self.assertIsNotNone(delivery.pickup_otp_hash)
+        self.assertIsNone(delivery.doorstep_otp_hash)
 
         # Verify driver availability updated to False
         self.driver_profile.refresh_from_db()
@@ -155,9 +180,10 @@ class LogisticsTestCase(TestCase):
 
     def test_pickup_otp_verification(self):
         delivery = assign_delivery_task(self.application, self.driver_profile, payment_method='cod')
+        pickup_code = delivery.raw_pickup_otp
 
         self.client.force_authenticate(user=self.driver_user)
-        
+
         # Test active task GET endpoint
         active_res = self.client.get('/api/v1/delivery/tasks/active/')
         self.assertEqual(active_res.status_code, status.HTTP_200_OK)
@@ -170,45 +196,64 @@ class LogisticsTestCase(TestCase):
 
         # Test pickup OTP verification
         url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
-        response = self.client.post(url, {'otp': delivery.pickup_otp}, format='json')
+        response = self.client.post(url, {'otp': pickup_code}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         delivery.refresh_from_db()
         self.assertEqual(delivery.status, 'out_for_delivery')
         self.assertIsNotNone(delivery.dispatched_at)
+        self.assertIsNotNone(delivery.doorstep_otp_hash)
 
     def test_doorstep_otp_brute_force_protection(self):
+        """
+        Tests attempt counter and lockout:
+        OTP_MAX_ATTEMPTS is 3:
+        Attempts 1-3 fail with 400 Bad Request and decrement attempts_remaining.
+        Attempt 4 returns HTTP 423 Locked.
+        """
         delivery = assign_delivery_task(self.application, self.driver_profile, payment_method='cod')
-        verify_pickup_otp(delivery, delivery.pickup_otp)
+        verify_pickup_otp(delivery, delivery.raw_pickup_otp)
 
         self.client.force_authenticate(user=self.driver_user)
         url = f'/api/v1/delivery/tasks/{delivery.public_id}/verify-doorstep/'
 
-        # Fail 4 times with invalid OTP
-        for _ in range(4):
-            res = self.client.post(url, {'otp': '000000'}, format='json')
-            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        # Fail attempt 1
+        res1 = self.client.post(url, {'otp': '000000'}, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res1.data['attempts_remaining'], 2)
+
+        # Fail attempt 2
+        res2 = self.client.post(url, {'otp': '000000'}, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res2.data['attempts_remaining'], 1)
+
+        # Fail attempt 3
+        res3 = self.client.post(url, {'otp': '000000'}, format='json')
+        self.assertEqual(res3.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res3.data['attempts_remaining'], 0)
 
         delivery.refresh_from_db()
-        self.assertEqual(delivery.doorstep_otp_attempts, 4)
+        self.assertEqual(delivery.doorstep_otp_attempts, 3)
 
-        # 5th failed attempt should lock out
-        res5 = self.client.post(url, {'otp': '000000'}, format='json')
-        self.assertEqual(res5.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('Maximum OTP attempts exceeded', str(res5.data))
-
-        # 6th attempt when locked out
-        res6 = self.client.post(url, {'otp': delivery.doorstep_otp}, format='json')
-        self.assertEqual(res6.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('Maximum OTP attempts exceeded', str(res6.data))
+        # Attempt 4: Lockout -> HTTP 423 Locked
+        res4 = self.client.post(url, {'otp': '000000'}, format='json')
+        self.assertEqual(res4.status_code, 423)
+        self.assertIn('Maximum OTP verification attempts exceeded', res4.data['detail'])
 
     def test_successful_doorstep_otp_verification(self):
         delivery = assign_delivery_task(self.application, self.driver_profile, payment_method='cod')
-        verify_pickup_otp(delivery, delivery.pickup_otp)
+        mail.outbox.clear()
+        verify_pickup_otp(delivery, delivery.raw_pickup_otp)
+
+        # Obtain doorstep OTP from dispatched email
+        self.assertEqual(len(mail.outbox), 1)
+        match = re.search(r"OTP is:\s*(\d{6})", mail.outbox[0].body)
+        self.assertIsNotNone(match)
+        doorstep_code = match.group(1)
 
         self.client.force_authenticate(user=self.driver_user)
         url = f'/api/v1/delivery/tasks/{delivery.public_id}/verify-doorstep/'
-        response = self.client.post(url, {'otp': delivery.doorstep_otp}, format='json')
+        response = self.client.post(url, {'otp': doorstep_code}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         delivery.refresh_from_db()
@@ -219,13 +264,16 @@ class LogisticsTestCase(TestCase):
         self.driver_profile.refresh_from_db()
         self.assertTrue(self.driver_profile.is_available)
 
-        # Check application status updated to completed
+        # Check pet and application status updated
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'adopted')
+
         self.application.refresh_from_db()
         self.assertEqual(self.application.status, 'completed')
 
     def test_gps_ping_ingestion_and_tracking(self):
         delivery = assign_delivery_task(self.application, self.driver_profile, payment_method='cod')
-        verify_pickup_otp(delivery, delivery.pickup_otp)
+        verify_pickup_otp(delivery, delivery.raw_pickup_otp)
 
         self.client.force_authenticate(user=self.driver_user)
         ping_url = f'/api/v1/delivery/tasks/{delivery.public_id}/ping/'
@@ -248,13 +296,14 @@ class LogisticsTestCase(TestCase):
         self.assertEqual(self.driver_profile.current_latitude, Decimal('12.971598'))
         self.assertEqual(self.driver_profile.current_longitude, Decimal('77.594566'))
 
-        # Test tracking endpoint for Customer
+        # Test tracking endpoint for Customer: must NOT expose doorstep_otp
         self.client.force_authenticate(user=self.customer_user)
         tracking_url = f'/api/v1/delivery/tasks/{delivery.public_id}/tracking/'
         tracking_res = self.client.get(tracking_url)
         self.assertEqual(tracking_res.status_code, status.HTTP_200_OK)
         self.assertEqual(tracking_res.data['status'], 'out_for_delivery')
-        self.assertIn('doorstep_otp', tracking_res.data['delivery'])
+        self.assertNotIn('doorstep_otp', tracking_res.data['delivery'])
+        self.assertIn('driver_details', tracking_res.data['delivery'])
         self.assertEqual(len(tracking_res.data['breadcrumbs']), 1)
 
     @patch('razorpay.Client')
@@ -316,9 +365,6 @@ class LogisticsTestCase(TestCase):
         payment.refresh_from_db()
         self.assertEqual(payment.status, 'captured')
         self.assertEqual(payment.razorpay_payment_id, payment_id)
-
-        delivery.refresh_from_db()
-        self.assertEqual(delivery.payment_status, 'paid')
 
     def test_razorpay_payment_signature_verification_failure(self):
         delivery = assign_delivery_task(self.application, self.driver_profile, payment_method='online')
@@ -410,20 +456,28 @@ class DoorstepOTPDispatchTests(TestCase):
         delivery = assign_delivery_task(self.application, self.driver_profile)
         mail.outbox.clear()
 
-        result = dispatch_doorstep_otp(delivery)
+        # dispatch_doorstep_otp with raw_otp sends email and notification without code
+        result = dispatch_doorstep_otp(delivery, raw_otp='654321')
         self.assertTrue(result)
         self.assertEqual(len(mail.outbox), 1)
 
         sent_email = mail.outbox[0]
         self.assertEqual(sent_email.to, [self.customer_user.email])
         self.assertIn(self.pet.name, sent_email.subject)
-        self.assertIn(delivery.secret_otp, sent_email.body)
-        self.assertEqual(len(delivery.secret_otp), 6)
+        self.assertIn('654321', sent_email.body)
         self.assertIn(self.customer_user.username, sent_email.body)
         self.assertIn(self.driver_user.username, sent_email.body)
         self.assertIn(self.driver_user.phone, sent_email.body)
 
-    def test_dispatch_doorstep_otp_triggered_on_assignment_view(self):
+        # In-app notification must not contain OTP code
+        notif = Notification.objects.filter(recipient=self.customer_user).first()
+        self.assertIsNotNone(notif)
+        self.assertNotIn('654321', notif.message)
+
+    def test_driver_assigned_notice_triggered_on_assignment_view(self):
+        """
+        On assignment, adopter receives driver details notice with NO OTP.
+        """
         mail.outbox.clear()
         self.client.force_authenticate(user=self.shelter_user)
         url = '/api/v1/shelter/deliveries/assign/'
@@ -439,15 +493,19 @@ class DoorstepOTPDispatchTests(TestCase):
         self.assertEqual(len(mail.outbox), 1)
         sent_email = mail.outbox[0]
         self.assertEqual(sent_email.to, [self.customer_user.email])
-        self.assertIn(delivery.secret_otp, sent_email.body)
+        self.assertIn('Driver Assigned', sent_email.subject)
+        self.assertIn(self.driver_user.username, sent_email.body)
+        # MUST NOT contain pickup OTP
+        self.assertNotIn(response.data['pickup_otp'], sent_email.body)
 
-    def test_dispatch_doorstep_otp_triggered_on_pickup_transition_to_in_transit(self):
+    def test_dispatch_doorstep_otp_triggered_on_pickup(self):
         delivery = assign_delivery_task(self.application, self.driver_profile)
+        pickup_code = delivery.raw_pickup_otp
         mail.outbox.clear()
 
         self.client.force_authenticate(user=self.driver_user)
         url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
-        response = self.client.post(url, {'otp': delivery.pickup_otp}, format='json')
+        response = self.client.post(url, {'otp': pickup_code}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         delivery.refresh_from_db()
@@ -455,23 +513,34 @@ class DoorstepOTPDispatchTests(TestCase):
         self.assertEqual(len(mail.outbox), 1)
         sent_email = mail.outbox[0]
         self.assertEqual(sent_email.to, [self.customer_user.email])
-        self.assertIn(delivery.secret_otp, sent_email.body)
+        self.assertIn('Doorstep Verification OTP', sent_email.subject)
+        match = re.search(r"OTP is:\s*(\d{6})", sent_email.body)
+        self.assertIsNotNone(match)
+        doorstep_code = match.group(1)
+        self.assertEqual(len(doorstep_code), 6)
 
-    def test_dispatch_doorstep_otp_triggered_on_status_update_in_transit(self):
+    def test_update_status_blocks_in_transit_and_allows_failed(self):
+        """
+        update_status strictly blocks status='in_transit' or status='out_for_delivery' with 400.
+        Only status='failed' is allowed, which frees the driver.
+        """
         delivery = assign_delivery_task(self.application, self.driver_profile)
-        mail.outbox.clear()
 
         self.client.force_authenticate(user=self.driver_user)
         url = f'/api/v1/delivery/tasks/{delivery.public_id}/status/'
-        response = self.client.post(url, {'status': 'in_transit'}, format='json')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # Blocked: in_transit -> 400
+        res_blocked = self.client.post(url, {'status': 'in_transit'}, format='json')
+        self.assertEqual(res_blocked.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Allowed: failed -> 200, frees driver
+        res_fail = self.client.post(url, {'status': 'failed'}, format='json')
+        self.assertEqual(res_fail.status_code, status.HTTP_200_OK)
 
         delivery.refresh_from_db()
-        self.assertEqual(delivery.status, 'out_for_delivery')
-        self.assertEqual(len(mail.outbox), 1)
-        sent_email = mail.outbox[0]
-        self.assertEqual(sent_email.to, [self.customer_user.email])
-        self.assertIn(delivery.secret_otp, sent_email.body)
+        self.assertEqual(delivery.status, 'failed')
+        self.driver_profile.refresh_from_db()
+        self.assertTrue(self.driver_profile.is_available)
 
     def test_dispatch_doorstep_otp_graceful_error_handling(self):
         delivery = assign_delivery_task(self.application, self.driver_profile)
@@ -480,7 +549,7 @@ class DoorstepOTPDispatchTests(TestCase):
         # 1. Customer with no email address returns False gracefully
         self.customer_user.email = ''
         self.customer_user.save()
-        result = dispatch_doorstep_otp(delivery)
+        result = dispatch_doorstep_otp(delivery, raw_otp='123456')
         self.assertFalse(result)
         self.assertEqual(len(mail.outbox), 0)
 
@@ -488,6 +557,180 @@ class DoorstepOTPDispatchTests(TestCase):
         self.customer_user.email = 'customer@alerts.org'
         self.customer_user.save()
         with patch('apps.logistics.services.send_mail', side_effect=RuntimeError("SMTP Server down")):
-            result_ex = dispatch_doorstep_otp(delivery)
+            result_ex = dispatch_doorstep_otp(delivery, raw_otp='123456')
             self.assertFalse(result_ex)
 
+
+class DeliveryOTPSecurityHardeningTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+        self.shelter_user = User.objects.create_user(
+            username='sec_shelter', email='shelter@sec.org', password='password123', role='shelter'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user, organization_name='Security Shelter', pickup_address='100 Sec St'
+        )
+
+        self.driver_user = User.objects.create_user(
+            username='sec_driver', email='driver@sec.org', password='password123', role='delivery'
+        )
+        self.driver_profile = DeliveryProfile.objects.create(
+            user=self.driver_user, shelter=self.shelter_profile, vehicle_type='two_wheeler', vehicle_number='KA-01-SEC-01', is_available=True
+        )
+
+        self.other_driver_user = User.objects.create_user(
+            username='other_sec_driver', email='other@sec.org', password='password123', role='delivery'
+        )
+        self.other_driver_profile = DeliveryProfile.objects.create(
+            user=self.other_driver_user, shelter=self.shelter_profile, vehicle_type='two_wheeler', vehicle_number='KA-01-SEC-02', is_available=True
+        )
+
+        self.customer_user = User.objects.create_user(
+            username='sec_customer', email='customer@sec.org', password='password123', role='customer'
+        )
+
+        self.pet = Pet.objects.create(
+            shelter=self.shelter_profile, name='SecPet', species='dog', breed='Boxer', age_months=18, gender='male', status='available'
+        )
+
+        self.application = AdoptionApplication.objects.create(
+            applicant=self.customer_user,
+            pet=self.pet,
+            status='approved',
+            total_amount=Decimal('200.00'),
+            payment_status='pending',
+            payment_method='cod'
+        )
+
+    def test_regex_validation_does_not_consume_attempts(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+
+        for invalid in ['123', '12345', '1234567', 'abcdef', '12a456', '']:
+            res = self.client.post(url, {'otp': invalid}, format='json')
+            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.pickup_otp_attempts, 0)
+
+    def test_unauthorized_driver_returns_403(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        self.client.force_authenticate(user=self.other_driver_user)
+
+        res_pickup = self.client.post(f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/', {'otp': '123456'}, format='json')
+        self.assertEqual(res_pickup.status_code, status.HTTP_403_FORBIDDEN)
+
+        res_doorstep = self.client.post(f'/api/v1/delivery/tasks/{delivery.public_id}/verify-doorstep/', {'otp': '123456'}, format='json')
+        self.assertEqual(res_doorstep.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_invalid_state_transitions_return_409(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        self.client.force_authenticate(user=self.driver_user)
+
+        # Doorstep verify while still in 'assigned' -> 409
+        res_doorstep = self.client.post(f'/api/v1/delivery/tasks/{delivery.public_id}/verify-doorstep/', {'otp': '123456'}, format='json')
+        self.assertEqual(res_doorstep.status_code, status.HTTP_409_CONFLICT)
+
+        # Successful pickup
+        verify_pickup_otp(delivery, delivery.raw_pickup_otp)
+
+        # Pickup verify while in 'out_for_delivery' -> 409
+        res_pickup = self.client.post(f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/', {'otp': '123456'}, format='json')
+        self.assertEqual(res_pickup.status_code, status.HTTP_409_CONFLICT)
+
+    def test_expired_otp_returns_410_gone(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        delivery.expires_at = timezone.now() - timedelta(minutes=10)
+        delivery.save(update_fields=['expires_at'])
+
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+        res = self.client.post(url, {'otp': delivery.raw_pickup_otp}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_410_GONE)
+
+    def test_idempotent_doorstep_verification(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        verify_pickup_otp(delivery, delivery.raw_pickup_otp)
+        doorstep_otp = delivery.raw_doorstep_otp
+
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/verify-doorstep/'
+        res1 = self.client.post(url, {'otp': doorstep_otp}, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+
+        # Second call returns 200 OK idempotently
+        res2 = self.client.post(url, {'otp': doorstep_otp}, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertEqual(res2.data['message'], "Delivery already completed.")
+
+        # Legacy alias /verify-otp/ also returns 200 OK idempotently
+        res3 = self.client.post(f'/api/v1/delivery/tasks/{delivery.public_id}/verify-otp/', {'otp': doorstep_otp}, format='json')
+        self.assertEqual(res3.status_code, status.HTTP_200_OK)
+
+    def test_shelter_reissue_endpoint_permissions_and_invariants(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        reissue_url = f'/api/v1/shelter/deliveries/{delivery.public_id}/reissue-otp/'
+
+        # Unauthorized user
+        self.client.force_authenticate(user=self.customer_user)
+        res_unauth = self.client.post(reissue_url, {'purpose': 'pickup'}, format='json')
+        self.assertEqual(res_unauth.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Authorized shelter: invalid purpose -> 400
+        self.client.force_authenticate(user=self.shelter_user)
+        res_bad = self.client.post(reissue_url, {'purpose': 'unknown'}, format='json')
+        self.assertEqual(res_bad.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Invariant: doorstep reissue in 'assigned' -> 409 Conflict
+        res_conflict = self.client.post(reissue_url, {'purpose': 'doorstep'}, format='json')
+        self.assertEqual(res_conflict.status_code, status.HTTP_409_CONFLICT)
+
+        # Successful pickup reissue
+        res_pickup = self.client.post(reissue_url, {'purpose': 'pickup'}, format='json')
+        self.assertEqual(res_pickup.status_code, status.HTTP_200_OK)
+        self.assertIn('pickup_otp', res_pickup.data)
+
+        # Pickup delivery
+        delivery.refresh_from_db()
+        verify_pickup_otp(delivery, res_pickup.data['pickup_otp'])
+
+        # Invariant: pickup reissue in 'out_for_delivery' -> 409 Conflict
+        res_late_pickup = self.client.post(reissue_url, {'purpose': 'pickup'}, format='json')
+        self.assertEqual(res_late_pickup.status_code, status.HTTP_409_CONFLICT)
+
+        # Successful doorstep reissue
+        mail.outbox.clear()
+        res_doorstep = self.client.post(reissue_url, {'purpose': 'doorstep'}, format='json')
+        self.assertEqual(res_doorstep.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_payment_status_evaluation(self):
+        # Case A: COD unpaid -> remains pending
+        del1 = assign_delivery_task(self.application, self.driver_profile, payment_method='cod')
+        verify_pickup_otp(del1, del1.raw_pickup_otp)
+        self.client.force_authenticate(user=self.driver_user)
+        self.client.post(f'/api/v1/delivery/tasks/{del1.public_id}/verify-doorstep/', {'otp': del1.raw_doorstep_otp}, format='json')
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.payment_status, 'pending')
+
+        # Case B: Online payment captured -> updated to paid
+        pet2 = Pet.objects.create(shelter=self.shelter_profile, name='SecPet2', species='dog', breed='Pug', age_months=12, gender='female', status='available')
+        app2 = AdoptionApplication.objects.create(applicant=self.customer_user, pet=pet2, status='approved', payment_method='online', payment_status='pending', total_amount=Decimal('200.00'))
+        self.driver_profile.is_available = True
+        self.driver_profile.save()
+        del2 = assign_delivery_task(app2, self.driver_profile, payment_method='online')
+        Payment.objects.create(delivery=del2, application=app2, amount=Decimal('200.00'), amount_in_paise=20000, status='captured', razorpay_order_id='order_sec_test')
+        verify_pickup_otp(del2, del2.raw_pickup_otp)
+        self.client.post(f'/api/v1/delivery/tasks/{del2.public_id}/verify-doorstep/', {'otp': del2.raw_doorstep_otp}, format='json')
+        app2.refresh_from_db()
+        self.assertEqual(app2.payment_status, 'paid')
+
+    def test_serializer_stripping_audit(self):
+        self.assertNotIn('pickup_otp', DeliveryDriverTaskSerializer().fields)
+        self.assertNotIn('doorstep_otp', DeliveryDriverTaskSerializer().fields)
+        self.assertNotIn('pickup_otp', DeliveryCustomerSerializer().fields)
+        self.assertNotIn('doorstep_otp', DeliveryCustomerSerializer().fields)
+        self.assertNotIn('pickup_otp', ShelterDeliverySerializer().fields)
+        self.assertNotIn('doorstep_otp', ShelterDeliverySerializer().fields)

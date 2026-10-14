@@ -9,6 +9,7 @@ if str(BACKEND_DIR) not in sys.path:
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
+from django.utils import timezone
 from apps.accounts.models import User, ShelterProfile, DeliveryProfile
 from apps.pets.models import Pet
 from apps.adoptions.models import AdoptionApplication, AdoptionReview
@@ -239,7 +240,8 @@ class AdoptionApplicationWorkflowTests(APITestCase):
         delivery = PetDelivery.objects.create(
             application=app,
             driver=driver_profile,
-            status='delivered'
+            status='delivered',
+            delivered_at=timezone.now()
         )
 
         self.client.force_authenticate(user=self.customer_1)
