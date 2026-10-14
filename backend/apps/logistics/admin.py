@@ -3,10 +3,28 @@ from .models import PetDelivery, Payment, DeliveryLocationPing
 
 @admin.register(PetDelivery)
 class PetDeliveryAdmin(admin.ModelAdmin):
-    list_display = ('id', 'application', 'driver', 'status', 'secret_otp', 'cash_collected', 'delivered_at')
+    list_display = (
+        'id',
+        'application',
+        'driver',
+        'status',
+        'pickup_otp_attempts',
+        'doorstep_otp_attempts',
+        'expires_at',
+        'doorstep_otp_expires_at',
+        'doorstep_otp_sent_at',
+        'cash_collected',
+        'delivered_at',
+    )
     list_filter = ('status', 'is_cash_settled_with_shelter')
-    search_fields = ('secret_otp', 'driver__user__username', 'application__pet__name')
-    readonly_fields = ('public_id',)
+    search_fields = ('driver__user__username', 'application__pet__name', 'application__applicant__username')
+    readonly_fields = (
+        'public_id',
+        'pickup_otp_hash',
+        'doorstep_otp_hash',
+        'pickup_otp_attempts',
+        'doorstep_otp_attempts',
+    )
 
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):

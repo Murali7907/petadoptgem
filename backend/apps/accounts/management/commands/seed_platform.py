@@ -1,6 +1,7 @@
 import uuid
 from decimal import Decimal
 from datetime import timedelta
+from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 from django.db import transaction
@@ -9,6 +10,7 @@ from apps.accounts.models import User, ShelterProfile, DeliveryProfile
 from apps.pets.models import Pet, PetImage, PetMedicalRecord
 from apps.adoptions.models import AdoptionApplication, AdoptionReview
 from apps.logistics.models import PetDelivery, DeliveryLocationPing, Payment
+from apps.logistics.otp import issue_otp
 
 
 class Command(BaseCommand):
@@ -449,9 +451,9 @@ class Command(BaseCommand):
             defaults={
                 'driver': driver2_profile,
                 'status': 'out_for_delivery',
-                'pickup_otp': '582910',
-                'doorstep_otp': '419283',
-                'secret_otp': '419283',
+                'pickup_otp': '',
+                'doorstep_otp': '',
+                'secret_otp': '',
                 'current_latitude': Decimal('12.960000'),
                 'current_longitude': Decimal('77.610000'),
                 'dispatched_at': timezone.now() - timedelta(minutes=25),
@@ -460,6 +462,9 @@ class Command(BaseCommand):
                 'payment_status': 'paid',
             }
         )
+        active_doorstep_otp = issue_otp(active_delivery, 'doorstep')
+        if getattr(settings, 'DEBUG', False):
+            self.stdout.write(self.style.NOTICE(f"  [DEV OTP] Active Delivery #{active_delivery.id} Doorstep OTP: {active_doorstep_otp}"))
 
         # 3 Location Pings for Real-Time Tracking
         DeliveryLocationPing.objects.filter(delivery=active_delivery).delete()
@@ -526,9 +531,9 @@ class Command(BaseCommand):
             defaults={
                 'driver': driver1_profile,
                 'status': 'delivered',
-                'pickup_otp': '111222',
-                'doorstep_otp': '333444',
-                'secret_otp': '333444',
+                'pickup_otp': '',
+                'doorstep_otp': '',
+                'secret_otp': '',
                 'current_latitude': Decimal('9.965000'),
                 'current_longitude': Decimal('76.280000'),
                 'dispatched_at': timezone.now() - timedelta(days=6),

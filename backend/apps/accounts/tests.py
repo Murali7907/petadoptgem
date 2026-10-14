@@ -228,6 +228,7 @@ class AdminPlatformOversightAPITests(APITestCase):
         from apps.pets.models import Pet
         from apps.adoptions.models import AdoptionApplication, AdoptionReview
         from apps.logistics.models import PetDelivery, Payment
+        from apps.logistics.otp import issue_otp
 
         # Create pets with various statuses
         pet1 = Pet.objects.create(
@@ -275,10 +276,10 @@ class AdminPlatformOversightAPITests(APITestCase):
         delivery_active = PetDelivery.objects.create(
             application=app_active,
             driver=self.delivery_profile,
-            status='out_for_delivery',
-            pickup_otp='111222',
-            doorstep_otp='333444'
+            status='out_for_delivery'
         )
+        issue_otp(delivery_active, 'pickup')
+        issue_otp(delivery_active, 'doorstep')
 
         # Paid payment (₹250.00 / 25000 paise)
         Payment.objects.create(
@@ -305,14 +306,14 @@ class AdminPlatformOversightAPITests(APITestCase):
             living_situation='House',
             contact_phone='+919800000004'
         )
-        PetDelivery.objects.create(
+        delivery_completed = PetDelivery.objects.create(
             application=app_completed,
             driver=self.delivery_profile,
             status='delivered',
-            delivered_at=timezone.now(),
-            pickup_otp='555666',
-            doorstep_otp='777888'
+            delivered_at=timezone.now()
         )
+        issue_otp(delivery_completed, 'pickup')
+        issue_otp(delivery_completed, 'doorstep')
         AdoptionReview.objects.create(
             application=app_completed,
             reviewer=self.customer_user2,

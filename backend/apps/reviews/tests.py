@@ -6,6 +6,7 @@ from apps.accounts.models import User, ShelterProfile, DeliveryProfile
 from apps.pets.models import Pet
 from apps.adoptions.models import AdoptionApplication, AdoptionReview
 from apps.logistics.models import PetDelivery
+from apps.logistics.otp import issue_otp
 
 
 class AdoptionReviewAPITestCase(TestCase):
@@ -76,10 +77,10 @@ class AdoptionReviewAPITestCase(TestCase):
             application=self.application,
             driver=self.delivery_profile,
             status='delivered',
-            pickup_otp='123456',
-            doorstep_otp='654321',
             delivered_at=timezone.now()
         )
+        issue_otp(self.delivery, 'pickup')
+        issue_otp(self.delivery, 'doorstep')
 
     def test_submit_review_success(self):
         self.client.force_authenticate(user=self.customer)

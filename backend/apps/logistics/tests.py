@@ -930,5 +930,36 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         self.assertEqual(res_throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
         self.assertIn('Request was throttled', str(res_throttled.data))
 
+    def test_pet_delivery_admin_security_configuration(self):
+        """
+        Validates admin.py security configuration for PetDeliveryAdmin:
+        - secret_otp removed from list_display and search_fields
+        - attempts, expiry, and sent_at present in list_display
+        - hashes and attempts are in readonly_fields
+        - no hash fields displayed in list_display
+        """
+        from django.contrib.admin.sites import site
+        from apps.logistics.admin import PetDeliveryAdmin
+        from apps.logistics.models import PetDelivery
+
+        admin_instance = PetDeliveryAdmin(PetDelivery, site)
+        self.assertNotIn('secret_otp', admin_instance.list_display)
+        self.assertNotIn('secret_otp', admin_instance.search_fields)
+        self.assertNotIn('pickup_otp_hash', admin_instance.list_display)
+        self.assertNotIn('doorstep_otp_hash', admin_instance.list_display)
+
+        # Show attempts, expiry, sent_at
+        self.assertIn('pickup_otp_attempts', admin_instance.list_display)
+        self.assertIn('doorstep_otp_attempts', admin_instance.list_display)
+        self.assertIn('expires_at', admin_instance.list_display)
+        self.assertIn('doorstep_otp_expires_at', admin_instance.list_display)
+        self.assertIn('doorstep_otp_sent_at', admin_instance.list_display)
+
+        # Hash and attempt fields read-only
+        self.assertIn('pickup_otp_hash', admin_instance.readonly_fields)
+        self.assertIn('doorstep_otp_hash', admin_instance.readonly_fields)
+        self.assertIn('pickup_otp_attempts', admin_instance.readonly_fields)
+        self.assertIn('doorstep_otp_attempts', admin_instance.readonly_fields)
+
 
 
