@@ -21,10 +21,20 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import ValidationError, NotFound
 from rest_framework.throttling import ScopedRateThrottle
 
+from drf_spectacular.utils import extend_schema
+
 from .models import PetDelivery, DeliveryLocationPing, Payment
 from .permissions import IsShelterForDelivery, IsAssignedDeliveryDriver, IsDeliveryParticipant
 from .serializers import (
     DeliveryAssignSerializer,
+    DeliveryAssignResponseSerializer,
+    DeliveryReissueOTPRequestSerializer,
+    DeliveryReissueOTPResponseSerializer,
+    DeliveryStatusUpdateRequestSerializer,
+    DeliveryPickupResponseSerializer,
+    DeliveryDoorstepResponseSerializer,
+    DeliveryPingResponseSerializer,
+    DeliveryTrackingResponseSerializer,
     DeliveryDriverTaskSerializer,
     DeliveryCustomerSerializer,
     ShelterDeliverySerializer,
@@ -101,12 +111,14 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
             raise NotFound({"detail": f"Delivery with ID '{lookup_val}' not found."})
         return obj
 
+    @extend_schema(responses={200: ShelterDeliverySerializer(many=True)})
     def list(self, request):
         shelter = self.get_shelter_profile()
         deliveries = PetDelivery.objects.filter(application__pet__shelter=shelter).order_by('-created_at')
         serializer = ShelterDeliverySerializer(deliveries, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
+    @extend_schema(request=DeliveryAssignSerializer, responses={201: DeliveryAssignResponseSerializer})
     @action(detail=False, methods=['post'], url_path='assign')
     def assign(self, request):
         serializer = DeliveryAssignSerializer(data=request.data)
@@ -161,6 +173,7 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
             data['pickup_otp'] = delivery.raw_pickup_otp
         return Response(data, status=status.HTTP_201_CREATED)
 
+    @extend_schema(request=DeliveryReissueOTPRequestSerializer, responses={200: DeliveryReissueOTPResponseSerializer})
     @action(detail=True, methods=['post'], url_path='reissue-otp')
     def reissue_otp(self, request, *args, **kwargs):
         delivery = self.get_object()
@@ -181,6 +194,7 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
         except APIException as e:
             return Response({"detail": e.detail}, status=e.status_code)
 
+    @extend_schema(responses={200: DriverListSerializer(many=True)})
     @action(detail=False, methods=['get'], url_path='drivers')
     def drivers(self, request):
         shelter = self.get_shelter_profile()
@@ -234,6 +248,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         return super().get_throttles()
 
 
+    @extend_schema(responses={200: DeliveryDriverTaskSerializer})
     @action(detail=False, methods=['get'], url_path='active')
     def active(self, request):
         if not hasattr(request.user, 'delivery_profile'):
@@ -251,10 +266,12 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         serializer = DeliveryDriverTaskSerializer(delivery)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
+    @extend_schema(responses={200: DeliveryDriverTaskSerializer})
     @action(detail=False, methods=['get'], url_path='driver-active')
     def driver_active(self, request):
         return self.active(request)
 
+    @extend_schema(request=OTPVerificationSerializer, responses={200: DeliveryPickupResponseSerializer})
     @action(detail=True, methods=['post'], url_path='pickup',
             permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver],
             throttle_classes=[ScopedRateThrottle])
@@ -290,6 +307,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
         return Response({"detail": result.detail or "Verification failed."}, status=status.HTTP_400_BAD_REQUEST)
 
+    @extend_schema(request=DeliveryStatusUpdateRequestSerializer, responses={200: DeliveryDriverTaskSerializer})
     @action(detail=True, methods=['patch', 'post'], url_path='status', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
     def update_status(self, request, *args, **kwargs):
         delivery = self.get_object()
@@ -320,6 +338,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         updated_serializer = DeliveryDriverTaskSerializer(delivery)
         return Response(updated_serializer.data, status=status.HTTP_200_OK)
 
+    @extend_schema(request=OTPVerificationSerializer, responses={200: DeliveryDoorstepResponseSerializer})
     @action(detail=True, methods=['post'], url_path='verify-doorstep',
             permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver],
             throttle_classes=[ScopedRateThrottle])
@@ -361,12 +380,14 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
         return Response({"detail": result.detail or "Verification failed."}, status=status.HTTP_400_BAD_REQUEST)
 
+    @extend_schema(request=OTPVerificationSerializer, responses={200: DeliveryDoorstepResponseSerializer})
     @action(detail=True, methods=['post'], url_path='verify-otp',
             permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver],
             throttle_classes=[ScopedRateThrottle])
     def verify_otp(self, request, *args, **kwargs):
         return self.verify_doorstep(request, *args, **kwargs)
 
+    @extend_schema(request=LocationPingSerializer, responses={201: DeliveryPingResponseSerializer})
     @action(detail=True, methods=['post'], url_path='ping', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
     def ping(self, request, *args, **kwargs):
         delivery = self.get_object()
@@ -408,6 +429,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
             }
         }, status=status.HTTP_201_CREATED)
 
+    @extend_schema(responses={200: DeliveryTrackingResponseSerializer})
     @action(detail=True, methods=['get'], url_path='tracking', permission_classes=[IsAuthenticated, IsDeliveryParticipant])
     def tracking(self, request, *args, **kwargs):
         delivery = self.get_object()
@@ -433,6 +455,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
             "breadcrumbs": pings_serializer.data
         }, status=status.HTTP_200_OK)
 
+    @extend_schema(responses={200: DeliveryTrackingResponseSerializer})
     @action(detail=True, methods=['get'], url_path='track', permission_classes=[IsAuthenticated, IsDeliveryParticipant])
     def track(self, request, *args, **kwargs):
         return self.tracking(request, *args, **kwargs)

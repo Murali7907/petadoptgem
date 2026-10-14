@@ -320,3 +320,67 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+
+class DeliveryAssignResponseSerializer(ShelterDeliverySerializer):
+    pickup_otp = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Plaintext 6-digit pickup OTP returned once upon assignment to shelter."
+    )
+
+    class Meta(ShelterDeliverySerializer.Meta):
+        fields = ShelterDeliverySerializer.Meta.fields + ['pickup_otp']
+        read_only_fields = fields
+
+
+class DeliveryReissueOTPRequestSerializer(serializers.Serializer):
+    purpose = serializers.ChoiceField(choices=['pickup', 'doorstep'])
+
+
+class DeliveryReissueOTPResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    purpose = serializers.CharField()
+    pickup_otp = serializers.CharField(required=False, allow_blank=True)
+    doorstep_otp = serializers.CharField(required=False, allow_blank=True)
+    expires_at = serializers.DateTimeField()
+
+
+class DeliveryStatusUpdateRequestSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=['failed'])
+
+
+class DeliveryPickupResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    delivery = DeliveryDriverTaskSerializer()
+
+
+class DeliveryDoorstepResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    delivery = DeliveryDriverTaskSerializer()
+
+
+class DeliveryLocationCurrentLocationSerializer(serializers.Serializer):
+    latitude = serializers.CharField()
+    longitude = serializers.CharField()
+    updated_at = serializers.CharField()
+
+
+class DeliveryPingResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    ping = LocationPingSerializer()
+    current_location = DeliveryLocationCurrentLocationSerializer()
+
+
+class DeliveryTrackingCoordinatesSerializer(serializers.Serializer):
+    latitude = serializers.CharField(allow_null=True)
+    longitude = serializers.CharField(allow_null=True)
+    last_updated = serializers.DateTimeField(allow_null=True)
+
+
+class DeliveryTrackingResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    delivery = serializers.DictField()
+    current_coordinates = DeliveryTrackingCoordinatesSerializer()
+    breadcrumbs = LocationPingSerializer(many=True)
+
+
