@@ -6,21 +6,21 @@ updated: 2026-10-13T21:45:00+05:30
 
 # Roadmap: Pet Delivery OTP & Backend Security Hardening
 
-> **Current Phase:** Phase 0 - Inspect & Plan (Complete) -> Awaiting Planning Approval
-> **Status:** planning (Planning Lock active)
+> **Current Phase:** Milestone Complete
+> **Status:** completed
 
 ---
 
 ## Must-Haves (from SPEC)
 - [x] Task 0: Git hygiene fixing `.gitignore` bare `apps` pattern (Verified: `bd5ee5e`)
-- [x] Phase 0: Complete inspection of codebase, DB schemas, call sites, and in-flight data (Documented in SPEC.md)
-- [x] Phase 1: Settings fail-closed enforcement (`DEBUG=False` default, secret validation, CORS/CSRF, throttle scopes)
-- [x] Phase 2: Additive PostgreSQL schema migration (`pickup_otp_hash`, `doorstep_otp_hash`, `doorstep_otp_sent_at`, indexes, CheckConstraints, data migration)
-- [x] Phase 3: Cryptographic OTP helper library (`apps/logistics/otp.py` with HMAC-SHA256, secrets generation, safe issue/check)
-- [ ] Phase 4: Delivery workflow refactoring (assignment OTP decoupled, pickup doorstep issue, shelter reissue endpoint, serializer stripping, `update_status` lock)
-- [ ] Phase 5: Verification endpoints hardening (select_for_update, regex validation, HTTP 400/403/409/410/423, Pet adopted status, payment status evaluation)
-- [ ] Phase 6: URL routing verification and backward compatibility
-- [ ] Phase 7: Comprehensive test suite covering all security constraints and full test suite passing
+- [x] Phase 0: Complete inspection of codebase, DB schemas, call sites, and in-flight data (Documented in SPEC.md, `b013d07`)
+- [x] Phase 1: Settings fail-closed enforcement (`DEBUG=False` default, secret validation, CORS/CSRF, throttle scopes, `27f4a1b`)
+- [x] Phase 2: Additive PostgreSQL schema migration (`pickup_otp_hash`, `doorstep_otp_hash`, `doorstep_otp_sent_at`, indexes, CheckConstraints, data migration, `f86f709`)
+- [x] Phase 3: Cryptographic OTP helper library (`apps/logistics/otp.py` with HMAC-SHA256, secrets generation, safe issue/check, `ce1c93e`)
+- [x] Phase 4: Delivery workflow refactoring (assignment OTP decoupled, pickup doorstep issue, shelter reissue endpoint, serializer stripping, `update_status` lock, `263166c`)
+- [x] Phase 5: Verification endpoints hardening (select_for_update, regex validation, HTTP 400/403/409/410/423, Pet adopted status, payment status evaluation, `b1b2686`)
+- [x] Phase 6: URL routing verification and backward compatibility (`1854d74`)
+- [x] Phase 7: Comprehensive test suite covering all security constraints and full test suite passing (`c127a74`)
 
 ---
 
@@ -83,37 +83,37 @@ updated: 2026-10-13T21:45:00+05:30
 ---
 
 ### Phase 5: Verification Endpoints Hardening
-**Status:** 🔄 In Progress
+**Status:** ✅ Complete
 **Objective:** Secure verification endpoints with concurrency locking, rate limiting, and distinct status codes.
 **Tasks:**
-- [ ] Task 5.1: Harden `pickup` view with `select_for_update()`, 6-digit regex validation, `'otp_verify'` throttle scope, and attempt tracking.
-- [ ] Task 5.2: Harden `verify_doorstep` view with `select_for_update()`, 6-digit regex validation, `'otp_verify'` throttle scope, attempt tracking, and idempotent 200 for already delivered tasks.
-- [ ] Task 5.3: Implement distinct HTTP error mapping: 400 (bad input / wrong code with attempts left), 403 (unauthorized driver), 409 (invalid state), 410 (expired), 423 (locked out after max attempts).
-- [ ] Task 5.4: Implement terminal actions on doorstep success: `pet.status = 'adopted'`, `application.status = 'completed'`, conditional payment status evaluation (online verified payment or COD collected).
-**Required Proof:** Integration test suite asserting each HTTP status code and state mutation.
+- [x] Task 5.1: Harden `pickup` view with `select_for_update()`, 6-digit regex validation, `'otp_verify'` throttle scope, and attempt tracking.
+- [x] Task 5.2: Harden `verify_doorstep` view with `select_for_update()`, 6-digit regex validation, `'otp_verify'` throttle scope, attempt tracking, and idempotent 200 for already delivered tasks.
+- [x] Task 5.3: Implement distinct HTTP error mapping: 400 (bad input / wrong code with attempts left), 403 (unauthorized driver), 409 (invalid state), 410 (expired), 423 (locked out after max attempts).
+- [x] Task 5.4: Implement terminal actions on doorstep success: `pet.status = 'adopted'`, `application.status = 'completed'`, conditional payment status evaluation (online verified payment or COD collected).
+**Required Proof:** Integration test suite asserting each HTTP status code and state mutation (`b1b2686`).
 
 ---
 
 ### Phase 6: URL Routing & Backward Compatibility
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 **Objective:** Maintain canonical `/api/v1/` routes and legacy aliases without breaking clients.
 **Tasks:**
-- [ ] Task 6.1: Verify `apps/logistics/urls.py` and project URLs for both canonical and legacy routes.
-- [ ] Task 6.2: Add comments designating legacy routes.
-**Required Proof:** URL reverse tests and drf-spectacular schema validation.
+- [x] Task 6.1: Verify `apps/logistics/urls.py` and project URLs for both canonical and legacy routes.
+- [x] Task 6.2: Add comments designating legacy routes.
+**Required Proof:** URL reverse tests and drf-spectacular schema validation (`1854d74`).
 
 ---
 
 ### Phase 7: Comprehensive Test Suite & Verification Proof
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 **Objective:** Author end-to-end tests validating all requirements and run the full test suite.
 **Tasks:**
-- [ ] Task 7.1: Author comprehensive tests in `backend/apps/logistics/tests.py` covering all positive and negative security cases.
-- [ ] Task 7.2: Update legacy tests where behavior intentionally changed (documenting reason for each change).
-- [ ] Task 7.3: Create contract documentation `docs/api_contract_logistics.md`.
-- [ ] Task 7.4: Execute `python manage.py test apps.logistics` and full `python manage.py test`.
-- [ ] Task 7.5: Execute `python manage.py check` and `git status` verifying no frontend files touched.
-**Required Proof:** Captured output of all test runs and checks.
+- [x] Task 7.1: Author comprehensive tests in `backend/apps/logistics/tests.py` covering all positive and negative security cases.
+- [x] Task 7.2: Update legacy tests where behavior intentionally changed (documenting reason for each change).
+- [x] Task 7.3: Create contract documentation `docs/api_contract_logistics.md`.
+- [x] Task 7.4: Execute `python manage.py test apps.logistics` and full `python manage.py test`.
+- [x] Task 7.5: Execute `python manage.py check` and `git status` verifying no frontend files touched.
+**Required Proof:** Captured output of all test runs (68 tests passing, 0 errors, 0 failures) and system checks (`c127a74`).
 
 ---
 
@@ -126,7 +126,7 @@ updated: 2026-10-13T21:45:00+05:30
 | Phase 2 | Schema Migrations | ✅ Complete | 4/4 |
 | Phase 3 | OTP Cryptographic Helpers | ✅ Complete | 3/3 |
 | Phase 4 | Workflow Refactoring & Reissue | ✅ Complete | 5/5 |
-| Phase 5 | Verify Endpoints Hardening | 🔄 In Progress | 0/4 |
-| Phase 6 | URL Routing | ⬜ Not Started | 0/2 |
-| Phase 7 | Tests & Verification Proof | ⬜ Not Started | 0/5 |
+| Phase 5 | Verify Endpoints Hardening | ✅ Complete | 4/4 |
+| Phase 6 | URL Routing | ✅ Complete | 2/2 |
+| Phase 7 | Tests & Verification Proof | ✅ Complete | 5/5 |
 

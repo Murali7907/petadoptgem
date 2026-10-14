@@ -7,28 +7,25 @@ updated: 2026-10-13T22:30:00+05:30
 ## Current Position
 
 **Milestone:** delivery-otp-security-hardening
-**Phase:** Phase 4 - Delivery Workflow Refactoring & Reissue (Complete) -> Moving to Phase 5 (Verification Endpoints Hardening)
-**Status:** executing
-**Active Plan:** `.gsd/ROADMAP.md` Phase 5
+**Phase:** Milestone Complete (All Phases 0 through 7 Completed)
+**Status:** completed
+**Active Plan:** Milestone Complete
 
 ## Last Action Completed
 
-- **Phase 4 (Delivery Workflow Refactoring & Reissue)**:
-  - Refactored `assign_delivery_task`: issues ONLY pickup OTP, attaches single-use `raw_pickup_otp` returned once to shelter in assign response body (`201 Created`), notifies adopter with driver details and NO OTP, creates in-app notification with NO OTP, removes doorstep OTP generation from assignment.
-  - Refactored pickup verification: driver pickup OTP verification transitions delivery to `out_for_delivery`, issues doorstep OTP, dispatches email to adopter with confidential verification OTP, sets `doorstep_otp_sent_at`, creates in-app notification without OTP code, logs email errors gracefully without rolling back state transition.
-  - Implemented `reissue_otp` endpoint in `ShelterDeliveryViewSet` (`POST /api/v1/shelter/deliveries/<id>/reissue-otp/`): verifies shelter ownership (403), validates purpose `pickup` or `doorstep` (400), enforces state invariants (409 Conflict if pickup reissued outside `assigned`, 409 Conflict if doorstep reissued outside `out_for_delivery`), resets attempt counters and extends expiry TTL, returns plaintext pickup OTP to shelter or emails doorstep OTP to adopter.
-  - Stripped plaintext OTP exposure across serializers: removed `pickup_otp` from `DeliveryDriverTaskSerializer`, removed `pickup_otp` and `doorstep_otp` from `ShelterDeliverySerializer` (exposed `doorstep_otp_expires_at` and `doorstep_otp_sent_at`), removed `doorstep_otp` from `DeliveryCustomerSerializer` (exposed `doorstep_otp_sent_at`).
-  - Hardened `update_status` transitions: drivers strictly allowed ONLY `status='failed'`, which frees driver (`driver.is_available=True`); rejects `out_for_delivery`, `delivered`, `in_transit`, and arbitrary statuses with HTTP 400 Bad Request.
-  - Added direct URL paths for `reissue-otp` (UUID and string IDs, canonical and legacy styles).
-  - Verified with 7 integration test suites passing in `scratch/test_phase4_workflow.py`.
-  - Committed as `263166c`.
+- **Phase 7 (Comprehensive Test Suite & Verification Proof)**:
+  - Authored comprehensive test suite in `backend/apps/logistics/tests.py` (22 test methods covering all positive, negative, and security cases: regex validation, unauthorized drivers, invalid transitions, expired OTPs, idempotent doorstep verification, shelter reissue, payment evaluation, serializer stripping).
+  - Fixed database check constraint compatibility in legacy test fixtures (`apps/accounts/tests.py`, `apps/adoptions/tests.py`) where `delivered_at` was missing on `status='delivered'`.
+  - Updated `apps/accounts/test_e2e_contract.py` to assert secure decoupled OTP issuance and email dispatch.
+  - Authored comprehensive API contract documentation in `docs/api_contract_logistics.md`.
+  - Executed full test suite: **68 tests across all applications passing (0 failures, 0 errors)**.
+  - Ran `python manage.py check`: 0 issues identified.
+  - Verified git status: strictly zero frontend files touched.
+  - Committed as `c127a74`.
 
 ## Next Steps
 
-1. Begin Phase 5: Verification Endpoints Hardening (`select_for_update()`, 6-digit regex validation, `'otp_verify'` throttle scope, attempt tracking with immediate commit, HTTP 400/403/409/410/423 mapping, Pet adopted status, payment status conditional evaluation).
-2. Commit Phase 5: `feat(logistics): harden verification endpoints with select_for_update, rate limits, and distinct http errors`.
-3. Phase 6: URL routing documentation and verification.
-4. Phase 7: Comprehensive test suite and contract documentation.
+1. Present final summary and verification proof to user.
 
 ## Active Decisions
 
