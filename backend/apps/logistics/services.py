@@ -227,16 +227,29 @@ def resolve_delivery_payment_status(delivery: PetDelivery) -> bool:
     Evaluates and updates application.payment_status upon doorstep delivery verification.
     Consolidates payment verification into a single authoritative source of truth.
     Returns True if payment was verified and marked 'paid', False otherwise.
+
+    Rules:
+    1. Online payments: Requires verified Payment row(s) with status in ['paid', 'captured']
+       where the total captured amount in paise >= application.total_amount in paise (paise-safe comparison).
+    2. COD payments: Requires delivery.cash_collected >= application.total_amount
+       and delivery.cash_collected > Decimal('0.00').
     """
     application = getattr(delivery, 'application', None)
     if not application:
         return False
 
     total_amount = getattr(application, 'total_amount', Decimal('0.00')) or Decimal('0.00')
+    expected_paise = int(round(Decimal(str(total_amount)) * 100))
     payment_verified = False
 
-    if application.payments.filter(status__in=['paid', 'captured']).exists():
-        payment_verified = True
+    paid_payments = application.payments.filter(status__in=['paid', 'captured'])
+    if paid_payments.exists():
+        total_paid_paise = sum(
+            p.amount_in_paise if p.amount_in_paise else int(round(Decimal(str(p.amount)) * 100))
+            for p in paid_payments
+        )
+        if expected_paise > 0 and total_paid_paise >= expected_paise:
+            payment_verified = True
     elif application.payment_method == 'cod' and delivery.cash_collected >= total_amount and delivery.cash_collected > Decimal('0.00'):
         payment_verified = True
 

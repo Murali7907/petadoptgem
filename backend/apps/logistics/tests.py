@@ -774,6 +774,18 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         app_fail.refresh_from_db()
         self.assertEqual(app_fail.payment_status, 'pending')
 
+        # Case 5: Online underpaid (captured payment amount < application total_amount) -> remains pending
+        pet_under = Pet.objects.create(shelter=self.shelter_profile, name='UnderPet', species='dog', breed='Husky', age_months=14, gender='male', status='available')
+        app_under = AdoptionApplication.objects.create(applicant=self.customer_user, pet=pet_under, status='approved', payment_method='online', payment_status='pending', total_amount=Decimal('250.00'))
+        self.driver_profile.is_available = True
+        self.driver_profile.save()
+        del_under = assign_delivery_task(app_under, self.driver_profile, payment_method='online')
+        Payment.objects.create(delivery=del_under, application=app_under, amount=Decimal('100.00'), amount_in_paise=10000, status='captured', razorpay_order_id='order_sec_underpaid')
+        verify_pickup_otp(del_under, del_under.raw_pickup_otp)
+        self.client.post(f'/api/v1/delivery/tasks/{del_under.public_id}/verify-doorstep/', {'otp': del_under.raw_doorstep_otp}, format='json')
+        app_under.refresh_from_db()
+        self.assertEqual(app_under.payment_status, 'pending')
+
     def test_serializer_stripping_audit(self):
         self.assertNotIn('pickup_otp', DeliveryDriverTaskSerializer().fields)
         self.assertNotIn('doorstep_otp', DeliveryDriverTaskSerializer().fields)
