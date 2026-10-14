@@ -264,4 +264,81 @@ For both `pickup` and `verify_doorstep` (canonical and legacy aliases):
 
 ---
 
-*Last updated: 2026-10-13*
+## 6. COD Cash Collection Design (PROPOSED)
+
+### 6.1 Context & Problem Statement
+Currently in the data model, `PetDelivery.cash_collected` exists as a Decimal field (`max_digits=10, decimal_places=2, default=0.00`), but **no API endpoint or service method writes to `cash_collected`**. Furthermore, for cash on delivery (COD) orders, there is currently no mechanism ensuring the physical cash is collected before the driver completes the delivery handoff via doorstep OTP.
+
+### 6.2 Recommended Design (At Doorstep by Driver)
+A dedicated driver-only cash collection endpoint called right before doorstep OTP verification.
+
+#### Endpoint Specification
+- **Path**: `POST /api/v1/delivery/tasks/<id>/collect-cash/` (and legacy alias `POST /api/deliveries/<id>/collect-cash/`)
+- **Permission**: `IsAuthenticated`, `IsAssignedDeliveryDriver` (only the currently assigned delivery driver)
+- **Request Payload**:
+  ```json
+  {
+    "amount": "250.00"
+  }
+  ```
+- **Execution Lifecycle (under `select_for_update` row lock)**:
+  1. **Status & Driver Validation**:
+     - Verify caller is `delivery.driver`.
+     - Verify `delivery.status == 'out_for_delivery'` (returns 409 Conflict if in `assigned`, `delivered`, or `failed`).
+     - Verify `application.payment_method == 'cod'` (returns 400 Bad Request if online/prepaid).
+  2. **Amount Validation**:
+     - Validate `amount` is a positive Decimal (`amount > 0`).
+     - Validate cumulative amount `delivery.cash_collected + amount <= application.total_amount` (rejects overcollection with 400 Bad Request).
+  3. **State Mutation**:
+     - Increment `delivery.cash_collected += amount`.
+     - Record a ledger entry in `Payment` model: `status='paid'`, `amount=amount`, `payment_method='cod'`, `transaction_id=f"COD-{delivery.public_id}-{timestamp}"`.
+     - If `delivery.cash_collected >= application.total_amount`:
+       - Set `application.payment_status = 'paid'`.
+       - `application.save(update_fields=['payment_status'])`.
+     - `delivery.save(update_fields=['cash_collected'])`.
+  4. **Crucial Rule on Doorstep OTP Verification Guard**:
+     - For `application.payment_method == 'cod'` where `application.total_amount > 0`:
+       - In `verify_doorstep_service()`, doorstep OTP verification **MUST check that `delivery.cash_collected >= application.total_amount`**.
+       - If `delivery.cash_collected < application.total_amount`: **return 409 Conflict** with detail: `"Cash collection incomplete. Total amount Rs. {total_amount} must be collected before completing doorstep handoff."`
+       - Rationale: The driver cannot hand over the pet without full payment.
+     - For `application.total_amount == 0` (free adoption or 100% waiver):
+       - Cash collection is not required; treated as paid/not applicable.
+  5. **Response Payload**:
+     ```json
+     {
+       "message": "Cash collected successfully.",
+       "cash_collected": "250.00",
+       "total_amount": "250.00",
+       "payment_status": "paid",
+       "ready_for_doorstep_verification": true
+     }
+     ```
+
+### 6.3 Alternative Design (Settled at Shelter by Staff)
+Allow the delivery to complete at the doorstep without cash recording in the mobile app; the driver collects cash offline, and shelter staff records cash settlement when the driver returns to the shelter.
+
+#### Comparison Matrix: Recommended vs. Alternative
+
+| Dimension | Recommended Design (Driver at Doorstep) | Alternative Design (Shelter Settle) |
+|---|---|---|
+| **Fraud Prevention** | **High**: Pet cannot be released via doorstep OTP until cash collection is recorded in DB. | **Low**: Driver can verify doorstep OTP, hand over pet, and claim customer refused to pay or dispute cash amount. |
+| **Real-time Accuracy** | **Immediate**: Adopter and platform see real-time payment status transition. | **Delayed**: Payment remains `pending` for hours/days until driver returns to shelter. |
+| **Driver UX** | Requires one extra API action in driver app before verifying doorstep OTP. | Simpler mobile flow; driver only verifies OTP. |
+| **Shelter Overhead** | None on delivery; shelter staff only reconciles aggregate cash payout from driver. | High: Shelter admin must manually locate each delivery and input cash collected. |
+| **Edge Case Handling** | Adopter can pay partial cash + partial online UPI at doorstep before driver confirms. | Inability to track partial payments at the point of delivery. |
+
+### 6.4 Test Cases for Recommended Design
+The following test suite will be implemented upon approval:
+1. `test_driver_collect_cash_success`: Assigned driver records exact cash amount; `cash_collected` updates, `payment_status` transitions to `paid`.
+2. `test_collect_cash_forbidden_for_unassigned_driver_or_customer`: Non-driver caller receives 403 Forbidden.
+3. `test_collect_cash_fails_if_not_out_for_delivery`: Calling in `assigned` or `delivered` state returns 409 Conflict.
+4. `test_collect_cash_fails_for_online_payment_method`: Calling on an order with `payment_method='online'` returns 400 Bad Request.
+5. `test_collect_cash_rejects_negative_or_zero_or_excessive_amount`: Rejects `0`, negative amounts, or amounts exceeding `total_amount` with 400 Bad Request.
+6. `test_doorstep_otp_blocked_until_full_cash_collected`: Doorstep OTP verification returns 409 Conflict if `cash_collected < total_amount`.
+7. `test_doorstep_otp_allowed_when_total_amount_is_zero`: Zero-cost adoptions bypass cash collection requirement.
+8. `test_doorstep_otp_succeeds_after_full_cash_collection`: Full cash collection followed by correct doorstep OTP marks delivery `delivered` and application `completed`.
+
+---
+
+*Last updated: 2026-10-14*
+
