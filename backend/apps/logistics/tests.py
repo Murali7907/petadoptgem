@@ -720,25 +720,59 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         self.assertEqual(len(mail.outbox), 1)
 
     def test_payment_status_evaluation(self):
-        # Case A: COD unpaid -> remains pending
+        """
+        Tests payment evaluation rules on doorstep delivery completion:
+        1. COD paid: cash_collected >= total_amount -> payment_status='paid'
+        2. COD underpaid: cash_collected < total_amount -> payment_status='pending'
+        3. Online paid: verified Payment ('paid'/'captured') exists -> payment_status='paid'
+        4. Online unpaid: no verified Payment ('created'/'failed') -> payment_status='pending'
+        """
+        # Case 1: COD underpaid -> remains pending
         del1 = assign_delivery_task(self.application, self.driver_profile, payment_method='cod')
+        del1.cash_collected = Decimal('50.00')  # less than total_amount of 200.00
+        del1.save(update_fields=['cash_collected'])
         verify_pickup_otp(del1, del1.raw_pickup_otp)
         self.client.force_authenticate(user=self.driver_user)
         self.client.post(f'/api/v1/delivery/tasks/{del1.public_id}/verify-doorstep/', {'otp': del1.raw_doorstep_otp}, format='json')
         self.application.refresh_from_db()
         self.assertEqual(self.application.payment_status, 'pending')
 
-        # Case B: Online payment captured -> updated to paid
-        pet2 = Pet.objects.create(shelter=self.shelter_profile, name='SecPet2', species='dog', breed='Pug', age_months=12, gender='female', status='available')
-        app2 = AdoptionApplication.objects.create(applicant=self.customer_user, pet=pet2, status='approved', payment_method='online', payment_status='pending', total_amount=Decimal('200.00'))
+        # Case 2: COD fully paid -> payment_status='paid'
+        pet_cod = Pet.objects.create(shelter=self.shelter_profile, name='CodPet', species='dog', breed='Lab', age_months=10, gender='male', status='available')
+        app_cod = AdoptionApplication.objects.create(applicant=self.customer_user, pet=pet_cod, status='approved', payment_method='cod', payment_status='pending', total_amount=Decimal('150.00'))
         self.driver_profile.is_available = True
         self.driver_profile.save()
-        del2 = assign_delivery_task(app2, self.driver_profile, payment_method='online')
-        Payment.objects.create(delivery=del2, application=app2, amount=Decimal('200.00'), amount_in_paise=20000, status='captured', razorpay_order_id='order_sec_test')
-        verify_pickup_otp(del2, del2.raw_pickup_otp)
-        self.client.post(f'/api/v1/delivery/tasks/{del2.public_id}/verify-doorstep/', {'otp': del2.raw_doorstep_otp}, format='json')
-        app2.refresh_from_db()
-        self.assertEqual(app2.payment_status, 'paid')
+        del_cod = assign_delivery_task(app_cod, self.driver_profile, payment_method='cod')
+        del_cod.cash_collected = Decimal('150.00')  # equals total_amount
+        del_cod.save(update_fields=['cash_collected'])
+        verify_pickup_otp(del_cod, del_cod.raw_pickup_otp)
+        self.client.post(f'/api/v1/delivery/tasks/{del_cod.public_id}/verify-doorstep/', {'otp': del_cod.raw_doorstep_otp}, format='json')
+        app_cod.refresh_from_db()
+        self.assertEqual(app_cod.payment_status, 'paid')
+
+        # Case 3: Online paid (captured) -> payment_status='paid'
+        pet_onl = Pet.objects.create(shelter=self.shelter_profile, name='OnlPet', species='dog', breed='Pug', age_months=12, gender='female', status='available')
+        app_onl = AdoptionApplication.objects.create(applicant=self.customer_user, pet=pet_onl, status='approved', payment_method='online', payment_status='pending', total_amount=Decimal('200.00'))
+        self.driver_profile.is_available = True
+        self.driver_profile.save()
+        del_onl = assign_delivery_task(app_onl, self.driver_profile, payment_method='online')
+        Payment.objects.create(delivery=del_onl, application=app_onl, amount=Decimal('200.00'), amount_in_paise=20000, status='captured', razorpay_order_id='order_sec_paid')
+        verify_pickup_otp(del_onl, del_onl.raw_pickup_otp)
+        self.client.post(f'/api/v1/delivery/tasks/{del_onl.public_id}/verify-doorstep/', {'otp': del_onl.raw_doorstep_otp}, format='json')
+        app_onl.refresh_from_db()
+        self.assertEqual(app_onl.payment_status, 'paid')
+
+        # Case 4: Online unpaid (payment created or failed) -> remains pending
+        pet_fail = Pet.objects.create(shelter=self.shelter_profile, name='FailPet', species='cat', breed='Persian', age_months=8, gender='female', status='available')
+        app_fail = AdoptionApplication.objects.create(applicant=self.customer_user, pet=pet_fail, status='approved', payment_method='online', payment_status='pending', total_amount=Decimal('100.00'))
+        self.driver_profile.is_available = True
+        self.driver_profile.save()
+        del_fail = assign_delivery_task(app_fail, self.driver_profile, payment_method='online')
+        Payment.objects.create(delivery=del_fail, application=app_fail, amount=Decimal('100.00'), amount_in_paise=10000, status='failed', razorpay_order_id='order_sec_fail')
+        verify_pickup_otp(del_fail, del_fail.raw_pickup_otp)
+        self.client.post(f'/api/v1/delivery/tasks/{del_fail.public_id}/verify-doorstep/', {'otp': del_fail.raw_doorstep_otp}, format='json')
+        app_fail.refresh_from_db()
+        self.assertEqual(app_fail.payment_status, 'pending')
 
     def test_serializer_stripping_audit(self):
         self.assertNotIn('pickup_otp', DeliveryDriverTaskSerializer().fields)

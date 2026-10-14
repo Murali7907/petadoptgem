@@ -267,10 +267,11 @@ def verify_doorstep_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
         application.status = 'completed'
 
         # Payment status evaluation: paid only if online Payment exists or COD collected
+        total_amount = getattr(application, 'total_amount', Decimal('0.00')) or Decimal('0.00')
         payment_verified = False
-        if application.payments.filter(status='paid').exists() or application.payments.filter(status='captured').exists():
+        if application.payments.filter(status__in=['paid', 'captured']).exists():
             payment_verified = True
-        elif application.payment_method == 'cod' and delivery.cash_collected > 0:
+        elif application.payment_method == 'cod' and delivery.cash_collected >= total_amount and delivery.cash_collected > Decimal('0.00'):
             payment_verified = True
 
         if payment_verified:
