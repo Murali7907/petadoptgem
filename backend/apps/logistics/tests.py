@@ -895,4 +895,27 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
             six_digit_match = re.search(r'\b\d{6}\b', notif.message)
             self.assertIsNone(six_digit_match, f"Notification #{notif.id} contains a 6-digit sequence: {notif.message}")
 
+    def test_otp_verify_throttle_rate_limit_429(self):
+        """
+        Confirms that the 'otp_verify' throttle scope is enforced:
+        Rate is 10/min. Requests 1-10 are processed (returning 400 for bad input),
+        and the 11th request in that same minute returns HTTP 429 Too Many Requests.
+        """
+        from django.core.cache import cache
+        cache.clear()
+
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+
+        for i in range(1, 11):
+            res = self.client.post(url, {'otp': '000000'}, format='json')
+            self.assertIn(res.status_code, [status.HTTP_400_BAD_REQUEST, 423], f"Request {i} unexpectedly failed with status {res.status_code}")
+
+        # 11th request must be throttled -> 429 Too Many Requests
+        res_throttled = self.client.post(url, {'otp': '000000'}, format='json')
+        self.assertEqual(res_throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertIn('Request was throttled', str(res_throttled.data))
+
+
 

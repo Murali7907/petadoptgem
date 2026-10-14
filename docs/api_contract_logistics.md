@@ -16,7 +16,7 @@ This document specifies the canonical and legacy API contracts for the pet deliv
    - `verify_doorstep`: Validates doorstep OTP, transitions delivery to `delivered`, marks pet `adopted`, marks adoption `completed`, and frees the driver.
 4. **Concurrency & Rate Protection**:
    - All verification endpoints employ row-level locking via `select_for_update()`.
-   - Dedicated DRF throttle scope: `'otp_verify': '10/min'`.
+   - Dedicated DRF throttle scope: `'otp_verify': '10/min'`. Note: A shared cache (e.g., Redis) is required in production for the limit to hold across workers.
    - Max attempt limit: `OTP_MAX_ATTEMPTS = 3` before permanent task lockout (`423 Locked`).
    - OTP Expiry: Configurable `OTP_TTL_MINUTES = 1440` (24h default). Expired OTPs return `410 Gone`.
 

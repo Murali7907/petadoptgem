@@ -58,6 +58,12 @@ logger = logging.getLogger(__name__)
 class OTPVerifyRateThrottle(ScopedRateThrottle):
     scope = 'otp_verify'
 
+    def allow_request(self, request, view):
+        if not getattr(view, self.scope_attr, None):
+            setattr(view, self.scope_attr, self.scope)
+        return super().allow_request(request, view)
+
+
 
 
 class ShelterDeliveryViewSet(viewsets.GenericViewSet):
@@ -223,6 +229,13 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
             return [IsAuthenticated(), IsAssignedDeliveryDriver()]
         return super().get_permissions()
 
+    def get_throttles(self):
+        if self.action in ['pickup', 'verify_doorstep', 'verify_otp']:
+            self.throttle_scope = 'otp_verify'
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
+
+
     @action(detail=False, methods=['get'], url_path='active')
     def active(self, request):
         if not hasattr(request.user, 'delivery_profile'):
@@ -246,7 +259,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
     @action(detail=True, methods=['post'], url_path='pickup',
             permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver],
-            throttle_classes=[OTPVerifyRateThrottle])
+            throttle_classes=[ScopedRateThrottle])
     def pickup(self, request, *args, **kwargs):
         raw_otp = request.data.get('otp') or request.data.get('code') or request.data.get('secret_otp')
         if not raw_otp:
@@ -350,7 +363,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
     @action(detail=True, methods=['post'], url_path='verify-doorstep',
             permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver],
-            throttle_classes=[OTPVerifyRateThrottle])
+            throttle_classes=[ScopedRateThrottle])
     def verify_doorstep(self, request, *args, **kwargs):
         raw_otp = request.data.get('otp') or request.data.get('code') or request.data.get('secret_otp')
         if not raw_otp:
@@ -450,7 +463,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
     @action(detail=True, methods=['post'], url_path='verify-otp',
             permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver],
-            throttle_classes=[OTPVerifyRateThrottle])
+            throttle_classes=[ScopedRateThrottle])
     def verify_otp(self, request, *args, **kwargs):
         return self.verify_doorstep(request, *args, **kwargs)
 
