@@ -15,8 +15,15 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError, APIException
 from .models import PetDelivery
+
+
+class ConflictError(APIException):
+    status_code = 409
+    default_detail = "Conflict with current delivery state."
+    default_code = "conflict"
+
 from .otp import generate_otp, check_otp, hash_otp, issue_otp
 from apps.accounts.models import DeliveryProfile
 from apps.adoptions.models import AdoptionApplication
@@ -125,6 +132,11 @@ def assign_delivery_task(application: AdoptionApplication, driver: DeliveryProfi
     Sends driver-assigned notice to adopter with driver details and NO OTP.
     """
     with transaction.atomic():
+        existing_delivery = PetDelivery.objects.select_for_update().filter(application=application).first()
+
+        if existing_delivery and existing_delivery.status in ['out_for_delivery', 'delivered']:
+            raise ConflictError(f"Cannot reassign delivery in '{existing_delivery.status}' state.")
+
         if application.status != 'approved':
             raise ValidationError(f"Cannot assign delivery for application with status '{application.get_status_display()}'. Must be 'approved'.")
 
@@ -141,15 +153,23 @@ def assign_delivery_task(application: AdoptionApplication, driver: DeliveryProfi
         if active_driver_delivery:
             raise ValidationError("Driver already has an active delivery in progress.")
 
-        existing_delivery = getattr(application, 'delivery', None)
-
         if existing_delivery:
+
+            # Free previous driver if different
+            if existing_delivery.driver and existing_delivery.driver != driver:
+                old_driver = existing_delivery.driver
+                old_driver.is_available = True
+                old_driver.save(update_fields=['is_available'])
+
             delivery = existing_delivery
             delivery.driver = driver
             delivery.status = 'assigned'
+            delivery.dispatched_at = None
+            delivery.delivered_at = None
             delivery.pickup_otp = ''
             delivery.doorstep_otp = ''
             delivery.secret_otp = ''
+            delivery.pickup_otp_hash = None
             delivery.doorstep_otp_hash = None
             delivery.doorstep_otp_sent_at = None
             delivery.doorstep_otp_expires_at = None

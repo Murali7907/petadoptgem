@@ -41,6 +41,7 @@ from apps.logistics.services import (
     dispatch_doorstep_otp,
     send_driver_assigned_notice,
     reissue_delivery_otp,
+    ConflictError,
 )
 
 
@@ -1186,6 +1187,132 @@ class DeliveryConcurrencyTests(TransactionTestCase):
 
         completion_emails = [m for m in mail.outbox if "Delivery Completed" in m.subject]
         self.assertEqual(len(completion_emails), 1)
+
+
+class DeliveryReassignmentTests(TestCase):
+    def setUp(self):
+        super().setUp()
+        self.shelter_user = User.objects.create_user(
+            username='reassign_shelter', email='shelter@reassign.org', password='password123', role='shelter'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user, organization_name='Reassign Shelter', pickup_address='123 Reassign Ave'
+        )
+        self.driver_user1 = User.objects.create_user(
+            username='driver1', email='driver1@reassign.org', password='password123', role='delivery'
+        )
+        self.driver_profile1 = DeliveryProfile.objects.create(
+            user=self.driver_user1, shelter=self.shelter_profile, vehicle_type='two_wheeler', vehicle_number='KA-01-DRV-01', is_available=True
+        )
+        self.driver_user2 = User.objects.create_user(
+            username='driver2', email='driver2@reassign.org', password='password123', role='delivery'
+        )
+        self.driver_profile2 = DeliveryProfile.objects.create(
+            user=self.driver_user2, shelter=self.shelter_profile, vehicle_type='four_wheeler', vehicle_number='KA-01-DRV-02', is_available=True
+        )
+        self.customer = User.objects.create_user(
+            username='reassign_customer', email='cust@reassign.org', password='password123', role='customer'
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter_profile, name='ReassignPet', species='dog', breed='Labrador', age_months=12, gender='female', status='available'
+        )
+        self.application = AdoptionApplication.objects.create(
+            applicant=self.customer, pet=self.pet, status='approved', total_amount=Decimal('150.00'), payment_status='pending', payment_method='cod'
+        )
+        self.client = APIClient()
+
+    def test_reassign_in_assigned_state_frees_old_driver_and_resets_delivery(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile1)
+        self.driver_profile1.refresh_from_db()
+        self.assertFalse(self.driver_profile1.is_available)
+        initial_delivery_id = delivery.id
+        initial_otp = delivery.raw_pickup_otp
+
+        self.client.force_authenticate(user=self.shelter_user)
+        payload = {
+            'application_id': str(self.application.public_id),
+            'driver_id': str(self.driver_profile2.public_id),
+            'payment_method': 'cod'
+        }
+        res = self.client.post('/api/v1/shelter/deliveries/assign/', data=payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+        # Old driver is freed
+        self.driver_profile1.refresh_from_db()
+        self.assertTrue(self.driver_profile1.is_available)
+
+        # New driver is marked unavailable
+        self.driver_profile2.refresh_from_db()
+        self.assertFalse(self.driver_profile2.is_available)
+
+        # Existing delivery row updated (preserving OneToOne relationship and public_id)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.id, initial_delivery_id)
+        self.assertEqual(delivery.driver, self.driver_profile2)
+        self.assertEqual(delivery.status, 'assigned')
+        self.assertIsNone(delivery.dispatched_at)
+        self.assertEqual(delivery.pickup_otp_attempts, 0)
+        self.assertNotEqual(res.data.get('pickup_otp'), initial_otp)
+
+    def test_reassign_in_out_for_delivery_or_delivered_returns_409_conflict(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile1)
+        # Advance to out_for_delivery
+        with self.captureOnCommitCallbacks(execute=True):
+            verify_pickup_otp(delivery, delivery.raw_pickup_otp)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, 'out_for_delivery')
+
+        self.client.force_authenticate(user=self.shelter_user)
+        payload = {
+            'application_id': str(self.application.public_id),
+            'driver_id': str(self.driver_profile2.public_id),
+            'payment_method': 'cod'
+        }
+        res = self.client.post('/api/v1/shelter/deliveries/assign/', data=payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("out_for_delivery", res.data.get('detail', ''))
+
+        with self.assertRaises(ConflictError):
+            assign_delivery_task(self.application, self.driver_profile2)
+
+        # Advance to delivered
+        match = re.search(r"OTP is:\s*(\d{6})", mail.outbox[-1].body)
+        doorstep_otp = match.group(1) if match else ''
+        verify_doorstep_otp(delivery, doorstep_otp)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, 'delivered')
+
+        res_delivered = self.client.post('/api/v1/shelter/deliveries/assign/', data=payload, format='json')
+        self.assertEqual(res_delivered.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("delivered", res_delivered.data.get('detail', ''))
+
+        with self.assertRaises(ConflictError):
+            assign_delivery_task(self.application, self.driver_profile2)
+
+    def test_reassign_in_failed_state_is_allowed_and_issues_fresh_otps(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile1)
+        delivery.status = 'failed'
+        delivery.save(update_fields=['status'])
+        self.driver_profile1.is_available = True
+        self.driver_profile1.save(update_fields=['is_available'])
+
+        self.client.force_authenticate(user=self.shelter_user)
+        payload = {
+            'application_id': str(self.application.public_id),
+            'driver_id': str(self.driver_profile2.public_id),
+            'payment_method': 'cod'
+        }
+        res = self.client.post('/api/v1/shelter/deliveries/assign/', data=payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, 'assigned')
+        self.assertEqual(delivery.driver, self.driver_profile2)
+        self.driver_profile2.refresh_from_db()
+        self.assertFalse(self.driver_profile2.is_available)
+        fresh_otp = res.data.get('pickup_otp')
+        self.assertTrue(bool(fresh_otp))
+
 
 
 
