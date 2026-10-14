@@ -734,3 +734,36 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         self.assertNotIn('doorstep_otp', DeliveryCustomerSerializer().fields)
         self.assertNotIn('pickup_otp', ShelterDeliverySerializer().fields)
         self.assertNotIn('doorstep_otp', ShelterDeliverySerializer().fields)
+
+    def test_wrong_otp_attempts_persisted_in_db_after_400(self):
+        """
+        Proves that a wrong OTP attempt increment is persisted to the database
+        immediately upon returning HTTP 400 (verified by reading back via a fresh query).
+        Tested for both pickup and doorstep verification.
+        """
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        self.client.force_authenticate(user=self.driver_user)
+
+        # 1. Pickup verification wrong OTP
+        pickup_url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+        res_pickup = self.client.post(pickup_url, {'otp': '999999'}, format='json')
+        self.assertEqual(res_pickup.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res_pickup.data['attempts_remaining'], 2)
+
+        # Fresh query from database (verifies persistence)
+        fresh_pickup_del = PetDelivery.objects.get(id=delivery.id)
+        self.assertEqual(fresh_pickup_del.pickup_otp_attempts, 1)
+
+        # Complete pickup to advance state to 'out_for_delivery'
+        verify_pickup_otp(fresh_pickup_del, delivery.raw_pickup_otp)
+
+        # 2. Doorstep verification wrong OTP
+        doorstep_url = f'/api/v1/delivery/tasks/{delivery.public_id}/verify-doorstep/'
+        res_doorstep = self.client.post(doorstep_url, {'otp': '999999'}, format='json')
+        self.assertEqual(res_doorstep.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res_doorstep.data['attempts_remaining'], 2)
+
+        # Fresh query from database (verifies persistence)
+        fresh_doorstep_del = PetDelivery.objects.get(id=delivery.id)
+        self.assertEqual(fresh_doorstep_del.doorstep_otp_attempts, 1)
+
