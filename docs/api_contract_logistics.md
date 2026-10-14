@@ -260,3 +260,16 @@ This document specifies the canonical and legacy API contracts for the pet deliv
    - In hardened architecture, doorstep OTP is generated **only** when the driver successfully verifies pickup at the shelter.
 3. **Status Update Restrictions**:
    - `POST /deliveries/<id>/status/` no longer accepts `out_for_delivery` or `delivered`. Transitions can only occur via OTP verification endpoints or explicit failure declaration (`failed`).
+
+---
+
+## Operational Notes
+
+1. **SECRET_KEY Dependency & Key Rotation**:
+   - OTP hashes are computed using HMAC-SHA256 keyed by Django's `settings.SECRET_KEY`.
+   - Rotating `SECRET_KEY` in production invalidates all outstanding active OTP hashes.
+   - If `SECRET_KEY` is rotated while deliveries are in-flight, affected deliveries must have their OTPs reissued via the shelter reissue endpoint (`POST /api/v1/shelter/deliveries/<id>/reissue-otp/`).
+2. **Single-Response Plaintext Delivery**:
+   - Plaintext pickup OTPs are returned strictly once in the response body of task assignment (`POST /api/v1/shelter/deliveries/assign/`) and pickup reissue (`POST /api/v1/shelter/deliveries/<id>/reissue-otp/`).
+   - Plaintext OTPs are never persisted in the database or exposed via GET endpoints, model serializers, or application logs.
+
