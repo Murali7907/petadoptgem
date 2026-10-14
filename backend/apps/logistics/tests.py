@@ -14,7 +14,8 @@ from decimal import Decimal
 from unittest.mock import patch, MagicMock
 from django.conf import settings
 from django.core import mail
-from django.test import TestCase
+import threading
+from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
@@ -1071,6 +1072,121 @@ class DeliveryOnCommitEmailTests(TestCase):
 
         delivery.refresh_from_db()
         self.assertIsNone(delivery.doorstep_otp_sent_at)
+
+
+class DeliveryConcurrencyTests(TransactionTestCase):
+    def setUp(self):
+        super().setUp()
+        self.shelter_user = User.objects.create_user(
+            username='conc_shelter', email='shelter@conc.org', password='password123', role='shelter'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user, organization_name='Conc Shelter', pickup_address='Concurrency St'
+        )
+        self.driver_user = User.objects.create_user(
+            username='conc_driver', email='driver@conc.org', password='password123', role='delivery'
+        )
+        self.driver_profile = DeliveryProfile.objects.create(
+            user=self.driver_user, shelter=self.shelter_profile, vehicle_type='two_wheeler', vehicle_number='KA-01-CONC-01', is_available=True
+        )
+        self.customer_user = User.objects.create_user(
+            username='conc_customer', email='customer@conc.org', password='password123', role='customer'
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter_profile, name='ConcPet', species='dog', breed='Boxer', age_months=18, gender='male', status='available'
+        )
+        self.application = AdoptionApplication.objects.create(
+            applicant=self.customer_user,
+            pet=self.pet,
+            status='approved',
+            total_amount=Decimal('200.00'),
+            payment_status='pending',
+            payment_method='cod'
+        )
+
+    def test_simultaneous_wrong_guesses_at_max_minus_one_attempts(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        max_attempts = getattr(settings, 'OTP_MAX_ATTEMPTS', 3)
+        delivery.pickup_otp_attempts = max_attempts - 1
+        delivery.save(update_fields=['pickup_otp_attempts'])
+
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+        barrier = threading.Barrier(2)
+        results = []
+        lock = threading.Lock()
+
+        def worker():
+            from django.db import connection
+            try:
+                client = APIClient()
+                client.force_authenticate(user=self.driver_user)
+                barrier.wait(timeout=5)
+                res = client.post(url, {'otp': '000000'}, format='json')
+                with lock:
+                    results.append(res)
+            finally:
+                connection.close()
+
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        self.assertEqual(len(results), 2)
+        status_codes = sorted([r.status_code for r in results])
+        self.assertEqual(status_codes, [400, 423])
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.pickup_otp_attempts, max_attempts)
+
+    def test_simultaneous_doorstep_submissions_with_correct_code(self):
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        verify_pickup_otp(delivery, delivery.raw_pickup_otp)
+        delivery.refresh_from_db()
+
+        match = re.search(r"OTP is:\s*(\d{6})", mail.outbox[-1].body)
+        doorstep_otp = match.group(1) if match else ''
+        self.assertTrue(bool(doorstep_otp))
+
+        mail.outbox.clear()
+
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/verify-doorstep/'
+        barrier = threading.Barrier(2)
+        results = []
+        lock = threading.Lock()
+
+        def worker():
+            from django.db import connection
+            try:
+                client = APIClient()
+                client.force_authenticate(user=self.driver_user)
+                barrier.wait(timeout=5)
+                res = client.post(url, {'otp': doorstep_otp}, format='json')
+                with lock:
+                    results.append(res)
+            finally:
+                connection.close()
+
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        self.assertEqual(len(results), 2)
+        for r in results:
+            self.assertEqual(r.status_code, 200)
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, 'delivered')
+        self.assertIsNotNone(delivery.delivered_at)
+
+        completion_emails = [m for m in mail.outbox if "Delivery Completed" in m.subject]
+        self.assertEqual(len(completion_emails), 1)
+
 
 
 
