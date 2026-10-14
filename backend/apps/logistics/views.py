@@ -56,13 +56,7 @@ from apps.adoptions.models import AdoptionApplication
 logger = logging.getLogger(__name__)
 
 
-class OTPVerifyRateThrottle(ScopedRateThrottle):
-    scope = 'otp_verify'
 
-    def allow_request(self, request, view):
-        if not getattr(view, self.scope_attr, None):
-            setattr(view, self.scope_attr, self.scope)
-        return super().allow_request(request, view)
 
 
 
