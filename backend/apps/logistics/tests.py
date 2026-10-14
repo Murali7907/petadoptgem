@@ -572,6 +572,13 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
             user=self.shelter_user, organization_name='Security Shelter', pickup_address='100 Sec St'
         )
 
+        self.other_shelter_user = User.objects.create_user(
+            username='other_sec_shelter', email='other_shelter@sec.org', password='password123', role='shelter'
+        )
+        self.other_shelter_profile = ShelterProfile.objects.create(
+            user=self.other_shelter_user, organization_name='Other Shelter Org', pickup_address='999 Other St'
+        )
+
         self.driver_user = User.objects.create_user(
             username='sec_driver', email='driver@sec.org', password='password123', role='delivery'
         )
@@ -673,10 +680,16 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         delivery = assign_delivery_task(self.application, self.driver_profile)
         reissue_url = f'/api/v1/shelter/deliveries/{delivery.public_id}/reissue-otp/'
 
-        # Unauthorized user
+        # Unauthorized user (customer) -> 403 Forbidden
         self.client.force_authenticate(user=self.customer_user)
         res_unauth = self.client.post(reissue_url, {'purpose': 'pickup'}, format='json')
         self.assertEqual(res_unauth.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Shelter that does NOT own the delivery -> 403 Forbidden
+        self.client.force_authenticate(user=self.other_shelter_user)
+        res_other_shelter = self.client.post(reissue_url, {'purpose': 'pickup'}, format='json')
+        self.assertEqual(res_other_shelter.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn("different shelter", res_other_shelter.data.get('detail', ''))
 
         # Authorized shelter: invalid purpose -> 400
         self.client.force_authenticate(user=self.shelter_user)
@@ -766,4 +779,86 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         # Fresh query from database (verifies persistence)
         fresh_doorstep_del = PetDelivery.objects.get(id=delivery.id)
         self.assertEqual(fresh_doorstep_del.doorstep_otp_attempts, 1)
+
+    def test_pickup_verification_lockout_and_rules(self):
+        """
+        Tests pickup verification rules: 400 with attempts_remaining on wrong codes,
+        and 423 Locked on the 4th attempt after 3 failures.
+        """
+        delivery = assign_delivery_task(self.application, self.driver_profile)
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+
+        # Attempt 1: wrong code -> 400, 2 remaining
+        res1 = self.client.post(url, {'otp': '000000'}, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res1.data['attempts_remaining'], 2)
+
+        # Attempt 2: wrong code -> 400, 1 remaining
+        res2 = self.client.post(url, {'otp': '000000'}, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res2.data['attempts_remaining'], 1)
+
+        # Attempt 3: wrong code -> 400, 0 remaining
+        res3 = self.client.post(url, {'otp': '000000'}, format='json')
+        self.assertEqual(res3.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res3.data['attempts_remaining'], 0)
+
+        # Attempt 4: lockout -> 423 Locked
+        res4 = self.client.post(url, {'otp': '000000'}, format='json')
+        self.assertEqual(res4.status_code, 423)
+        self.assertIn('Maximum OTP verification attempts exceeded', res4.data['detail'])
+
+    def test_no_notification_message_contains_any_otp_sequence(self):
+        """
+        Validates that across the entire delivery lifecycle (assign, pickup, doorstep, reissue),
+        no Notification message contains any issued 6-digit OTP sequence or matches a 6-digit number.
+        """
+        Notification.objects.all().delete()
+        mail.outbox.clear()
+
+        # 1. Assignment
+        self.client.force_authenticate(user=self.shelter_user)
+        res_assign = self.client.post('/api/v1/shelter/deliveries/assign/', {
+            'application_public_id': str(self.application.public_id),
+            'driver_public_id': str(self.driver_profile.public_id),
+            'payment_method': 'cod'
+        }, format='json')
+        self.assertEqual(res_assign.status_code, status.HTTP_201_CREATED)
+        pickup_code = res_assign.data['pickup_otp']
+
+        # 2. Pickup verification -> issues doorstep OTP
+        delivery = PetDelivery.objects.get(application=self.application)
+        self.client.force_authenticate(user=self.driver_user)
+        res_pickup = self.client.post(f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/', {'otp': pickup_code}, format='json')
+        self.assertEqual(res_pickup.status_code, status.HTTP_200_OK)
+
+        # Doorstep OTP from email
+        match = re.search(r'\b\d{6}\b', mail.outbox[-1].body)
+        doorstep_code = match.group(0) if match else ''
+        self.assertTrue(bool(doorstep_code))
+
+        # 3. Shelter reissue of doorstep OTP
+        self.client.force_authenticate(user=self.shelter_user)
+        res_reissue = self.client.post(f'/api/v1/shelter/deliveries/{delivery.public_id}/reissue-otp/', {'purpose': 'doorstep'}, format='json')
+        self.assertEqual(res_reissue.status_code, status.HTTP_200_OK)
+        match_reissue = re.search(r'\b\d{6}\b', mail.outbox[-1].body)
+        reissued_doorstep_code = match_reissue.group(0) if match_reissue else ''
+
+        # 4. Doorstep verification
+        self.client.force_authenticate(user=self.driver_user)
+        res_doorstep = self.client.post(f'/api/v1/delivery/tasks/{delivery.public_id}/verify-doorstep/', {'otp': reissued_doorstep_code}, format='json')
+        self.assertEqual(res_doorstep.status_code, status.HTTP_200_OK)
+
+        # Inspect all created Notifications
+        all_notifs = Notification.objects.all()
+        self.assertGreater(all_notifs.count(), 0)
+        issued_codes = {pickup_code, doorstep_code, reissued_doorstep_code}
+
+        for notif in all_notifs:
+            for code in issued_codes:
+                self.assertNotIn(code, notif.message, f"Notification #{notif.id} leaked issued OTP {code}!")
+            six_digit_match = re.search(r'\b\d{6}\b', notif.message)
+            self.assertIsNone(six_digit_match, f"Notification #{notif.id} contains a 6-digit sequence: {notif.message}")
+
 
