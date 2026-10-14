@@ -253,8 +253,8 @@ class EndToEndContractFlowTestCase(TestCase):
         self.assertTrue(bool(res_track.data['delivery']['doorstep_otp_sent_at']))
         import re
         from django.core import mail
-        match = re.search(r'\b\d{6}\b', mail.outbox[-1].body)
-        customer_doorstep_otp = match.group(0) if match else ''
+        match = re.search(r"OTP is:\s*(\d{6})", mail.outbox[-1].body)
+        customer_doorstep_otp = match.group(1) if match else ''
         self.assertTrue(bool(customer_doorstep_otp))
 
         # 4.6 Driver Verifies Doorstep OTP (/api/deliveries/<id>/verify-otp/)
