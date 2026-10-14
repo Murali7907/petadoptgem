@@ -43,6 +43,7 @@ from .services import (
     dispatch_doorstep_otp,
     reissue_delivery_otp,
     send_delivery_completed_notice,
+    resolve_delivery_payment_status,
 )
 from .payment_services import (
     create_razorpay_order,
@@ -437,17 +438,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
                     application.pet.save(update_fields=['status'])
 
                 application.status = 'completed'
-
-                total_amount = getattr(application, 'total_amount', Decimal('0.00')) or Decimal('0.00')
-                payment_verified = False
-                if application.payments.filter(status__in=['paid', 'captured']).exists():
-                    payment_verified = True
-                elif application.payment_method == 'cod' and delivery.cash_collected >= total_amount and delivery.cash_collected > Decimal('0.00'):
-                    payment_verified = True
-
-                if payment_verified:
-                    application.payment_status = 'paid'
-
+                resolve_delivery_payment_status(delivery)
                 application.save()
 
                 try:

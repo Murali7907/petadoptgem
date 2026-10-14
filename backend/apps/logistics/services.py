@@ -3,6 +3,7 @@ import logging
 import secrets
 import sys
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 
 # Ensure backend directory is in sys.path
@@ -221,6 +222,30 @@ def verify_pickup_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
     return True
 
 
+def resolve_delivery_payment_status(delivery: PetDelivery) -> bool:
+    """
+    Evaluates and updates application.payment_status upon doorstep delivery verification.
+    Consolidates payment verification into a single authoritative source of truth.
+    Returns True if payment was verified and marked 'paid', False otherwise.
+    """
+    application = getattr(delivery, 'application', None)
+    if not application:
+        return False
+
+    total_amount = getattr(application, 'total_amount', Decimal('0.00')) or Decimal('0.00')
+    payment_verified = False
+
+    if application.payments.filter(status__in=['paid', 'captured']).exists():
+        payment_verified = True
+    elif application.payment_method == 'cod' and delivery.cash_collected >= total_amount and delivery.cash_collected > Decimal('0.00'):
+        payment_verified = True
+
+    if payment_verified:
+        application.payment_status = 'paid'
+
+    return payment_verified
+
+
 def verify_doorstep_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
     """
     Verifies doorstep 6-digit OTP provided by customer to driver upon delivery arrival.
@@ -266,16 +291,7 @@ def verify_doorstep_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
         application = delivery.application
         application.status = 'completed'
 
-        # Payment status evaluation: paid only if online Payment exists or COD collected
-        total_amount = getattr(application, 'total_amount', Decimal('0.00')) or Decimal('0.00')
-        payment_verified = False
-        if application.payments.filter(status__in=['paid', 'captured']).exists():
-            payment_verified = True
-        elif application.payment_method == 'cod' and delivery.cash_collected >= total_amount and delivery.cash_collected > Decimal('0.00'):
-            payment_verified = True
-
-        if payment_verified:
-            application.payment_status = 'paid'
+        resolve_delivery_payment_status(delivery)
 
         application.save()
 
