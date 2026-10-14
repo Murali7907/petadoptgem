@@ -813,8 +813,9 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         fresh_pickup_del = PetDelivery.objects.get(id=delivery.id)
         self.assertEqual(fresh_pickup_del.pickup_otp_attempts, 1)
 
-        # Complete pickup to advance state to 'out_for_delivery'
-        verify_pickup_otp(fresh_pickup_del, delivery.raw_pickup_otp)
+        # Complete pickup via API to advance state to 'out_for_delivery'
+        res_pickup_ok = self.client.post(pickup_url, {'otp': delivery.raw_pickup_otp}, format='json')
+        self.assertEqual(res_pickup_ok.status_code, status.HTTP_200_OK)
 
         # 2. Doorstep verification wrong OTP
         doorstep_url = f'/api/v1/delivery/tasks/{delivery.public_id}/verify-doorstep/'

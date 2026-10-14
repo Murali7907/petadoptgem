@@ -21,7 +21,27 @@ from .otp import generate_otp, check_otp, hash_otp, issue_otp
 from apps.accounts.models import DeliveryProfile
 from apps.adoptions.models import AdoptionApplication
 
+from dataclasses import dataclass
+from enum import Enum
+
 logger = logging.getLogger(__name__)
+
+
+class OTPVerificationOutcome(str, Enum):
+    SUCCESS = "success"
+    ALREADY_COMPLETED = "already_completed"
+    WRONG_STATE = "wrong_state"
+    EXPIRED = "expired"
+    LOCKED = "locked"
+    INVALID = "invalid"
+
+
+@dataclass
+class OTPVerificationResult:
+    outcome: OTPVerificationOutcome
+    attempts_remaining: int = 0
+    delivery: PetDelivery | None = None
+    detail: str = ""
 
 def generate_secure_otp() -> str:
     """
@@ -168,58 +188,98 @@ def assign_delivery_task(application: AdoptionApplication, driver: DeliveryProfi
         return delivery
 
 
-def verify_pickup_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
+def verify_pickup_service(delivery_id: int | str, submitted_otp: str) -> OTPVerificationResult:
     """
-    Verifies pickup OTP submitted by driver at shelter.
-    On success:
-      - Marks delivery status='out_for_delivery', dispatched_at=now.
-      - Clears pickup_otp_hash and plaintext pickup_otp.
-      - Issues doorstep OTP via issue_otp(delivery, 'doorstep').
-      - Emails plaintext doorstep OTP to customer and sets doorstep_otp_sent_at.
-      - In-app notification informs customer delivery is on the way without OTP code.
-      - Email failure logs warning without aborting transition.
+    Authoritative service to verify pickup OTP under row lock.
+    Transitions delivery from 'assigned' to 'out_for_delivery' upon successful OTP validation.
+    Issues doorstep OTP and queues delivery alert email via transaction.on_commit.
+    Never raises exceptions for invalid OTP, lockout, expiry, or wrong state; returns OTPVerificationResult.
     """
-    if delivery.status != 'assigned':
-        raise ValidationError(f"Cannot verify pickup for delivery in '{delivery.get_status_display()}' state.")
-
-    if delivery.expires_at and timezone.now() > delivery.expires_at:
-        raise ValidationError("Pickup OTP has expired. Please contact shelter admin.")
-
-    max_attempts = getattr(settings, 'OTP_MAX_ATTEMPTS', 3)
-    if delivery.pickup_otp_attempts >= max_attempts:
-        raise ValidationError("Maximum pickup OTP attempts exceeded. Contact support.")
-
-    is_valid = False
-    if delivery.pickup_otp_hash:
-        is_valid = check_otp(delivery.pickup_otp_hash, delivery.id, 'pickup', submitted_otp)
-    elif delivery.pickup_otp:
-        is_valid = hmac.compare_digest(str(submitted_otp).strip(), str(delivery.pickup_otp).strip())
-
-    if not is_valid:
-        delivery.pickup_otp_attempts += 1
-        delivery.save(update_fields=['pickup_otp_attempts'])
-        raise ValidationError("Invalid pickup OTP.")
-
-    delivery.status = 'out_for_delivery'
-    delivery.dispatched_at = timezone.now()
-    delivery.pickup_otp_hash = None
-    delivery.pickup_otp = ''
-
-    # Issue doorstep OTP
-    raw_doorstep_otp = issue_otp(delivery, 'doorstep')
-    delivery.raw_doorstep_otp = raw_doorstep_otp
-
-    # Email customer doorstep OTP (idempotent: only if not already sent)
-    if not delivery.doorstep_otp_sent_at:
+    with transaction.atomic():
         try:
-            sent = dispatch_doorstep_otp(delivery, raw_otp=raw_doorstep_otp)
-            if sent:
-                delivery.doorstep_otp_sent_at = timezone.now()
-        except Exception as e:
-            logger.error(f"Failed to email doorstep OTP for delivery #{delivery.id}: {e}", exc_info=True)
+            delivery = PetDelivery.objects.select_for_update().get(id=delivery_id)
+        except PetDelivery.DoesNotExist:
+            return OTPVerificationResult(
+                outcome=OTPVerificationOutcome.WRONG_STATE,
+                detail=f"Delivery #{delivery_id} not found."
+            )
 
-    delivery.save()
-    return True
+        if delivery.status != 'assigned':
+            return OTPVerificationResult(
+                outcome=OTPVerificationOutcome.WRONG_STATE,
+                delivery=delivery,
+                detail=f"Cannot verify pickup for delivery in '{delivery.status}' state."
+            )
+
+        max_attempts = getattr(settings, 'OTP_MAX_ATTEMPTS', 3)
+        if delivery.pickup_otp_attempts >= max_attempts:
+            return OTPVerificationResult(
+                outcome=OTPVerificationOutcome.LOCKED,
+                attempts_remaining=0,
+                delivery=delivery,
+                detail="Maximum OTP verification attempts exceeded. Please contact the shelter to reissue an OTP."
+            )
+
+        now = timezone.now()
+        if delivery.expires_at and now > delivery.expires_at:
+            return OTPVerificationResult(
+                outcome=OTPVerificationOutcome.EXPIRED,
+                attempts_remaining=max(0, max_attempts - delivery.pickup_otp_attempts),
+                delivery=delivery,
+                detail="OTP has expired. Please contact the shelter to reissue an OTP."
+            )
+
+        # Hash-only verification (no plaintext fallback)
+        is_valid = False
+        if delivery.pickup_otp_hash:
+            is_valid = check_otp(delivery.pickup_otp_hash, delivery.id, 'pickup', submitted_otp)
+
+        if not is_valid:
+            delivery.pickup_otp_attempts += 1
+            delivery.save(update_fields=['pickup_otp_attempts'])
+            attempts_remaining = max(0, max_attempts - delivery.pickup_otp_attempts)
+            return OTPVerificationResult(
+                outcome=OTPVerificationOutcome.INVALID,
+                attempts_remaining=attempts_remaining,
+                delivery=delivery,
+                detail="Invalid pickup OTP."
+            )
+
+        delivery.status = 'out_for_delivery'
+        delivery.dispatched_at = now
+        delivery.pickup_otp_hash = None
+        delivery.pickup_otp = ''
+
+        # Issue doorstep OTP
+        raw_doorstep_otp = issue_otp(delivery, 'doorstep')
+        delivery.raw_doorstep_otp = raw_doorstep_otp
+        delivery.save()
+
+        # Send doorstep OTP email to customer
+        if not delivery.doorstep_otp_sent_at:
+            try:
+                sent = dispatch_doorstep_otp(delivery, raw_otp=raw_doorstep_otp)
+                if sent:
+                    PetDelivery.objects.filter(id=delivery.id).update(doorstep_otp_sent_at=timezone.now())
+                    delivery.doorstep_otp_sent_at = timezone.now()
+            except Exception as e:
+                logger.error(f"Failed to email doorstep OTP for delivery #{delivery.id}: {e}", exc_info=True)
+
+        return OTPVerificationResult(
+            outcome=OTPVerificationOutcome.SUCCESS,
+            delivery=delivery
+        )
+
+
+def verify_pickup_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
+    """Thin wrapper around verify_pickup_service for backwards compatibility."""
+    res = verify_pickup_service(delivery.id, submitted_otp)
+    if res.outcome == OTPVerificationOutcome.SUCCESS:
+        if res.delivery:
+            delivery.refresh_from_db()
+            delivery.raw_doorstep_otp = getattr(res.delivery, 'raw_doorstep_otp', None)
+        return True
+    raise ValidationError(res.detail or "Invalid pickup OTP.")
 
 
 def resolve_delivery_payment_status(delivery: PetDelivery) -> bool:
@@ -259,63 +319,117 @@ def resolve_delivery_payment_status(delivery: PetDelivery) -> bool:
     return payment_verified
 
 
-def verify_doorstep_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
+def verify_doorstep_service(delivery_id: int | str, submitted_otp: str) -> OTPVerificationResult:
     """
-    Verifies doorstep 6-digit OTP provided by customer to driver upon delivery arrival.
+    Authoritative service to verify doorstep OTP under row lock.
+    Transitions delivery from 'out_for_delivery' to 'delivered' upon successful OTP validation.
+    Marks Pet 'adopted', Application 'completed', frees Driver, resolves payment, and
+    queues completion notice email via transaction.on_commit.
+    Never raises exceptions for invalid OTP, lockout, expiry, or wrong state; returns OTPVerificationResult.
     """
-    if delivery.status != 'out_for_delivery':
-        raise ValidationError(f"Cannot verify doorstep OTP for delivery in '{delivery.get_status_display()}' state.")
-
-    if delivery.doorstep_otp_expires_at and timezone.now() > delivery.doorstep_otp_expires_at:
-        raise ValidationError("Doorstep OTP has expired. Contact support.")
-
-    max_attempts = getattr(settings, 'OTP_MAX_ATTEMPTS', 3)
-    if delivery.doorstep_otp_attempts >= max_attempts:
-        raise ValidationError("Maximum OTP attempts exceeded. Contact support.")
-
-    is_valid = False
-    if delivery.doorstep_otp_hash:
-        is_valid = check_otp(delivery.doorstep_otp_hash, delivery.id, 'doorstep', submitted_otp)
-    elif delivery.doorstep_otp:
-        is_valid = hmac.compare_digest(str(submitted_otp).strip(), str(delivery.doorstep_otp).strip())
-    elif delivery.secret_otp:
-        is_valid = hmac.compare_digest(str(submitted_otp).strip(), str(delivery.secret_otp).strip())
-
-    if not is_valid:
-        delivery.doorstep_otp_attempts += 1
-        delivery.save(update_fields=['doorstep_otp_attempts'])
-        if delivery.doorstep_otp_attempts >= max_attempts:
-            raise ValidationError("Maximum OTP attempts exceeded. Contact support.")
-        raise ValidationError("Invalid OTP.")
-
     with transaction.atomic():
+        try:
+            delivery = PetDelivery.objects.select_for_update().get(id=delivery_id)
+        except PetDelivery.DoesNotExist:
+            return OTPVerificationResult(
+                outcome=OTPVerificationOutcome.WRONG_STATE,
+                detail=f"Delivery #{delivery_id} not found."
+            )
+
+        if delivery.status == 'delivered':
+            return OTPVerificationResult(
+                outcome=OTPVerificationOutcome.ALREADY_COMPLETED,
+                delivery=delivery,
+                detail="Delivery already completed."
+            )
+
+        if delivery.status != 'out_for_delivery':
+            return OTPVerificationResult(
+                outcome=OTPVerificationOutcome.WRONG_STATE,
+                delivery=delivery,
+                detail=f"Cannot verify doorstep OTP for delivery in '{delivery.status}' state."
+            )
+
+        max_attempts = getattr(settings, 'OTP_MAX_ATTEMPTS', 3)
+        if delivery.doorstep_otp_attempts >= max_attempts:
+            return OTPVerificationResult(
+                outcome=OTPVerificationOutcome.LOCKED,
+                attempts_remaining=0,
+                delivery=delivery,
+                detail="Maximum OTP verification attempts exceeded. Please contact the shelter to reissue an OTP."
+            )
+
+        now = timezone.now()
+        if delivery.doorstep_otp_expires_at and now > delivery.doorstep_otp_expires_at:
+            return OTPVerificationResult(
+                outcome=OTPVerificationOutcome.EXPIRED,
+                attempts_remaining=max(0, max_attempts - delivery.doorstep_otp_attempts),
+                delivery=delivery,
+                detail="OTP has expired. Please contact the shelter to reissue an OTP."
+            )
+
+        # Hash-only verification (no plaintext fallback)
+        is_valid = False
+        if delivery.doorstep_otp_hash:
+            is_valid = check_otp(delivery.doorstep_otp_hash, delivery.id, 'doorstep', submitted_otp)
+
+        if not is_valid:
+            delivery.doorstep_otp_attempts += 1
+            delivery.save(update_fields=['doorstep_otp_attempts'])
+            attempts_remaining = max(0, max_attempts - delivery.doorstep_otp_attempts)
+            return OTPVerificationResult(
+                outcome=OTPVerificationOutcome.INVALID,
+                attempts_remaining=attempts_remaining,
+                delivery=delivery,
+                detail="Invalid doorstep OTP."
+            )
+
         delivery.status = 'delivered'
-        delivery.delivered_at = timezone.now()
+        delivery.delivered_at = now
         delivery.doorstep_otp_hash = None
         delivery.doorstep_otp = ''
         delivery.secret_otp = ''
         delivery.save()
 
         if delivery.driver:
-            driver = delivery.driver
-            driver.is_available = True
-            driver.save(update_fields=['is_available'])
+            delivery.driver.is_available = True
+            delivery.driver.save(update_fields=['is_available'])
 
         application = delivery.application
-        application.status = 'completed'
+        if application:
+            if application.pet:
+                application.pet.status = 'adopted'
+                application.pet.save(update_fields=['status'])
 
-        resolve_delivery_payment_status(delivery)
+            application.status = 'completed'
+            resolve_delivery_payment_status(delivery)
+            application.save()
 
-        application.save()
+        try:
+            send_delivery_completed_notice(delivery)
+        except Exception as e:
+            logger.error(f"Error sending delivery completed notice for delivery #{delivery.id}: {e}", exc_info=True)
 
-    return True
+        return OTPVerificationResult(
+            outcome=OTPVerificationOutcome.SUCCESS,
+            delivery=delivery
+        )
+
+
+def verify_doorstep_otp(delivery: PetDelivery, submitted_otp: str) -> bool:
+    """Thin wrapper around verify_doorstep_service for backwards compatibility."""
+    res = verify_doorstep_service(delivery.id, submitted_otp)
+    if res.outcome in (OTPVerificationOutcome.SUCCESS, OTPVerificationOutcome.ALREADY_COMPLETED):
+        return True
+    raise ValidationError(res.detail or "Invalid doorstep OTP.")
+
 
 
 def dispatch_doorstep_otp(delivery: PetDelivery, raw_otp: str = None) -> bool:
     """
     Automated doorstep verification OTP and status dispatch service for pet deliveries.
     Sends an email with the confidential doorstep verification OTP to the adopter.
-    If raw_otp is not provided, falls back to delivery.raw_doorstep_otp or legacy delivery.secret_otp.
+    If raw_otp is not provided, falls back to delivery.raw_doorstep_otp.
     Does NOT include OTP in the in-app notification.
 
     Returns True if successfully dispatched, False otherwise.
@@ -341,7 +455,7 @@ def dispatch_doorstep_otp(delivery: PetDelivery, raw_otp: str = None) -> bool:
         driver_username = getattr(driver_user, 'username', 'Assigned Delivery Partner')
         driver_phone = getattr(driver_user, 'phone', '') or 'Not provided'
 
-        secret_otp = raw_otp or getattr(delivery, 'raw_doorstep_otp', None) or getattr(delivery, 'secret_otp', None) or getattr(delivery, 'doorstep_otp', None)
+        secret_otp = raw_otp or getattr(delivery, 'raw_doorstep_otp', None)
 
         if not secret_otp:
             logger.error(f"Cannot dispatch OTP: Delivery #{delivery.id} has no raw OTP.")
