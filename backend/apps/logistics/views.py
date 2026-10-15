@@ -115,6 +115,7 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
                 obj = PetDelivery.objects.filter(public_id=lookup_val).first()
         if not obj:
             raise NotFound({"detail": f"Delivery with ID '{lookup_val}' not found."})
+        self.check_object_permissions(self.request, obj)
         return obj
 
     @extend_schema(responses={200: ShelterDeliverySerializer(many=True)})
@@ -245,6 +246,8 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
     def get_permissions(self):
         if self.action in ['pickup', 'verify_doorstep', 'update_status', 'ping']:
             return [IsAuthenticated(), IsAssignedDeliveryDriver()]
+        if self.action in ['tracking', 'track']:
+            return [IsAuthenticated(), IsDeliveryParticipant()]
         return super().get_permissions()
 
     def get_throttles(self):
