@@ -340,5 +340,89 @@ The following test suite will be implemented upon approval:
 
 ---
 
-*Last updated: 2026-10-14*
+## 7. Milestone 2 — Payment Hardening, Verified Shelters & Authorization Matrix
+
+### 7.1 Vision & Goals
+Milestone 2 hardens the platform's financial and role-based integrity:
+1. **Payment Hardening**: Eliminates client-controlled amounts, enforces strict application ownership, ensures atomic idempotent order creation and verification, introduces a unified atomic `mark_payment_captured` state machine, and secures asynchronous webhook processing.
+2. **Verified Shelters**: Enforces mandatory shelter verification (`is_verified=True`) on all platform write operations and restricts public pet discovery to verified shelters.
+3. **Authorization Matrix**: Comprehensive permission matrix auditing and testing across all canonical and legacy endpoints to ensure zero cross-tenant or role-escalation leaks.
+
+### 7.2 Task 1: Payment Hardening Specification
+1. **`create-order` Endpoint**:
+   - **Serializer Validation**: Parse input using `PaymentOrderCreateSerializer`. Rejects non-UUID delivery identifiers without raw type casting.
+   - **Ownership Check**: `request.user` must match `delivery.application.applicant`. Non-matching users receive `404 Not Found`.
+   - **Server-Side Amount Derivation**: Any client-submitted amount is strictly ignored. The order amount in paise is computed directly from `application.total_amount` using `Decimal`: `int(round(Decimal(str(application.total_amount)) * 100))`.
+   - **State Rejections**:
+     - `application.total_amount <= 0`: 400 Bad Request (`"Total amount must be greater than zero."`).
+     - `application.status != 'approved'`: 409 Conflict (`"Application must be approved."`).
+     - `application.payment_method == 'cod'`: 409 Conflict (`"Cannot initiate online payment for Cash on Delivery application."`).
+     - `application.payment_status == 'paid'`: 409 Conflict (`"Payment already completed for this application."`).
+     - `delivery.status not in ('assigned', 'out_for_delivery')`: 409 Conflict (`"Delivery is not in a payable status."`).
+   - **Row Locking & Idempotent Order Reuse**: Inside an atomic transaction with `application = AdoptionApplication.objects.select_for_update().get(...)`, if an unpaid `Payment` row already exists for this delivery with the same amount in paise, reuse and return its existing Razorpay order data rather than creating a duplicate order.
+   - **Payment Method Transition**: Set `application.payment_method = 'online'` only if currently `'unset'` or `'online'`.
+
+2. **`verify` Endpoint**:
+   - **Atomic Lookup & Ownership**: Query `Payment` by `razorpay_order_id` with `select_for_update()`. If unknown -> 404 Not Found. If `payment.application.applicant != request.user` -> 404 Not Found.
+   - **Idempotency**: If `payment.status in ('captured', 'paid')`, return 200 OK immediately.
+   - **Amount Safety**: Confirm `payment.amount_in_paise == int(round(Decimal(str(payment.application.total_amount)) * 100))`. Mismatch returns 400 Bad Request.
+   - **Cryptographic Signature Verification**: Verify HMAC-SHA256 signature using Razorpay SDK utility. If invalid, transition payment to `failed` and return 400 Bad Request.
+
+3. **Unified `mark_payment_captured` State Machine**:
+   - Centralized in `apps/logistics/payment_services.py` and called by both `verify` and `webhook`.
+   - Defined status constants: `PaymentStatus.CREATED`, `PaymentStatus.PENDING`, `PaymentStatus.CAPTURED`, `PaymentStatus.FAILED` (plus legacy aliases `PaymentStatus.PAID`).
+   - Transitions under row lock only from non-terminal states to `captured`.
+   - Sets `payment.status = 'captured'`, `application.payment_status = 'paid'`, `delivery.payment_status = 'paid'`.
+
+4. **`webhook` Endpoint**:
+   - Configured with `permission_classes=[AllowAny]` and `authentication_classes=[]`.
+   - Computes signature verification over raw `request.body`.
+   - `payment.captured`: Compares payload amount and currency with the `Payment` row. On mismatch, logs a warning and leaves database unchanged.
+   - `payment.failed`: Records failed status only if payment is not already captured (never overwrites captured payment).
+   - Unknown order ID returns 200 OK without database mutation.
+   - Generic error responses: Never leaks internal stack trace or `str(e)`.
+
+### 7.3 Pickup Online Payment Guard (Proposal - Report Only)
+
+#### Proposed Specification
+When an adoption application has `payment_method == 'online'` and `total_amount > Decimal('0.00')`, the pet should not leave the shelter until payment has been captured.
+
+In `DriverDeliveryViewSet.pickup()` / `verify_pickup_service()`:
+1. Check `application.payment_method == 'online'` and `application.total_amount > Decimal('0.00')`.
+2. If `application.payment_status != 'paid'`:
+   - Return HTTP 409 Conflict with code `PAYMENT_REQUIRED` and message:
+     `"Online payment incomplete. Total amount Rs. {total_amount} must be paid before dispatching driver for pickup."`
+3. If `payment_method == 'cod'` or `total_amount == Decimal('0.00')`, pickup is allowed to proceed without prior online payment.
+
+#### Required Test Suite for Proposal
+1. `test_pickup_blocked_when_online_payment_not_captured`: Pickup OTP verification returns 409 Conflict if online payment is pending.
+2. `test_pickup_allowed_when_online_payment_captured`: Pickup OTP verification succeeds when payment is captured.
+3. `test_pickup_allowed_for_cod`: Cash on delivery allows pickup prior to doorstep payment.
+4. `test_pickup_allowed_for_zero_cost_adoption`: Zero-amount adoption allows pickup without payment.
+
+### 7.4 Task 2: Verified Shelters Specification
+1. **Permission `IsVerifiedShelter`**:
+   - Requires `request.user.role == 'shelter'` and `request.user.shelter_profile.is_verified is True`.
+   - Superusers / Admins bypass verification check.
+   - Unverified shelters attempting restricted actions receive HTTP 403 Forbidden with `{"code": "shelter_not_verified", "detail": "Shelter organization has not been verified by platform administrators."}`.
+2. **Protected Write Actions**:
+   - Pet Management: `ShelterPetViewSet` (create, update, partial_update, destroy) and `PetViewSet` writes.
+   - Pet Media: `PetImageCreateView` (POST).
+   - Medical Records: `PetMedicalRecordViewSet` (POST).
+   - Applications: `ShelterApplicationViewSet` (review, approve, reject) and `AdoptionApplicationDetailView` (PATCH).
+   - Fleet & Deliveries: `ShelterDeliveryViewSet.assign`, `ShelterDeliveryViewSet.reissue_otp`, `ShelterDriverCreateView` (POST).
+3. **Public Catalog Visibility**:
+   - `PetViewSet.list` and `PetViewSet.retrieve` filter queryset by `shelter__is_verified=True`.
+   - Admins and the owning shelter can still view unverified shelter pets.
+
+### 7.5 Task 3: Authorization Matrix Specification
+- Exhaustive audit of all canonical (`/api/v1/`) and legacy routes with tests verifying:
+  1. Anonymous requests -> 401 Unauthorized.
+  2. Incorrect user role -> 403 Forbidden.
+  3. Correct role but non-owner/cross-tenant -> 403 Forbidden or 404 Not Found.
+  4. Legitimate owner/participant -> 200/201/204 Success.
+
+---
+
+*Last updated: 2026-10-15*
 

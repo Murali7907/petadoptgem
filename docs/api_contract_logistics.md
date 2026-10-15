@@ -264,6 +264,97 @@ This document specifies the canonical and legacy API contracts for the pet deliv
 
 ---
 
+## 8. Payment Processing Endpoints (Razorpay)
+
+### 8.1 Create Razorpay Payment Order
+- **URL**: `POST /api/v1/payments/create-order/`
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: IsAuthenticated (Adoption applicant only)
+- **Security & Business Rules**:
+  - **Ownership Check**: Authenticated user must equal `delivery.application.applicant`. Non-owner returns `404 Not Found`.
+  - **Server-Side Paise Calculation**: Any client-supplied amount is strictly ignored. Order amount is derived server-side via `round(Decimal(application.total_amount) * 100)`.
+  - **Precondition Validations**:
+    - `total_amount <= 0`: Returns `400 Bad Request`.
+    - `application.status != 'approved'`: Returns `409 Conflict`.
+    - `application.payment_method == 'cod'`: Returns `409 Conflict`.
+    - `application.payment_status == 'paid'`: Returns `409 Conflict`.
+    - `delivery.status` not in `('assigned', 'out_for_delivery')`: Returns `409 Conflict`.
+  - **Concurrency & Idempotent Order Reuse**: Row locked via `select_for_update()`. If an unpaid order (`created` or `pending`) already exists for this delivery with the identical amount, that order is returned without calling Razorpay or creating another `Payment` record.
+  - **Payment Method Transition**: Automatically sets `application.payment_method = 'online'` if currently `'unset'` or `'online'`.
+- **Request Body**:
+  ```json
+  {
+    "delivery_public_id": "5fa85f64-5717-4562-b3fc-2c963f66afa8"
+  }
+  ```
+- **Responses**:
+  - `201 Created`:
+    ```json
+    {
+      "id": 12,
+      "public_id": "8fa85f64-5717-4562-b3fc-2c963f66afa9",
+      "order_id": "order_EKfLsu8Gfb4M",
+      "razorpay_order_id": "order_EKfLsu8Gfb4M",
+      "amount_in_paise": 25000,
+      "currency": "INR",
+      "status": "created",
+      "key_id": "rzp_test_mock_key_id",
+      "created_at": "2026-10-15T10:00:00Z"
+    }
+    ```
+  - `400 Bad Request`: `total_amount` is zero or negative.
+  - `404 Not Found`: Delivery not found or authenticated user is not the applicant.
+  - `409 Conflict`: Precondition unmet (unapproved, COD, already paid, invalid delivery state).
+
+---
+
+### 8.2 Verify Razorpay Payment Signature
+- **URL**: `POST /api/v1/payments/verify/`
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: IsAuthenticated (Adoption applicant only)
+- **Security & Business Rules**:
+  - **Ownership Check**: Looked up under `select_for_update()`. If order does not exist or `payment.application.applicant != request.user`, returns `404 Not Found`.
+  - **Idempotency**: If `payment.status` is already `'captured'` or `'paid'`, returns `200 OK` immediately without re-verification or side-effects.
+  - **Amount Guard**: Verifies `payment.amount_in_paise` matches `round(Decimal(application.total_amount) * 100)`. Mismatch returns `400 Bad Request`.
+  - **Signature Verification**: Validates HMAC-SHA256 signature against `settings.RAZORPAY_KEY_SECRET`. Invalid signature returns `400 Bad Request` with **no state change** to the Payment row.
+  - **Unified State Capture**: Uses `mark_payment_captured`: transitions payment to `'captured'`, sets `application.payment_status = 'paid'` and `delivery.payment_status = 'paid'`.
+- **Request Body**:
+  ```json
+  {
+    "razorpay_order_id": "order_EKfLsu8Gfb4M",
+    "razorpay_payment_id": "pay_29QQoUBcxrhErF",
+    "razorpay_signature": "9ef4b61fa2a0ab365314275f0a8274718cb6c428787c8230230c120bc76eb4be"
+  }
+  ```
+- **Responses**:
+  - `200 OK`: Payment verified and captured.
+  - `400 Bad Request`: Invalid signature or amount mismatch. No state change occurs.
+  - `404 Not Found`: Unknown order or non-owner applicant.
+
+---
+
+### 8.3 Razorpay Webhook Processing
+- **URL**: `POST /api/v1/payments/webhook/`
+- **Authentication**: Public (`AllowAny`, `authentication_classes = []`). Zero Authorization header required.
+- **Security & Business Rules**:
+  - **Signature Verification**: Verified against `settings.RAZORPAY_WEBHOOK_SECRET` over raw `request.body`. Missing or invalid signature returns `400 Bad Request`.
+  - **Safe Error Reporting**: Internal exceptions are never returned in response payload (logged privately; generic messages returned).
+  - **`payment.captured`**:
+    - Validates entity `amount` and `currency` against the Payment row. Mismatch logs a warning and leaves the record unchanged (`200 OK` ignored).
+    - Idempotent: repeated webhook events produce no duplicate side-effects.
+    - Transitions payment to `'captured'`, `application.payment_status = 'paid'`, `delivery.payment_status = 'paid'`.
+  - **`payment.failed`**:
+    - Never overwrites an already captured payment.
+  - **Unknown Orders**:
+    - Returns `200 OK` ignored with no changes.
+- **Headers**:
+  `X-Razorpay-Signature: <hmac_sha256_hex>`
+- **Responses**:
+  - `200 OK`: Event processed or safely ignored.
+  - `400 Bad Request`: Invalid signature or malformed payload.
+
+---
+
 ## Operational Notes
 
 1. **SECRET_KEY Dependency & Key Rotation**:
@@ -273,4 +364,5 @@ This document specifies the canonical and legacy API contracts for the pet deliv
 2. **Single-Response Plaintext Delivery**:
    - Plaintext pickup OTPs are returned strictly once in the response body of task assignment (`POST /api/v1/shelter/deliveries/assign/`) and pickup reissue (`POST /api/v1/shelter/deliveries/<id>/reissue-otp/`).
    - Plaintext OTPs are never persisted in the database or exposed via GET endpoints, model serializers, or application logs.
+
 

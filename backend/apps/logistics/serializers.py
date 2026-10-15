@@ -286,8 +286,15 @@ class OTPVerificationSerializer(serializers.Serializer):
 
 
 class PaymentOrderCreateSerializer(serializers.Serializer):
-    delivery_public_id = serializers.UUIDField()
-    amount_in_paise = serializers.IntegerField(min_value=1)
+    delivery_public_id = serializers.UUIDField(required=False)
+    delivery_id = serializers.UUIDField(required=False)
+    amount_in_paise = serializers.IntegerField(required=False, min_value=1)
+    amount = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+
+    def validate(self, attrs):
+        if not attrs.get('delivery_public_id') and not attrs.get('delivery_id'):
+            raise serializers.ValidationError({"delivery_id": "delivery_id or delivery_public_id is required."})
+        return attrs
 
 
 class PaymentVerifySerializer(serializers.Serializer):

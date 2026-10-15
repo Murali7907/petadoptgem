@@ -21,7 +21,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import ValidationError, NotFound
 from rest_framework.throttling import ScopedRateThrottle
 
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import extend_schema, OpenApiTypes
 
 from .models import PetDelivery, DeliveryLocationPing, Payment
 from .permissions import IsShelterForDelivery, IsAssignedDeliveryDriver, IsDeliveryParticipant
@@ -468,18 +468,41 @@ class PaymentViewSet(viewsets.GenericViewSet):
     serializer_class = PaymentOrderCreateSerializer
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        request=PaymentOrderCreateSerializer,
+        responses={
+            201: PaymentLedgerSerializer,
+            400: OpenApiTypes.OBJECT,
+            404: OpenApiTypes.OBJECT,
+            409: OpenApiTypes.OBJECT
+        },
+        summary="Create Razorpay payment order for adoption delivery (applicant only)"
+    )
     @action(detail=False, methods=['post'], url_path='create-order')
     def create_order(self, request):
         serializer = PaymentOrderCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        delivery_public_id = serializer.validated_data['delivery_public_id']
-        amount_in_paise = serializer.validated_data['amount_in_paise']
+        delivery_public_id = serializer.validated_data.get('delivery_public_id') or serializer.validated_data.get('delivery_id')
+        delivery = PetDelivery.objects.filter(public_id=delivery_public_id).select_related('application', 'application__applicant').first()
+        if not delivery:
+            raise NotFound({"detail": "Delivery not found."})
 
-        delivery = get_object_or_404(PetDelivery, public_id=delivery_public_id)
-        payment = create_razorpay_order(delivery, amount_in_paise)
-        return Response(PaymentLedgerSerializer(payment).data, status=status.HTTP_201_CREATED)
+        payment = create_razorpay_order(delivery, request.user)
+        data = PaymentLedgerSerializer(payment).data
+        data['order_id'] = payment.razorpay_order_id
+        data['key_id'] = getattr(settings, 'RAZORPAY_KEY_ID', '')
+        return Response(data, status=status.HTTP_201_CREATED)
 
+    @extend_schema(
+        request=PaymentVerifySerializer,
+        responses={
+            200: PaymentLedgerSerializer,
+            400: OpenApiTypes.OBJECT,
+            404: OpenApiTypes.OBJECT
+        },
+        summary="Verify Razorpay payment signature and mark captured (applicant only)"
+    )
     @action(detail=False, methods=['post'], url_path='verify')
     def verify(self, request):
         serializer = PaymentVerifySerializer(data=request.data)
@@ -489,15 +512,30 @@ class PaymentViewSet(viewsets.GenericViewSet):
         razorpay_payment_id = serializer.validated_data['razorpay_payment_id']
         razorpay_signature = serializer.validated_data['razorpay_signature']
 
-        payment = verify_razorpay_payment(razorpay_order_id, razorpay_payment_id, razorpay_signature)
-        return Response(PaymentLedgerSerializer(payment).data, status=status.HTTP_200_OK)
+        payment = verify_razorpay_payment(razorpay_order_id, razorpay_payment_id, razorpay_signature, request.user)
+        data = PaymentLedgerSerializer(payment).data
+        data['message'] = "Payment verified and recorded successfully."
+        return Response(data, status=status.HTTP_200_OK)
 
+    @extend_schema(
+        responses={
+            200: OpenApiTypes.OBJECT,
+            400: OpenApiTypes.OBJECT
+        },
+        summary="Razorpay webhook listener (signature verified over raw body, public auth)"
+    )
     @action(detail=False, methods=['post'], url_path='webhook', permission_classes=[AllowAny], authentication_classes=[])
     def webhook(self, request):
         signature = request.headers.get('X-Razorpay-Signature') or request.META.get('HTTP_X_RAZORPAY_SIGNATURE', '')
         if not signature:
             return Response({"detail": "Missing X-Razorpay-Signature header."}, status=status.HTTP_400_BAD_REQUEST)
 
-        process_razorpay_webhook(request.data, signature, raw_body=request.body)
-        return Response({"status": "ok"}, status=status.HTTP_200_OK)
+        try:
+            result = process_razorpay_webhook(raw_body=request.body, signature=signature)
+            return Response(result, status=status.HTTP_200_OK)
+        except ValidationError as e:
+            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"Webhook processing error: {e}", exc_info=True)
+            return Response({"detail": "Webhook processing failed."}, status=status.HTTP_400_BAD_REQUEST)
 

@@ -8,6 +8,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 import hashlib
 import hmac
+import json
 import re
 from datetime import timedelta
 from decimal import Decimal
@@ -24,7 +25,7 @@ from apps.accounts.models import User, ShelterProfile, DeliveryProfile, Notifica
 from apps.pets.models import Pet
 from apps.adoptions.models import AdoptionApplication
 from django.db import transaction
-from apps.logistics.models import PetDelivery, DeliveryLocationPing, Payment
+from apps.logistics.models import PetDelivery, DeliveryLocationPing, Payment, PaymentStatus
 from apps.logistics.serializers import (
     DeliveryDriverTaskSerializer,
     DeliveryCustomerSerializer,
@@ -398,7 +399,7 @@ class LogisticsTestCase(TestCase):
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
 
         payment.refresh_from_db()
-        self.assertEqual(payment.status, 'failed')
+        self.assertEqual(payment.status, 'created')
 
 
 class DoorstepOTPDispatchTests(TestCase):
@@ -1327,6 +1328,600 @@ class DeliveryReassignmentTests(TestCase):
         self.assertFalse(self.driver_profile2.is_available)
         fresh_otp = res.data.get('pickup_otp')
         self.assertTrue(bool(fresh_otp))
+
+
+class PaymentHardeningTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+        # Shelter
+        self.shelter_user = User.objects.create_user(
+            username='pay_shelter', email='pay_shelter@test.com', password='password123', role='shelter'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user, organization_name='Pay Shelter', pickup_address='123 Pay St'
+        )
+
+        # Driver
+        self.driver_user = User.objects.create_user(
+            username='pay_driver', email='pay_driver@test.com', password='password123', role='delivery'
+        )
+        self.driver_profile = DeliveryProfile.objects.create(
+            user=self.driver_user, shelter=self.shelter_profile, is_available=True, vehicle_number='KA-01-P-1234'
+        )
+
+        # Adopter (applicant)
+        self.applicant = User.objects.create_user(
+            username='pay_applicant', email='pay_applicant@test.com', password='password123', role='customer'
+        )
+
+        # Other User (non-owner)
+        self.other_user = User.objects.create_user(
+            username='pay_other', email='pay_other@test.com', password='password123', role='customer'
+        )
+
+        # Pet
+        self.pet = Pet.objects.create(
+            shelter=self.shelter_profile, name='PayPet', species='dog', breed='Lab', age_months=12, status='available'
+        )
+
+        # Application
+        self.application = AdoptionApplication.objects.create(
+            applicant=self.applicant,
+            pet=self.pet,
+            status='approved',
+            total_amount=Decimal('250.00'),
+            payment_status='pending',
+            payment_method='online'
+        )
+
+        # Delivery in 'assigned' status
+        self.delivery = assign_delivery_task(self.application, self.driver_profile, payment_method='online')
+
+    @patch('razorpay.Client')
+    def test_non_owner_cannot_create_or_verify_returns_404(self, mock_client_cls):
+        mock_instance = MagicMock()
+        mock_instance.order.create.return_value = {'id': 'order_harden_nonowner', 'amount': 25000, 'currency': 'INR', 'status': 'created'}
+        mock_client_cls.return_value = mock_instance
+
+        # 1. Non-owner cannot create order -> 404
+        self.client.force_authenticate(user=self.other_user)
+        create_res = self.client.post('/api/v1/payments/create-order/', {'delivery_public_id': str(self.delivery.public_id)}, format='json')
+        self.assertEqual(create_res.status_code, status.HTTP_404_NOT_FOUND)
+
+        # 2. Owner creates order
+        self.client.force_authenticate(user=self.applicant)
+        owner_create = self.client.post('/api/v1/payments/create-order/', {'delivery_public_id': str(self.delivery.public_id)}, format='json')
+        self.assertEqual(owner_create.status_code, status.HTTP_201_CREATED)
+        order_id = owner_create.data['razorpay_order_id']
+
+        # 3. Non-owner cannot verify -> 404
+        self.client.force_authenticate(user=self.other_user)
+        verify_payload = {
+            'razorpay_order_id': order_id,
+            'razorpay_payment_id': 'pay_dummy_123',
+            'razorpay_signature': 'dummy_sig'
+        }
+        verify_res = self.client.post('/api/v1/payments/verify/', verify_payload, format='json')
+        self.assertEqual(verify_res.status_code, status.HTTP_404_NOT_FOUND)
+
+        # Unknown order -> 404
+        self.client.force_authenticate(user=self.applicant)
+        unknown_res = self.client.post('/api/v1/payments/verify/', {
+            'razorpay_order_id': 'order_unknown_999999',
+            'razorpay_payment_id': 'pay_dummy_123',
+            'razorpay_signature': 'dummy_sig'
+        }, format='json')
+        self.assertEqual(unknown_res.status_code, status.HTTP_404_NOT_FOUND)
+
+    @patch('razorpay.Client')
+    def test_client_supplied_amount_is_ignored(self, mock_client_cls):
+        mock_instance = MagicMock()
+        mock_instance.order.create.return_value = {'id': 'order_harden_ignore_amt', 'amount': 25000, 'currency': 'INR', 'status': 'created'}
+        mock_client_cls.return_value = mock_instance
+
+        self.client.force_authenticate(user=self.applicant)
+        # Client tries to send 100 paise or 1 rupee
+        res = self.client.post('/api/v1/payments/create-order/', {
+            'delivery_public_id': str(self.delivery.public_id),
+            'amount_in_paise': 100,
+            'amount': 1.00
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data['amount_in_paise'], 25000)
+
+        # Check call to razorpay client used application total_amount paise (25000)
+        mock_instance.order.create.assert_called_once()
+        create_call_args = mock_instance.order.create.call_args[1]['data']
+        self.assertEqual(create_call_args['amount'], 25000)
+
+    def test_create_order_precondition_rejections(self):
+        self.client.force_authenticate(user=self.applicant)
+
+        # 1. total_amount <= 0 -> 400
+        self.application.total_amount = Decimal('0.00')
+        self.application.save(update_fields=['total_amount'])
+        res_zero = self.client.post('/api/v1/payments/create-order/', {'delivery_public_id': str(self.delivery.public_id)}, format='json')
+        self.assertEqual(res_zero.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("greater than zero", str(res_zero.data))
+        self.application.total_amount = Decimal('250.00')
+        self.application.save(update_fields=['total_amount'])
+
+        # 2. application.status != 'approved' -> 409
+        self.application.status = 'under_review'
+        self.application.save(update_fields=['status'])
+        res_unapproved = self.client.post('/api/v1/payments/create-order/', {'delivery_public_id': str(self.delivery.public_id)}, format='json')
+        self.assertEqual(res_unapproved.status_code, status.HTTP_409_CONFLICT)
+        self.application.status = 'approved'
+        self.application.save(update_fields=['status'])
+
+        # 3. payment_method == 'cod' -> 409
+        self.application.payment_method = 'cod'
+        self.application.save(update_fields=['payment_method'])
+        res_cod = self.client.post('/api/v1/payments/create-order/', {'delivery_public_id': str(self.delivery.public_id)}, format='json')
+        self.assertEqual(res_cod.status_code, status.HTTP_409_CONFLICT)
+        self.application.payment_method = 'online'
+        self.application.save(update_fields=['payment_method'])
+
+        # 4. payment_status already 'paid' -> 409
+        self.application.payment_status = 'paid'
+        self.application.save(update_fields=['payment_status'])
+        res_paid = self.client.post('/api/v1/payments/create-order/', {'delivery_public_id': str(self.delivery.public_id)}, format='json')
+        self.assertEqual(res_paid.status_code, status.HTTP_409_CONFLICT)
+        self.application.payment_status = 'pending'
+        self.application.save(update_fields=['payment_status'])
+
+        # 5. delivery.status not in ('assigned', 'out_for_delivery') -> 409
+        self.delivery.status = 'failed'
+        self.delivery.save(update_fields=['status'])
+        res_del_status = self.client.post('/api/v1/payments/create-order/', {'delivery_public_id': str(self.delivery.public_id)}, format='json')
+        self.assertEqual(res_del_status.status_code, status.HTTP_409_CONFLICT)
+
+    @patch('razorpay.Client')
+    def test_same_order_is_reused(self, mock_client_cls):
+        mock_instance = MagicMock()
+        mock_instance.order.create.return_value = {'id': 'order_harden_reuse_1', 'amount': 25000, 'currency': 'INR', 'status': 'created'}
+        mock_client_cls.return_value = mock_instance
+
+        self.client.force_authenticate(user=self.applicant)
+        res1 = self.client.post('/api/v1/payments/create-order/', {'delivery_public_id': str(self.delivery.public_id)}, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res1.data['razorpay_order_id'], 'order_harden_reuse_1')
+        self.assertEqual(mock_instance.order.create.call_count, 1)
+
+        # Call again: returns same order without calling Razorpay or creating new row
+        res2 = self.client.post('/api/v1/payments/create-order/', {'delivery_public_id': str(self.delivery.public_id)}, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res2.data['razorpay_order_id'], 'order_harden_reuse_1')
+        self.assertEqual(mock_instance.order.create.call_count, 1)  # NOT called again
+        self.assertEqual(Payment.objects.filter(delivery=self.delivery).count(), 1)
+
+    def test_verify_success_and_repeat_verify_idempotent(self):
+        payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount_in_paise=25000,
+            amount=Decimal('250.00'),
+            currency='INR',
+            status=PaymentStatus.CREATED,
+            razorpay_order_id='order_verify_idem_1'
+        )
+
+        order_id = 'order_verify_idem_1'
+        payment_id = 'pay_verify_idem_1'
+        msg = f"{order_id}|{payment_id}".encode('utf-8')
+        secret = settings.RAZORPAY_KEY_SECRET.encode('utf-8')
+        sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+
+        self.client.force_authenticate(user=self.applicant)
+        verify_payload = {
+            'razorpay_order_id': order_id,
+            'razorpay_payment_id': payment_id,
+            'razorpay_signature': sig
+        }
+
+        # 1. First verify
+        res1 = self.client.post('/api/v1/payments/verify/', verify_payload, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+        self.assertEqual(res1.data['status'], PaymentStatus.CAPTURED)
+
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, PaymentStatus.CAPTURED)
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.payment_status, 'paid')
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.payment_status, 'paid')
+
+        # 2. Repeat verify -> 200 idempotent
+        res2 = self.client.post('/api/v1/payments/verify/', verify_payload, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertEqual(res2.data['status'], PaymentStatus.CAPTURED)
+
+    def test_verify_wrong_signature_returns_400_and_no_state_change(self):
+        payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount_in_paise=25000,
+            amount=Decimal('250.00'),
+            currency='INR',
+            status=PaymentStatus.CREATED,
+            razorpay_order_id='order_verify_bad_sig'
+        )
+
+        self.client.force_authenticate(user=self.applicant)
+        verify_payload = {
+            'razorpay_order_id': 'order_verify_bad_sig',
+            'razorpay_payment_id': 'pay_dummy_bad',
+            'razorpay_signature': 'invalidsignaturehex123'
+        }
+
+        res = self.client.post('/api/v1/payments/verify/', verify_payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Ensure NO state change
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, PaymentStatus.CREATED)
+        self.assertFalse(bool(payment.razorpay_payment_id))
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.payment_status, 'pending')
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.payment_status, 'pending')
+
+    def test_verify_amount_mismatch_returns_400(self):
+        payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount_in_paise=10000,  # 100.00 in db but application total_amount is 250.00 (25000 paise)
+            amount=Decimal('100.00'),
+            currency='INR',
+            status=PaymentStatus.CREATED,
+            razorpay_order_id='order_verify_amt_mismatch'
+        )
+
+        order_id = 'order_verify_amt_mismatch'
+        payment_id = 'pay_verify_mismatch_1'
+        msg = f"{order_id}|{payment_id}".encode('utf-8')
+        secret = settings.RAZORPAY_KEY_SECRET.encode('utf-8')
+        sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+
+        self.client.force_authenticate(user=self.applicant)
+        res = self.client.post('/api/v1/payments/verify/', {
+            'razorpay_order_id': order_id,
+            'razorpay_payment_id': payment_id,
+            'razorpay_signature': sig
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("does not match application total amount", str(res.data))
+
+    def test_webhook_without_auth_header_works_and_bad_signature_returns_400(self):
+        payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount_in_paise=25000,
+            amount=Decimal('250.00'),
+            currency='INR',
+            status=PaymentStatus.CREATED,
+            razorpay_order_id='order_webhook_auth'
+        )
+
+        webhook_secret = settings.RAZORPAY_WEBHOOK_SECRET
+        payload_dict = {
+            'event': 'payment.captured',
+            'payload': {
+                'payment': {
+                    'entity': {
+                        'id': 'pay_webhook_123',
+                        'order_id': 'order_webhook_auth',
+                        'amount': 25000,
+                        'currency': 'INR',
+                        'status': 'captured'
+                    }
+                }
+            }
+        }
+        raw_body = json.dumps(payload_dict)
+        valid_sig = hmac.new(webhook_secret.encode('utf-8'), raw_body.encode('utf-8'), hashlib.sha256).hexdigest()
+
+        # 1. Posting with bad signature returns 400
+        unauth_client = APIClient()  # NO authorization header
+        bad_res = unauth_client.post(
+            '/api/v1/payments/webhook/',
+            data=raw_body,
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE='invalid_webhook_sig'
+        )
+        self.assertEqual(bad_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Invalid webhook signature", str(bad_res.data))
+
+        # 2. Posting with valid signature and NO auth header returns 200
+        good_res = unauth_client.post(
+            '/api/v1/payments/webhook/',
+            data=raw_body,
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE=valid_sig
+        )
+        self.assertEqual(good_res.status_code, status.HTTP_200_OK)
+
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, PaymentStatus.CAPTURED)
+        self.assertEqual(payment.razorpay_payment_id, 'pay_webhook_123')
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.payment_status, 'paid')
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.payment_status, 'paid')
+
+    def test_webhook_amount_mismatch_ignored(self):
+        payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount_in_paise=25000,
+            amount=Decimal('250.00'),
+            currency='INR',
+            status=PaymentStatus.CREATED,
+            razorpay_order_id='order_webhook_mismatch'
+        )
+
+        webhook_secret = settings.RAZORPAY_WEBHOOK_SECRET
+        # Amount in payload is 5000 instead of 25000
+        payload_dict = {
+            'event': 'payment.captured',
+            'payload': {
+                'payment': {
+                    'entity': {
+                        'id': 'pay_webhook_mismatch',
+                        'order_id': 'order_webhook_mismatch',
+                        'amount': 5000,
+                        'currency': 'INR',
+                        'status': 'captured'
+                    }
+                }
+            }
+        }
+        raw_body = json.dumps(payload_dict)
+        valid_sig = hmac.new(webhook_secret.encode('utf-8'), raw_body.encode('utf-8'), hashlib.sha256).hexdigest()
+
+        res = self.client.post(
+            '/api/v1/payments/webhook/',
+            data=raw_body,
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE=valid_sig
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('status'), 'ignored')
+
+        # Payment remains untouched
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, PaymentStatus.CREATED)
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.payment_status, 'pending')
+
+    def test_webhook_repeat_idempotent(self):
+        payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount_in_paise=25000,
+            amount=Decimal('250.00'),
+            currency='INR',
+            status=PaymentStatus.CREATED,
+            razorpay_order_id='order_webhook_repeat'
+        )
+
+        webhook_secret = settings.RAZORPAY_WEBHOOK_SECRET
+        payload_dict = {
+            'event': 'payment.captured',
+            'payload': {
+                'payment': {
+                    'entity': {
+                        'id': 'pay_webhook_repeat',
+                        'order_id': 'order_webhook_repeat',
+                        'amount': 25000,
+                        'currency': 'INR',
+                        'status': 'captured'
+                    }
+                }
+            }
+        }
+        raw_body = json.dumps(payload_dict)
+        valid_sig = hmac.new(webhook_secret.encode('utf-8'), raw_body.encode('utf-8'), hashlib.sha256).hexdigest()
+
+        # Send once
+        res1 = self.client.post('/api/v1/payments/webhook/', data=raw_body, content_type='application/json', HTTP_X_RAZORPAY_SIGNATURE=valid_sig)
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+
+        # Send again (repeat event)
+        res2 = self.client.post('/api/v1/payments/webhook/', data=raw_body, content_type='application/json', HTTP_X_RAZORPAY_SIGNATURE=valid_sig)
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, PaymentStatus.CAPTURED)
+
+    def test_webhook_failed_does_not_overwrite_captured_payment(self):
+        payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount_in_paise=25000,
+            amount=Decimal('250.00'),
+            currency='INR',
+            status=PaymentStatus.CAPTURED,
+            razorpay_order_id='order_webhook_fail_test',
+            razorpay_payment_id='pay_captured_already'
+        )
+
+        webhook_secret = settings.RAZORPAY_WEBHOOK_SECRET
+        payload_dict = {
+            'event': 'payment.failed',
+            'payload': {
+                'payment': {
+                    'entity': {
+                        'id': 'pay_failed_attempt',
+                        'order_id': 'order_webhook_fail_test',
+                        'amount': 25000,
+                        'currency': 'INR',
+                        'status': 'failed'
+                    }
+                }
+            }
+        }
+        raw_body = json.dumps(payload_dict)
+        valid_sig = hmac.new(webhook_secret.encode('utf-8'), raw_body.encode('utf-8'), hashlib.sha256).hexdigest()
+
+        res = self.client.post('/api/v1/payments/webhook/', data=raw_body, content_type='application/json', HTTP_X_RAZORPAY_SIGNATURE=valid_sig)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        # Must NOT be overwritten to 'failed'
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, PaymentStatus.CAPTURED)
+        self.assertEqual(payment.razorpay_payment_id, 'pay_captured_already')
+
+    def test_webhook_unknown_order_returns_200_no_change(self):
+        webhook_secret = settings.RAZORPAY_WEBHOOK_SECRET
+        payload_dict = {
+            'event': 'payment.captured',
+            'payload': {
+                'payment': {
+                    'entity': {
+                        'id': 'pay_unknown',
+                        'order_id': 'order_completely_unknown_9999',
+                        'amount': 25000,
+                        'currency': 'INR',
+                        'status': 'captured'
+                    }
+                }
+            }
+        }
+        raw_body = json.dumps(payload_dict)
+        valid_sig = hmac.new(webhook_secret.encode('utf-8'), raw_body.encode('utf-8'), hashlib.sha256).hexdigest()
+
+        res = self.client.post('/api/v1/payments/webhook/', data=raw_body, content_type='application/json', HTTP_X_RAZORPAY_SIGNATURE=valid_sig)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('status'), 'ignored')
+
+
+class PaymentConcurrencyHardeningTests(TransactionTestCase):
+    def setUp(self):
+        super().setUp()
+        self.shelter_user = User.objects.create_user(
+            username='conc_pay_shelter', email='cps@test.com', password='password123', role='shelter'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user, organization_name='CPS Shelter', pickup_address='123 CPS St'
+        )
+        self.driver_user = User.objects.create_user(
+            username='conc_pay_driver', email='cpd@test.com', password='password123', role='delivery'
+        )
+        self.driver_profile = DeliveryProfile.objects.create(
+            user=self.driver_user, shelter=self.shelter_profile, is_available=True, vehicle_number='KA-01-P-9999'
+        )
+        self.applicant = User.objects.create_user(
+            username='conc_pay_applicant', email='cpa@test.com', password='password123', role='customer'
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter_profile, name='ConcPayPet', species='dog', breed='Lab', age_months=12, status='available'
+        )
+        self.application = AdoptionApplication.objects.create(
+            applicant=self.applicant,
+            pet=self.pet,
+            status='approved',
+            total_amount=Decimal('300.00'),
+            payment_status='pending',
+            payment_method='online'
+        )
+        self.delivery = assign_delivery_task(self.application, self.driver_profile, payment_method='online')
+        self.payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount_in_paise=30000,
+            amount=Decimal('300.00'),
+            currency='INR',
+            status=PaymentStatus.CREATED,
+            razorpay_order_id='order_concurrent_test_1'
+        )
+
+    def test_concurrent_verify_and_webhook_captures_exactly_once(self):
+        order_id = 'order_concurrent_test_1'
+        payment_id = 'pay_concurrent_123'
+
+        # Prepare verify signature
+        msg = f"{order_id}|{payment_id}".encode('utf-8')
+        secret = settings.RAZORPAY_KEY_SECRET.encode('utf-8')
+        verify_sig = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+
+        # Prepare webhook payload & signature
+        webhook_secret = settings.RAZORPAY_WEBHOOK_SECRET
+        payload_dict = {
+            'event': 'payment.captured',
+            'payload': {
+                'payment': {
+                    'entity': {
+                        'id': payment_id,
+                        'order_id': order_id,
+                        'amount': 30000,
+                        'currency': 'INR',
+                        'status': 'captured'
+                    }
+                }
+            }
+        }
+        raw_body = json.dumps(payload_dict)
+        webhook_sig = hmac.new(webhook_secret.encode('utf-8'), raw_body.encode('utf-8'), hashlib.sha256).hexdigest()
+
+        barrier = threading.Barrier(2)
+        results = []
+        lock = threading.Lock()
+
+        def verify_worker():
+            from django.db import connection
+            try:
+                client = APIClient()
+                client.force_authenticate(user=self.applicant)
+                barrier.wait(timeout=5)
+                res = client.post('/api/v1/payments/verify/', {
+                    'razorpay_order_id': order_id,
+                    'razorpay_payment_id': payment_id,
+                    'razorpay_signature': verify_sig
+                }, format='json')
+                with lock:
+                    results.append(('verify', res.status_code))
+            finally:
+                connection.close()
+
+        def webhook_worker():
+            from django.db import connection
+            try:
+                client = APIClient()
+                barrier.wait(timeout=5)
+                res = client.post(
+                    '/api/v1/payments/webhook/',
+                    data=raw_body,
+                    content_type='application/json',
+                    HTTP_X_RAZORPAY_SIGNATURE=webhook_sig
+                )
+                with lock:
+                    results.append(('webhook', res.status_code))
+            finally:
+                connection.close()
+
+        t1 = threading.Thread(target=verify_worker)
+        t2 = threading.Thread(target=webhook_worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        self.assertEqual(len(results), 2)
+        for name, code in results:
+            self.assertEqual(code, 200, f"{name} failed with status {code}")
+
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, PaymentStatus.CAPTURED)
+        self.assertEqual(self.payment.razorpay_payment_id, payment_id)
+
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.payment_status, 'paid')
+
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.payment_status, 'paid')
+
 
 
 

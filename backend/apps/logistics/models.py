@@ -83,6 +83,22 @@ class PetDelivery(models.Model):
         return f"Delivery #{self.id} for App #{self.application_id} ({driver_str}) - Status: {self.get_status_display()}"
 
 
+class PaymentStatus:
+    CREATED = 'created'
+    PENDING = 'pending'
+    CAPTURED = 'captured'
+    FAILED = 'failed'
+    # Legacy alias
+    PAID = 'paid'
+
+    CHOICES = (
+        (CREATED, 'Created'),
+        (PENDING, 'Pending'),
+        (CAPTURED, 'Captured'),
+        (FAILED, 'Failed'),
+    )
+
+
 class Payment(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     delivery = models.ForeignKey(PetDelivery, on_delete=models.CASCADE, null=True, blank=True, db_column='delivery_id', related_name='payments')
