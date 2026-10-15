@@ -51,6 +51,7 @@ This document specifies the canonical and legacy API contracts for the pet deliv
   - `400 Bad Request`: Validation failure or driver unavailable.
   - `403 Forbidden`: User does not possess a shelter profile or does not own the pet's shelter.
   - `404 Not Found`: Application or Driver not found.
+  - `409 Conflict`: Cannot reassign delivery when already in-flight (`out_for_delivery`) or completed (`delivered`). (Reassignment in `assigned` or `failed` safely frees previous driver, resets `dispatched_at`, and issues fresh OTPs).
 
 ---
 
