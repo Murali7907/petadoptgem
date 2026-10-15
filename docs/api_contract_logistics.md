@@ -25,14 +25,14 @@ This document specifies the canonical and legacy API contracts for the pet deliv
 ## Canonical Endpoints
 
 ### 1. Assign Delivery Task
-- **URL**: `POST /api/v1/deliveries/assign/` (Legacy alias: `POST /api/deliveries/assign/`)
+- **URL**: `POST /api/v1/shelter/deliveries/assign/` (Legacy alias: `POST /api/deliveries/assign/`)
 - **Authentication**: Required (`Bearer <access_token>`)
-- **Permissions**: Shelter Profile required (must own the shelter managing the adoption pet)
+- **Permissions**: `IsVerifiedShelter` required (role `shelter` with `shelter_profile.is_verified=True`, or platform administrator)
 - **Request Body**:
   ```json
   {
-    "application_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-    "driver_id": "4fa85f64-5717-4562-b3fc-2c963f66afa7",
+    "application_ref": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "driver_ref": "4fa85f64-5717-4562-b3fc-2c963f66afa7",
     "payment_method": "cod"
   }
   ```
@@ -153,9 +153,9 @@ This document specifies the canonical and legacy API contracts for the pet deliv
 ---
 
 ### 5. Shelter Reissue OTP Endpoint
-- **URL**: `POST /api/v1/shelter/deliveries/{id}/reissue-otp/` (Legacy alias: `POST /api/deliveries/shelter/deliveries/{id}/reissue-otp/`)
+- **URL**: `POST /api/v1/shelter/deliveries/{id}/reissue-otp/` (Legacy alias: `POST /api/deliveries/{id}/reissue-otp/`)
 - **Authentication**: Required (`Bearer <access_token>`)
-- **Permissions**: Shelter Profile owner of the pet's shelter
+- **Permissions**: `IsVerifiedShelter` required (role `shelter` with `shelter_profile.is_verified=True`, matching origin shelter, or platform administrator)
 - **Request Body**:
   ```json
   {
@@ -207,9 +207,9 @@ This document specifies the canonical and legacy API contracts for the pet deliv
 ---
 
 ### 7. Delivery Tracking (Customer / Shelter / Driver)
-- **URL**: `GET /api/v1/deliveries/{id}/track/` (Legacy alias: `GET /api/deliveries/{id}/track/`)
-- **Authentication**: Required
-- **Permissions**: Adopter, Shelter Staff, or Assigned Driver
+- **URL**: `GET /api/v1/delivery/tasks/{id}/tracking/` (Canonical), `GET /api/tracking/{id}/` (Direct alias), `GET /api/deliveries/{id}/track/` (Legacy alias)
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: `IsDeliveryParticipant` required (strictly restricted to the adoption applicant/customer, assigned driver, origin shelter, or platform administrators)
 - **Responses**:
   - `200 OK`:
     ```json
