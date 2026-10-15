@@ -112,6 +112,32 @@ def check_pickup_payment_guard(delivery: PetDelivery) -> tuple[bool, str, str]:
     # payment_method 'unset' (or unknown) with total > 0
     return False, "payment_method_required", "Payment method must be selected before pet pickup."
 
+
+def check_doorstep_payment_guard(delivery: PetDelivery) -> tuple[bool, str, str]:
+    """
+    Validates payment requirements prior to doorstep OTP verification.
+    Consumes NO OTP attempts.
+
+    Rule:
+    Doorstep verification for COD with total > 0 and cash_collected < total returns 409 {"code": "cash_not_collected"}.
+    """
+    application = getattr(delivery, 'application', None)
+    if not application:
+        return True, "", ""
+
+    total_amount = getattr(application, 'total_amount', Decimal('0.00')) or Decimal('0.00')
+    if total_amount <= Decimal('0.00'):
+        return True, "", ""
+
+    payment_method = getattr(application, 'payment_method', 'unset')
+    if payment_method == 'cod':
+        cash_collected = getattr(delivery, 'cash_collected', Decimal('0.00')) or Decimal('0.00')
+        if cash_collected < total_amount:
+            remaining = total_amount - cash_collected
+            return False, "cash_not_collected", f"Cash on delivery balance must be collected in full before doorstep verification. Remaining balance: {remaining}."
+
+    return True, "", ""
+
 def generate_secure_otp() -> str:
     """
     Returns a cryptographically secure 6-digit zero-padded numeric string via apps.logistics.otp.
@@ -437,6 +463,18 @@ def verify_doorstep_service(delivery_id: int | str, submitted_otp: str) -> OTPVe
             )
 
         max_attempts = getattr(settings, 'OTP_MAX_ATTEMPTS', 3)
+
+        # Check doorstep payment guard before OTP verification (consumes NO attempts)
+        allowed, code, detail = check_doorstep_payment_guard(delivery)
+        if not allowed:
+            return OTPVerificationResult(
+                outcome=OTPVerificationOutcome.CASH_NOT_COLLECTED,
+                attempts_remaining=max(0, max_attempts - delivery.doorstep_otp_attempts),
+                delivery=delivery,
+                detail=detail,
+                code=code
+            )
+
         if delivery.doorstep_otp_attempts >= max_attempts:
             return OTPVerificationResult(
                 outcome=OTPVerificationOutcome.LOCKED,

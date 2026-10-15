@@ -6,6 +6,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from decimal import Decimal
 from rest_framework import serializers
 from .models import PetDelivery, DeliveryLocationPing, Payment
 from apps.accounts.models import DeliveryProfile
@@ -391,5 +392,17 @@ class DeliveryTrackingResponseSerializer(serializers.Serializer):
     delivery = serializers.DictField()
     current_coordinates = DeliveryTrackingCoordinatesSerializer()
     breadcrumbs = LocationPingSerializer(many=True)
+
+
+class CollectCashRequestSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=8, decimal_places=2, min_value=Decimal('0.01'))
+
+
+class CollectCashResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    cash_collected = serializers.DecimalField(max_digits=8, decimal_places=2)
+    remaining_amount = serializers.DecimalField(max_digits=8, decimal_places=2)
+    payment_status = serializers.CharField()
+    payment_id = serializers.UUIDField(required=False)
 
 

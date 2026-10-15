@@ -23,7 +23,7 @@ from rest_framework.throttling import ScopedRateThrottle
 
 from drf_spectacular.utils import extend_schema, OpenApiTypes, OpenApiResponse
 
-from .models import PetDelivery, DeliveryLocationPing, Payment
+from .models import PetDelivery, DeliveryLocationPing, Payment, PaymentStatus
 from .permissions import IsShelterForDelivery, IsAssignedDeliveryDriver, IsDeliveryParticipant
 from apps.accounts.permissions import IsVerifiedShelter
 from .serializers import (
@@ -44,12 +44,15 @@ from .serializers import (
     OTPVerificationSerializer,
     PaymentOrderCreateSerializer,
     PaymentVerifySerializer,
-    PaymentLedgerSerializer
+    PaymentLedgerSerializer,
+    CollectCashRequestSerializer,
+    CollectCashResponseSerializer
 )
 from .otp import check_otp, issue_otp
 from .services import (
     assign_delivery_task,
     check_pickup_payment_guard,
+    check_doorstep_payment_guard,
     verify_pickup_service,
     verify_doorstep_service,
     OTPVerificationOutcome,
@@ -245,14 +248,14 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         return obj
 
     def get_permissions(self):
-        if self.action in ['pickup', 'verify_doorstep', 'update_status', 'ping']:
+        if self.action in ['pickup', 'verify_doorstep', 'update_status', 'ping', 'collect_cash']:
             return [IsAuthenticated(), IsAssignedDeliveryDriver()]
         if self.action in ['tracking', 'track']:
             return [IsAuthenticated(), IsDeliveryParticipant()]
         return super().get_permissions()
 
     def get_throttles(self):
-        if self.action in ['pickup', 'verify_doorstep', 'verify_otp']:
+        if self.action in ['pickup', 'verify_doorstep', 'verify_otp', 'collect_cash']:
             self.throttle_scope = 'otp_verify'
             return [ScopedRateThrottle()]
         return super().get_throttles()
@@ -351,6 +354,12 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
                 "detail": f"Cannot mark delivery as failed from '{delivery.status}' state."
             }, status=status.HTTP_409_CONFLICT)
 
+        if (delivery.cash_collected or Decimal('0.00')) > Decimal('0.00'):
+            return Response({
+                "detail": "Cannot mark delivery as failed after cash has been collected. Please contact the shelter.",
+                "code": "cash_already_collected"
+            }, status=status.HTTP_409_CONFLICT)
+
         delivery.status = 'failed'
         delivery.save(update_fields=['status'])
 
@@ -361,10 +370,106 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         updated_serializer = DeliveryDriverTaskSerializer(delivery)
         return Response(updated_serializer.data, status=status.HTTP_200_OK)
 
-    @extend_schema(request=OTPVerificationSerializer, responses={200: DeliveryDoorstepResponseSerializer})
+    @extend_schema(
+        request=CollectCashRequestSerializer,
+        responses={
+            200: CollectCashResponseSerializer,
+            400: OpenApiResponse(description="Bad request (e.g. wrong amount, total is 0, not COD)"),
+            409: OpenApiResponse(description="Conflict (e.g. not out_for_delivery)"),
+        }
+    )
+    @action(detail=True, methods=['post'], url_path='collect-cash', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
+    def collect_cash(self, request, *args, **kwargs):
+        delivery_obj = self.get_object()
+
+        raw_amount = request.data.get('amount')
+        if raw_amount is None or str(raw_amount).strip() == '':
+            return Response({"detail": "Amount is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            amount = Decimal(str(raw_amount).strip())
+        except (ValueError, TypeError, ArithmeticError):
+            return Response({"detail": "A valid decimal amount is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if amount <= Decimal('0.00'):
+            return Response({"detail": "Amount must be greater than zero."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            delivery = PetDelivery.objects.select_for_update().get(id=delivery_obj.id)
+            application = AdoptionApplication.objects.select_for_update().get(id=delivery.application_id)
+
+            if delivery.status != 'out_for_delivery':
+                return Response({
+                    "detail": f"Cannot collect cash for delivery in '{delivery.status}' state. Must be 'out_for_delivery'."
+                }, status=status.HTTP_409_CONFLICT)
+
+            if application.payment_method != 'cod':
+                return Response({
+                    "detail": f"Cannot collect cash for non-COD payment method '{application.payment_method}'."
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            total_amount = application.total_amount or Decimal('0.00')
+            if total_amount <= Decimal('0.00'):
+                return Response({
+                    "detail": "Total amount must be greater than zero for COD collection."
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            current_collected = delivery.cash_collected or Decimal('0.00')
+
+            # Idempotency check: if cash has already been collected in full, return 200 without duplicate ledger
+            if current_collected >= total_amount:
+                return Response({
+                    "message": "Cash has already been collected in full.",
+                    "cash_collected": str(current_collected),
+                    "remaining_amount": "0.00",
+                    "payment_status": application.payment_status
+                }, status=status.HTTP_200_OK)
+
+            remaining_balance = total_amount - current_collected
+            if amount != remaining_balance:
+                return Response({
+                    "detail": f"Submitted amount ({amount}) must equal remaining balance ({remaining_balance}).",
+                    "remaining_amount": str(remaining_balance)
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Record collection
+            delivery.cash_collected = current_collected + amount
+            delivery.payment_status = 'paid'
+            delivery.save(update_fields=['cash_collected', 'payment_status'])
+
+            payment = Payment.objects.create(
+                delivery=delivery,
+                application=application,
+                amount=amount,
+                amount_in_paise=int(round(Decimal(str(amount)) * 100)),
+                currency='INR',
+                payment_method='cod',
+                status=PaymentStatus.CAPTURED,
+                transaction_id=f"cod_{delivery.public_id}_{int(timezone.now().timestamp())}"
+            )
+
+            application.payment_status = 'paid'
+            application.save(update_fields=['payment_status', 'updated_at'])
+
+            return Response({
+                "message": "Cash collected successfully.",
+                "cash_collected": str(delivery.cash_collected),
+                "remaining_amount": "0.00",
+                "payment_status": "paid",
+                "payment_id": str(payment.public_id)
+            }, status=status.HTTP_200_OK)
+
+    @extend_schema(request=OTPVerificationSerializer, responses={200: DeliveryDoorstepResponseSerializer, 409: OpenApiResponse(description="Cash not collected or wrong state")})
     @action(detail=True, methods=['post'], url_path='verify-doorstep',
             permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
     def verify_doorstep(self, request, *args, **kwargs):
+        delivery_obj = self.get_object()
+
+        # Guard: Validate doorstep payment requirements before checking OTP (consumes NO attempts)
+        allowed, code, detail = check_doorstep_payment_guard(delivery_obj)
+        if not allowed:
+            return Response({"code": code, "detail": detail}, status=status.HTTP_409_CONFLICT)
+
         raw_otp = request.data.get('otp') or request.data.get('code') or request.data.get('secret_otp')
         if not raw_otp:
             return Response({"detail": "OTP is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -373,7 +478,6 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         if not re.match(r'^\d{6}$', val):
             return Response({"detail": "OTP must be a 6-digit numeric string."}, status=status.HTTP_400_BAD_REQUEST)
 
-        delivery_obj = self.get_object()
         result = verify_doorstep_service(delivery_obj.id, val)
 
         if result.outcome == OTPVerificationOutcome.ALREADY_COMPLETED:
@@ -384,6 +488,8 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
             }, status=status.HTTP_200_OK)
         elif result.outcome == OTPVerificationOutcome.WRONG_STATE:
             return Response({"detail": result.detail}, status=status.HTTP_409_CONFLICT)
+        elif result.outcome == OTPVerificationOutcome.CASH_NOT_COLLECTED:
+            return Response({"code": result.code, "detail": result.detail}, status=status.HTTP_409_CONFLICT)
         elif result.outcome == OTPVerificationOutcome.LOCKED:
             return Response({"detail": result.detail}, status=423)
         elif result.outcome == OTPVerificationOutcome.EXPIRED:

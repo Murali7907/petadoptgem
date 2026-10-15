@@ -35,6 +35,7 @@ from apps.logistics.otp import issue_otp, check_otp
 from apps.logistics.services import (
     assign_delivery_task,
     check_pickup_payment_guard,
+    check_doorstep_payment_guard,
     is_payment_satisfied,
     verify_pickup_service,
     verify_doorstep_service,
@@ -2169,6 +2170,239 @@ class PickupPaymentGuardTestCase(TestCase):
         Payment.objects.create(application=app, delivery=delivery, amount=Decimal('50.00'), amount_in_paise=5000, status=PaymentStatus.CAPTURED)
         allowed, code, _ = check_pickup_payment_guard(delivery)
         self.assertTrue(allowed)
+
+
+class CODCashCollectionTestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.shelter_user = User.objects.create_user(username='cod_shelter', email='cod_shelter@test.org', password='password123', role='shelter')
+        self.shelter = ShelterProfile.objects.create(user=self.shelter_user, organization_name='COD Shelter', is_verified=True)
+        self.driver_user = User.objects.create_user(username='cod_driver', email='cod_driver@test.org', password='password123', role='delivery')
+        self.driver = DeliveryProfile.objects.create(user=self.driver_user, shelter=self.shelter, is_available=True, vehicle_number='KA-03-CD-2222')
+        self.other_driver_user = User.objects.create_user(username='cod_other_driver', email='cod_other@test.org', password='password123', role='delivery')
+        self.other_driver = DeliveryProfile.objects.create(user=self.other_driver_user, shelter=self.shelter, is_available=True, vehicle_number='KA-03-CD-3333')
+        self.customer = User.objects.create_user(username='cod_cust', email='cod_cust@test.org', password='password123', role='customer')
+
+    def _setup_out_for_delivery(self, total_amount=Decimal('150.00'), payment_method='cod'):
+        self.driver.is_available = True
+        self.driver.save(update_fields=['is_available'])
+        pet = Pet.objects.create(shelter=self.shelter, name='CODPet', species='dog', breed='Beagle', age_months=10, gender='male', status='available')
+        app = AdoptionApplication.objects.create(
+            applicant=self.customer,
+            pet=pet,
+            status='approved',
+            total_amount=total_amount,
+            payment_method=payment_method,
+            payment_status='pending',
+            contact_phone='8888888888'
+        )
+        delivery = assign_delivery_task(app, self.driver, payment_method=payment_method)
+        # Advance to out_for_delivery
+        delivery.status = 'out_for_delivery'
+        delivery.save(update_fields=['status'])
+        issue_otp(delivery, 'doorstep')
+        return app, delivery
+
+    def test_collect_cash_success_creates_single_ledger_row(self):
+        app, delivery = self._setup_out_for_delivery(total_amount=Decimal('150.00'), payment_method='cod')
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/collect-cash/'
+        res = self.client.post(url, {'amount': '150.00'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('cash_collected'), '150.00')
+        self.assertEqual(res.data.get('remaining_amount'), '0.00')
+        self.assertEqual(res.data.get('payment_status'), 'paid')
+
+        delivery.refresh_from_db()
+        app.refresh_from_db()
+        self.assertEqual(delivery.cash_collected, Decimal('150.00'))
+        self.assertEqual(app.payment_status, 'paid')
+
+        payments = Payment.objects.filter(delivery=delivery)
+        self.assertEqual(payments.count(), 1)
+        p = payments.first()
+        self.assertEqual(p.payment_method, 'cod')
+        self.assertEqual(p.status, PaymentStatus.CAPTURED)
+        self.assertEqual(p.amount, Decimal('150.00'))
+        self.assertEqual(p.amount_in_paise, 15000)
+
+    def test_collect_cash_non_assigned_driver_returns_403(self):
+        app, delivery = self._setup_out_for_delivery()
+        self.client.force_authenticate(user=self.other_driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/collect-cash/'
+        res = self.client.post(url, {'amount': '150.00'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_collect_cash_wrong_status_assigned_returns_409(self):
+        app, delivery = self._setup_out_for_delivery()
+        delivery.status = 'assigned'
+        delivery.save(update_fields=['status'])
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/collect-cash/'
+        res = self.client.post(url, {'amount': '150.00'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+
+    def test_collect_cash_wrong_status_delivered_and_failed_returns_409(self):
+        app, delivery = self._setup_out_for_delivery()
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/collect-cash/'
+
+        delivery.status = 'delivered'
+        delivery.delivered_at = timezone.now()
+        delivery.save(update_fields=['status', 'delivered_at'])
+        res1 = self.client.post(url, {'amount': '150.00'}, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_409_CONFLICT)
+
+        delivery.status = 'failed'
+        delivery.save(update_fields=['status'])
+        res2 = self.client.post(url, {'amount': '150.00'}, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_409_CONFLICT)
+
+    def test_collect_cash_non_cod_method_returns_400(self):
+        app, delivery = self._setup_out_for_delivery(payment_method='online')
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/collect-cash/'
+        res = self.client.post(url, {'amount': '150.00'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_collect_cash_zero_total_returns_400(self):
+        app, delivery = self._setup_out_for_delivery(total_amount=Decimal('0.00'))
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/collect-cash/'
+        res = self.client.post(url, {'amount': '10.00'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_collect_cash_wrong_amount_returns_400_with_remaining_amount(self):
+        app, delivery = self._setup_out_for_delivery(total_amount=Decimal('150.00'))
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/collect-cash/'
+        res = self.client.post(url, {'amount': '100.00'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('remaining_amount'), '150.00')
+
+    def test_repeat_collect_cash_idempotent_creates_no_second_ledger_row(self):
+        app, delivery = self._setup_out_for_delivery(total_amount=Decimal('150.00'))
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/collect-cash/'
+
+        res1 = self.client.post(url, {'amount': '150.00'}, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+        self.assertEqual(Payment.objects.filter(delivery=delivery).count(), 1)
+
+        # Second collect call (idempotent)
+        res2 = self.client.post(url, {'amount': '150.00'}, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertEqual(Payment.objects.filter(delivery=delivery).count(), 1)
+
+    def test_doorstep_otp_verify_without_cash_returns_409_consumes_no_attempts(self):
+        app, delivery = self._setup_out_for_delivery(total_amount=Decimal('150.00'))
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/verify-doorstep/'
+        res = self.client.post(url, {'otp': '123456'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'cash_not_collected')
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.doorstep_otp_attempts, 0)
+
+    def test_doorstep_otp_verify_after_cash_collected_succeeds(self):
+        app, delivery = self._setup_out_for_delivery(total_amount=Decimal('150.00'))
+        self.client.force_authenticate(user=self.driver_user)
+
+        # 1. Collect cash
+        res_cash = self.client.post(f'/api/v1/delivery/tasks/{delivery.public_id}/collect-cash/', {'amount': '150.00'}, format='json')
+        self.assertEqual(res_cash.status_code, status.HTTP_200_OK)
+
+        # 2. Doorstep verify with valid OTP
+        doorstep_raw_otp = issue_otp(delivery, 'doorstep')
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/verify-doorstep/'
+        res_otp = self.client.post(url, {'otp': doorstep_raw_otp}, format='json')
+        self.assertEqual(res_otp.status_code, status.HTTP_200_OK)
+
+        delivery.refresh_from_db()
+        app.refresh_from_db()
+        self.assertEqual(delivery.status, 'delivered')
+        self.assertEqual(app.status, 'completed')
+        self.assertEqual(app.payment_status, 'paid')
+
+    def test_driver_cannot_mark_failed_after_cash_collected(self):
+        app, delivery = self._setup_out_for_delivery(total_amount=Decimal('150.00'))
+        self.client.force_authenticate(user=self.driver_user)
+
+        # Collect cash
+        self.client.post(f'/api/v1/delivery/tasks/{delivery.public_id}/collect-cash/', {'amount': '150.00'}, format='json')
+
+        # Driver attempts to mark failed
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/status/'
+        res = self.client.post(url, {'status': 'failed'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'cash_already_collected')
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, 'out_for_delivery')
+
+    def test_legacy_alias_collect_cash(self):
+        app, delivery = self._setup_out_for_delivery(total_amount=Decimal('120.00'))
+        self.client.force_authenticate(user=self.driver_user)
+
+        legacy_url = f'/api/deliveries/{delivery.public_id}/collect-cash/'
+        res = self.client.post(legacy_url, {'amount': '120.00'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('cash_collected'), '120.00')
+
+
+class CODCashCollectionConcurrencyTestCase(TransactionTestCase):
+    def test_concurrent_collect_cash_records_once(self):
+        shelter_user = User.objects.create_user(username='conc_shelter', email='conc_shelter@test.org', password='password123', role='shelter')
+        shelter = ShelterProfile.objects.create(user=shelter_user, organization_name='Conc Shelter', is_verified=True)
+        driver_user = User.objects.create_user(username='conc_driver', email='conc_driver@test.org', password='password123', role='delivery')
+        driver = DeliveryProfile.objects.create(user=driver_user, shelter=shelter, is_available=True, vehicle_number='KA-03-CC-9999')
+        customer = User.objects.create_user(username='conc_cust', email='conc_cust@test.org', password='password123', role='customer')
+
+        pet = Pet.objects.create(shelter=shelter, name='ConcPet', species='dog', breed='Boxer', age_months=15, gender='female', status='available')
+        app = AdoptionApplication.objects.create(
+            applicant=customer,
+            pet=pet,
+            status='approved',
+            total_amount=Decimal('100.00'),
+            payment_method='cod',
+            payment_status='pending',
+            contact_phone='7777777777'
+        )
+        delivery = assign_delivery_task(app, driver, payment_method='cod')
+        delivery.status = 'out_for_delivery'
+        delivery.save(update_fields=['status'])
+
+        results = []
+        errors = []
+
+        def _worker():
+            from django.db import connections
+            try:
+                c = APIClient()
+                c.force_authenticate(user=driver_user)
+                res = c.post(f'/api/v1/delivery/tasks/{delivery.public_id}/collect-cash/', {'amount': '100.00'}, format='json')
+                results.append(res.status_code)
+            except Exception as e:
+                errors.append(e)
+            finally:
+                connections.close_all()
+
+        threads = [threading.Thread(target=_worker) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Thread errors: {errors}")
+        self.assertEqual(len(results), 3)
+        for code in results:
+            self.assertEqual(code, 200)
+
+        # Assert exactly ONE Payment row exists in the ledger
+        self.assertEqual(Payment.objects.filter(delivery=delivery).count(), 1)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.cash_collected, Decimal('100.00'))
 
 
 

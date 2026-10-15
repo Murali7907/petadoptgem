@@ -59,6 +59,9 @@ urlpatterns = [
     path('<str:id>/verify-otp/', DriverDeliveryViewSet.as_view({'post': 'verify_doorstep'}), name='delivery-verify-otp'),
     path('<uuid:public_id>/verify-otp/', DriverDeliveryViewSet.as_view({'post': 'verify_doorstep'}), name='delivery-verify-otp-uuid'),
     path('<str:id>/verify-doorstep/', DriverDeliveryViewSet.as_view({'post': 'verify_doorstep'}), name='delivery-verify-doorstep'),
+    # POST /api/deliveries/<id>/collect-cash/
+    path('<str:id>/collect-cash/', DriverDeliveryViewSet.as_view({'post': 'collect_cash'}), name='delivery-collect-cash'),
+    path('<uuid:public_id>/collect-cash/', DriverDeliveryViewSet.as_view({'post': 'collect_cash'}), name='delivery-collect-cash-uuid'),
     # PATCH/POST /api/deliveries/<id>/status/
     path('<str:id>/status/', DriverDeliveryViewSet.as_view({'patch': 'update_status', 'post': 'update_status'}, permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver]), name='delivery-status'),
     path('<uuid:public_id>/status/', DriverDeliveryViewSet.as_view({'patch': 'update_status', 'post': 'update_status'}, permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver]), name='delivery-status-uuid'),

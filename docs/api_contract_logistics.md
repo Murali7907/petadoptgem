@@ -148,10 +148,44 @@ This document specifies the canonical and legacy API contracts for the pet deliv
     *(Idempotent: Subsequent calls on already `delivered` tasks return `200 OK` with `{"message": "Delivery already completed."}`).*
   - `400 Bad Request`: OTP format invalid or incorrect code with attempts remaining.
   - `403 Forbidden`: Driver not assigned to this delivery.
-  - `409 Conflict`: Delivery is not `out_for_delivery` or `in_transit`.
+  - `409 Conflict`:
+    - `{"code": "cash_not_collected"}`: When `payment_method == 'cod'`, `total_amount > 0`, and `cash_collected < total_amount`. Consumes NO OTP verification attempts.
+    - Delivery is not in `out_for_delivery` status.
   - `410 Gone`: Doorstep OTP has expired.
   - `423 Locked`: Maximum attempts (3) exceeded.
   - `429 Too Many Requests`: Rate limit throttled.
+
+---
+
+### 4b. COD Cash Collection
+- **URL**: `POST /api/v1/delivery/tasks/{id}/collect-cash/` (Canonical), `POST /api/deliveries/{id}/collect-cash/` (Legacy alias)
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: Delivery Driver assigned to this specific delivery task
+- **Rate Limit**: 10 requests / minute (`otp_verify` scope)
+- **Request Body**:
+  ```json
+  {
+    "amount": "150.00"
+  }
+  ```
+- **Responses**:
+  - `200 OK`: Cash collected successfully or already collected in full (idempotent, records at most one Payment ledger row).
+    ```json
+    {
+      "message": "Cash collected successfully.",
+      "cash_collected": "150.00",
+      "remaining_amount": "0.00",
+      "payment_status": "paid",
+      "payment_id": "89304958-3920-4aef-b3e1-0c5a2c421f10"
+    }
+    ```
+  - `400 Bad Request`:
+    - Invalid decimal amount format or amount <= 0.
+    - Submitted amount does not equal remaining balance: returns `{"detail": "...", "remaining_amount": "150.00"}`.
+    - Payment method is not `'cod'`.
+    - Total amount is 0.
+  - `403 Forbidden`: Authenticated driver is not assigned to this delivery task.
+  - `409 Conflict`: Delivery status is not `out_for_delivery`.
 
 ---
 
@@ -204,8 +238,11 @@ This document specifies the canonical and legacy API contracts for the pet deliv
   }
   ```
 - **Responses**:
-  - `200 OK`: Status updated to `failed`, driver marked available (`is_available=True`).
+  - `200 OK`: Status updated to `failed`, driver marked available (`is_available=True`). Note: marking a delivery as failed leaves the pet in `'pending'` and the application in `'approved'`.
   - `400 Bad Request`: Any status other than `"failed"` is rejected. Intermediate transitions (`out_for_delivery`, `delivered`) MUST use cryptographic OTP endpoints.
+  - `409 Conflict`:
+    - Delivery is not in `assigned` or `out_for_delivery` state.
+    - Cash has already been collected (`cash_collected > 0`): returns `{"code": "cash_already_collected", "detail": "Cannot mark delivery as failed after cash has been collected. Please contact the shelter."}`.
 
 ---
 
