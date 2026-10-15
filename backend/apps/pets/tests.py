@@ -29,7 +29,8 @@ class PetManagementAPITests(APITestCase):
             organization_name='Happy Paws Rescue',
             pickup_address='123 Shelter Lane, City',
             latitude=12.9716,
-            longitude=77.5946
+            longitude=77.5946,
+            is_verified=True
         )
 
         # Create shelter user 2 & profile (for multi-tenancy testing)
@@ -44,7 +45,8 @@ class PetManagementAPITests(APITestCase):
             organization_name='Paws and Claws Rescue',
             pickup_address='456 Haven Road, City',
             latitude=12.9800,
-            longitude=77.6000
+            longitude=77.6000,
+            is_verified=True
         )
 
         # Create customer user
@@ -208,7 +210,8 @@ class PublicPetCatalogAPITests(APITestCase):
             pickup_address='MG Road, Central Bangalore',
             city='Bangalore',
             latitude=12.971600,
-            longitude=77.594600
+            longitude=77.594600,
+            is_verified=True
         )
 
         # Create Shelter 2 in Whitefield (Farther East, ~17km)
@@ -225,7 +228,8 @@ class PublicPetCatalogAPITests(APITestCase):
             pickup_address='ITPL Main Road, Whitefield',
             city='Whitefield',
             latitude=12.969800,
-            longitude=77.750000
+            longitude=77.750000,
+            is_verified=True
         )
 
         # 1. Available Dog at Central Shelter
@@ -457,7 +461,8 @@ class CustomerFavoritePetsAPITests(APITestCase):
         self.shelter_profile = ShelterProfile.objects.create(
             user=self.shelter_user,
             organization_name='Paws Shelter',
-            pickup_address='100 Main St'
+            pickup_address='100 Main St',
+            is_verified=True
         )
         self.customer = User.objects.create_user(
             username='alice_fav',
@@ -539,7 +544,8 @@ class MediaStoragePipelineTests(APITestCase):
             organization_name='Storage Pipeline Shelter',
             pickup_address='789 Storage Rd',
             latitude=12.9716,
-            longitude=77.5946
+            longitude=77.5946,
+            is_verified=True
         )
         self.pet = Pet.objects.create(
             shelter=self.shelter_profile,
@@ -647,5 +653,159 @@ class MediaStoragePipelineTests(APITestCase):
         self.assertTrue(settings.USE_CLOUDINARY)
         self.assertEqual(settings.STORAGES['default']['BACKEND'], 'cloudinary_storage.storage.MediaCloudinaryStorage')
         self.assertEqual(settings.STORAGES['raw']['BACKEND'], 'cloudinary_storage.storage.RawMediaCloudinaryStorage')
+
+
+class VerifiedShelterPetPolicyTests(APITestCase):
+    def setUp(self):
+        # Unverified shelter
+        self.unverified_user = User.objects.create_user(
+            username='unverified_shelter_pet',
+            email='unverified_pet@shelter.org',
+            password='password123',
+            role='shelter'
+        )
+        self.unverified_profile = ShelterProfile.objects.create(
+            user=self.unverified_user,
+            organization_name='Unverified Pet Haven',
+            pickup_address='101 Pending Pet Rd',
+            is_verified=False
+        )
+        self.unverified_pet = Pet.objects.create(
+            shelter=self.unverified_profile,
+            name='Ghost',
+            species='dog',
+            breed='Husky',
+            age_months=12,
+            gender='male',
+            status='available'
+        )
+
+        # Verified shelter
+        self.verified_user = User.objects.create_user(
+            username='verified_shelter_pet',
+            email='verified_pet@shelter.org',
+            password='password123',
+            role='shelter'
+        )
+        self.verified_profile = ShelterProfile.objects.create(
+            user=self.verified_user,
+            organization_name='Verified Pet Haven',
+            pickup_address='202 Verified Pet Rd',
+            is_verified=True
+        )
+        self.verified_pet = Pet.objects.create(
+            shelter=self.verified_profile,
+            name='Buddy',
+            species='dog',
+            breed='Golden Retriever',
+            age_months=24,
+            gender='male',
+            status='available'
+        )
+
+        # Admin user
+        self.admin_user = User.objects.create_superuser(
+            username='admin_pet_boss',
+            email='admin_pet@kindheart.org',
+            password='password123'
+        )
+
+        # Customer user
+        self.customer_user = User.objects.create_user(
+            username='adopter_sam',
+            email='sam@customer.org',
+            password='password123',
+            role='customer'
+        )
+
+    def test_unverified_shelter_cannot_create_pet(self):
+        self.client.force_authenticate(user=self.unverified_user)
+        payload = {
+            'name': 'Shadow',
+            'species': 'cat',
+            'breed': 'Persian',
+            'age_months': 6,
+            'gender': 'female',
+            'adoption_fee': 50.00
+        }
+        res = self.client.post('/api/v1/shelter/pets/', payload)
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res.data.get('code'), 'shelter_not_verified')
+
+    def test_verified_shelter_can_create_pet(self):
+        self.client.force_authenticate(user=self.verified_user)
+        payload = {
+            'name': 'Shadow',
+            'species': 'cat',
+            'breed': 'Persian',
+            'age_months': 6,
+            'gender': 'female',
+            'adoption_fee': 50.00
+        }
+        res = self.client.post('/api/v1/shelter/pets/', payload)
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+    def test_admin_can_manage_pets(self):
+        self.client.force_authenticate(user=self.admin_user)
+        payload = {
+            'shelter': self.verified_profile.id,
+            'name': 'AdminPet',
+            'species': 'dog',
+            'breed': 'Beagle',
+            'age_months': 8,
+            'gender': 'male',
+            'adoption_fee': 0.00
+        }
+        res = self.client.post('/api/pets/', payload)
+        self.assertNotEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_public_catalog_filters_unverified_shelters(self):
+        # Anonymous user visiting public pets list
+        res = self.client.get('/api/pets/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        results = res.data['results'] if 'results' in res.data else res.data
+        pet_names = [p['name'] for p in results]
+        self.assertIn('Buddy', pet_names)
+        self.assertNotIn('Ghost', pet_names)
+
+        # Owning shelter can still see their own pet in catalog
+        self.client.force_authenticate(user=self.unverified_user)
+        res_own = self.client.get('/api/pets/')
+        own_results = res_own.data['results'] if 'results' in res_own.data else res_own.data
+        own_names = [p['name'] for p in own_results]
+        self.assertIn('Ghost', own_names)
+
+        # Admin can see all pets in catalog
+        self.client.force_authenticate(user=self.admin_user)
+        res_admin = self.client.get('/api/pets/')
+        admin_results = res_admin.data['results'] if 'results' in res_admin.data else res_admin.data
+        admin_names = [p['name'] for p in admin_results]
+        self.assertIn('Ghost', admin_names)
+        self.assertIn('Buddy', admin_names)
+
+    def test_suspension_immediately_blocks_pet_writes(self):
+        self.client.force_authenticate(user=self.verified_user)
+        self.verified_profile.is_verified = False
+        self.verified_profile.save()
+
+        res = self.client.patch(f'/api/v1/shelter/pets/{self.verified_pet.public_id}/', {'name': 'Buddy Renamed'})
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res.data.get('code'), 'shelter_not_verified')
+
+    def test_unverified_shelter_blocked_from_pet_media_and_medical(self):
+        self.client.force_authenticate(user=self.unverified_user)
+        # Pet image upload
+        res_img = self.client.post(f'/api/pets/{self.unverified_pet.id}/images/', {'is_primary': True})
+        self.assertEqual(res_img.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_img.data.get('code'), 'shelter_not_verified')
+
+        # Medical record creation
+        res_med = self.client.post(f'/api/pets/{self.unverified_pet.id}/medical/', {
+            'record_type': 'vaccination',
+            'title': 'Rabies Vaccine',
+            'record_date': '2026-10-15'
+        })
+        self.assertEqual(res_med.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_med.data.get('code'), 'shelter_not_verified')
 
 

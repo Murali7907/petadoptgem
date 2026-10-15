@@ -57,6 +57,8 @@ class EndToEndContractFlowTestCase(TestCase):
         self.assertEqual(res_shelter_reg.status_code, status.HTTP_201_CREATED)
         shelter_user = User.objects.get(username='e2e_shelter')
         shelter_profile = ShelterProfile.objects.get(user=shelter_user)
+        shelter_profile.is_verified = True
+        shelter_profile.save()
 
         # 1.3 Shelter Login (JWT token pair check)
         res_login = self.client.post('/api/auth/login/', data={

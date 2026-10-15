@@ -18,7 +18,7 @@ from django.core import mail
 import threading
 from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
-from rest_framework.test import APIClient
+from rest_framework.test import APIClient, APITestCase
 from rest_framework import status
 
 from apps.accounts.models import User, ShelterProfile, DeliveryProfile, Notification
@@ -62,7 +62,8 @@ class LogisticsTestCase(TestCase):
         self.shelter_profile = ShelterProfile.objects.create(
             user=self.shelter_user,
             organization_name='Happy Paws Shelter',
-            pickup_address='123 Shelter St'
+            pickup_address='123 Shelter St',
+            is_verified=True
         )
 
         # Create Driver User & Profile
@@ -417,7 +418,8 @@ class DoorstepOTPDispatchTests(TestCase):
         self.shelter_profile = ShelterProfile.objects.create(
             user=self.shelter_user,
             organization_name='Alert Shelter',
-            pickup_address='100 Shelter Blvd'
+            pickup_address='100 Shelter Blvd',
+            is_verified=True
         )
 
         self.driver_user = User.objects.create_user(
@@ -582,14 +584,14 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
             username='sec_shelter', email='shelter@sec.org', password='password123', role='shelter'
         )
         self.shelter_profile = ShelterProfile.objects.create(
-            user=self.shelter_user, organization_name='Security Shelter', pickup_address='100 Sec St'
+            user=self.shelter_user, organization_name='Security Shelter', pickup_address='100 Sec St', is_verified=True
         )
 
         self.other_shelter_user = User.objects.create_user(
             username='other_sec_shelter', email='other_shelter@sec.org', password='password123', role='shelter'
         )
         self.other_shelter_profile = ShelterProfile.objects.create(
-            user=self.other_shelter_user, organization_name='Other Shelter Org', pickup_address='999 Other St'
+            user=self.other_shelter_user, organization_name='Other Shelter Org', pickup_address='999 Other St', is_verified=True
         )
 
         self.driver_user = User.objects.create_user(
@@ -1014,7 +1016,7 @@ class DeliveryOnCommitEmailTests(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.shelter_user = User.objects.create_user(username='commit_shelter', email='shelter@commit.test', password='password123', role='shelter')
-        self.shelter_profile = ShelterProfile.objects.create(user=self.shelter_user, organization_name='Commit Shelter', pickup_address='123 Test St', city='Bangalore')
+        self.shelter_profile = ShelterProfile.objects.create(user=self.shelter_user, organization_name='Commit Shelter', pickup_address='123 Test St', city='Bangalore', is_verified=True)
         self.customer_user = User.objects.create_user(username='commit_customer', email='cust@commit.test', password='password123', role='customer')
         self.driver_user = User.objects.create_user(username='commit_driver', email='driver@commit.test', password='password123', role='delivery')
         self.driver_profile = DeliveryProfile.objects.create(user=self.driver_user, shelter=self.shelter_profile, is_available=True, vehicle_number='KA-01-C-1234')
@@ -1098,7 +1100,7 @@ class DeliveryConcurrencyTests(TransactionTestCase):
             username='conc_shelter', email='shelter@conc.org', password='password123', role='shelter'
         )
         self.shelter_profile = ShelterProfile.objects.create(
-            user=self.shelter_user, organization_name='Conc Shelter', pickup_address='Concurrency St'
+            user=self.shelter_user, organization_name='Conc Shelter', pickup_address='Concurrency St', is_verified=True
         )
         self.driver_user = User.objects.create_user(
             username='conc_driver', email='driver@conc.org', password='password123', role='delivery'
@@ -1212,7 +1214,7 @@ class DeliveryReassignmentTests(TestCase):
             username='reassign_shelter', email='shelter@reassign.org', password='password123', role='shelter'
         )
         self.shelter_profile = ShelterProfile.objects.create(
-            user=self.shelter_user, organization_name='Reassign Shelter', pickup_address='123 Reassign Ave'
+            user=self.shelter_user, organization_name='Reassign Shelter', pickup_address='123 Reassign Ave', is_verified=True
         )
         self.driver_user1 = User.objects.create_user(
             username='driver1', email='driver1@reassign.org', password='password123', role='delivery'
@@ -1339,7 +1341,7 @@ class PaymentHardeningTests(TestCase):
             username='pay_shelter', email='pay_shelter@test.com', password='password123', role='shelter'
         )
         self.shelter_profile = ShelterProfile.objects.create(
-            user=self.shelter_user, organization_name='Pay Shelter', pickup_address='123 Pay St'
+            user=self.shelter_user, organization_name='Pay Shelter', pickup_address='123 Pay St', is_verified=True
         )
 
         # Driver
@@ -1804,7 +1806,7 @@ class PaymentConcurrencyHardeningTests(TransactionTestCase):
             username='conc_pay_shelter', email='cps@test.com', password='password123', role='shelter'
         )
         self.shelter_profile = ShelterProfile.objects.create(
-            user=self.shelter_user, organization_name='CPS Shelter', pickup_address='123 CPS St'
+            user=self.shelter_user, organization_name='CPS Shelter', pickup_address='123 CPS St', is_verified=True
         )
         self.driver_user = User.objects.create_user(
             username='conc_pay_driver', email='cpd@test.com', password='password123', role='delivery'
@@ -1921,6 +1923,101 @@ class PaymentConcurrencyHardeningTests(TransactionTestCase):
 
         self.delivery.refresh_from_db()
         self.assertEqual(self.delivery.payment_status, 'paid')
+
+
+class VerifiedShelterLogisticsPolicyTests(APITestCase):
+    def setUp(self):
+        # Unverified shelter
+        self.unverified_user = User.objects.create_user(
+            username='unverified_shelter_log', email='unverified_log@shelter.org', password='password123', role='shelter'
+        )
+        self.unverified_profile = ShelterProfile.objects.create(
+            user=self.unverified_user, organization_name='Unverified Log Haven', pickup_address='100 Log Rd', is_verified=False
+        )
+        self.unverified_driver_user = User.objects.create_user(
+            username='unverified_log_driver', email='driver_unv@log.org', password='password123', role='delivery'
+        )
+        self.unverified_driver = DeliveryProfile.objects.create(
+            user=self.unverified_driver_user, shelter=self.unverified_profile, vehicle_number='KA-01-UNV-01', is_available=True
+        )
+        self.unverified_pet = Pet.objects.create(
+            shelter=self.unverified_profile, name='GhostLog', species='dog', status='available', age_months=12, gender='male'
+        )
+
+        # Verified shelter
+        self.verified_user = User.objects.create_user(
+            username='verified_shelter_log', email='verified_log@shelter.org', password='password123', role='shelter'
+        )
+        self.verified_profile = ShelterProfile.objects.create(
+            user=self.verified_user, organization_name='Verified Log Haven', pickup_address='200 Log Rd', is_verified=True
+        )
+        self.verified_driver_user = User.objects.create_user(
+            username='verified_log_driver', email='driver_ver@log.org', password='password123', role='delivery'
+        )
+        self.verified_driver = DeliveryProfile.objects.create(
+            user=self.verified_driver_user, shelter=self.verified_profile, vehicle_number='KA-01-VER-01', is_available=True
+        )
+        self.verified_pet = Pet.objects.create(
+            shelter=self.verified_profile, name='HeroLog', species='dog', status='available', age_months=12, gender='male'
+        )
+
+        self.customer = User.objects.create_user(
+            username='log_customer', email='cust@log.org', password='password123', role='customer'
+        )
+
+        self.app_unverified = AdoptionApplication.objects.create(
+            applicant=self.customer, pet=self.unverified_pet, status='approved', payment_method='cod', total_amount=Decimal('50.00')
+        )
+        self.app_verified = AdoptionApplication.objects.create(
+            applicant=self.customer, pet=self.verified_pet, status='approved', payment_method='cod', total_amount=Decimal('50.00')
+        )
+
+    def test_unverified_shelter_can_read_deliveries_and_drivers(self):
+        self.client.force_authenticate(user=self.unverified_user)
+        res_list = self.client.get('/api/v1/shelter/deliveries/')
+        self.assertEqual(res_list.status_code, status.HTTP_200_OK)
+
+        res_drivers = self.client.get('/api/v1/shelter/deliveries/drivers/')
+        self.assertEqual(res_drivers.status_code, status.HTTP_200_OK)
+
+    def test_unverified_shelter_blocked_from_assign_and_reissue(self):
+        self.client.force_authenticate(user=self.unverified_user)
+        # Assign
+        assign_payload = {
+            'application_ref': str(self.app_unverified.public_id),
+            'driver_ref': str(self.unverified_driver.public_id)
+        }
+        res_assign = self.client.post('/api/v1/shelter/deliveries/assign/', assign_payload)
+        self.assertEqual(res_assign.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_assign.data.get('code'), 'shelter_not_verified')
+
+        # Legacy assign
+        res_assign_legacy = self.client.post('/api/deliveries/assign/', assign_payload)
+        self.assertEqual(res_assign_legacy.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_assign_legacy.data.get('code'), 'shelter_not_verified')
+
+    def test_verified_shelter_can_assign_delivery(self):
+        self.client.force_authenticate(user=self.verified_user)
+        assign_payload = {
+            'application_ref': str(self.app_verified.public_id),
+            'driver_ref': str(self.verified_driver.public_id)
+        }
+        res_assign = self.client.post('/api/v1/shelter/deliveries/assign/', assign_payload)
+        self.assertEqual(res_assign.status_code, status.HTTP_201_CREATED)
+        self.assertIn('pickup_otp', res_assign.data)
+
+    def test_suspension_immediately_blocks_delivery_writes(self):
+        self.client.force_authenticate(user=self.verified_user)
+        self.verified_profile.is_verified = False
+        self.verified_profile.save()
+
+        assign_payload = {
+            'application_ref': str(self.app_verified.public_id),
+            'driver_ref': str(self.verified_driver.public_id)
+        }
+        res_assign = self.client.post('/api/v1/shelter/deliveries/assign/', assign_payload)
+        self.assertEqual(res_assign.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_assign.data.get('code'), 'shelter_not_verified')
 
 
 

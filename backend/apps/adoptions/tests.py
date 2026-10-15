@@ -29,7 +29,8 @@ class AdoptionApplicationWorkflowTests(APITestCase):
             organization_name='Happy Paws Rescue',
             pickup_address='123 Shelter St',
             latitude=12.9716,
-            longitude=77.5946
+            longitude=77.5946,
+            is_verified=True
         )
 
         # Create Shelter 2 User & Profile
@@ -44,7 +45,8 @@ class AdoptionApplicationWorkflowTests(APITestCase):
             organization_name='Paws & Claws',
             pickup_address='456 Haven Ave',
             latitude=12.9800,
-            longitude=77.6000
+            longitude=77.6000,
+            is_verified=True
         )
 
         # Create Customer 1
@@ -353,6 +355,134 @@ class AdoptionApplicationWorkflowTests(APITestCase):
         self.assertTrue(shelter_app_res.data['has_fenced_yard'])
         self.assertTrue(shelter_app_res.data['has_other_pets'])
         self.assertEqual(shelter_app_res.data['other_pets_description'], 'One 5-year-old neutered cat (indoor only).')
+
+
+class VerifiedShelterAdoptionPolicyTests(APITestCase):
+    def setUp(self):
+        # Unverified shelter
+        self.unverified_user = User.objects.create_user(
+            username='unverified_shelter_adopt',
+            email='unverified_adopt@shelter.org',
+            password='password123',
+            role='shelter'
+        )
+        self.unverified_profile = ShelterProfile.objects.create(
+            user=self.unverified_user,
+            organization_name='Unverified Adoption Haven',
+            pickup_address='100 Unverified Rd',
+            is_verified=False
+        )
+        self.unverified_pet = Pet.objects.create(
+            shelter=self.unverified_profile,
+            name='GhostPet',
+            species='dog',
+            breed='Labrador',
+            age_months=12,
+            gender='male',
+            status='available'
+        )
+
+        # Verified shelter
+        self.verified_user = User.objects.create_user(
+            username='verified_shelter_adopt',
+            email='verified_adopt@shelter.org',
+            password='password123',
+            role='shelter'
+        )
+        self.verified_profile = ShelterProfile.objects.create(
+            user=self.verified_user,
+            organization_name='Verified Adoption Haven',
+            pickup_address='200 Verified Rd',
+            is_verified=True
+        )
+        self.verified_pet = Pet.objects.create(
+            shelter=self.verified_profile,
+            name='HeroPet',
+            species='dog',
+            breed='Retriever',
+            age_months=18,
+            gender='male',
+            status='available'
+        )
+
+        # Customer
+        self.customer = User.objects.create_user(
+            username='applicant_adopt',
+            email='applicant@adopt.org',
+            password='password123',
+            role='customer'
+        )
+
+        # Admin
+        self.admin_user = User.objects.create_superuser(
+            username='admin_adopt',
+            email='admin@adopt.org',
+            password='password123'
+        )
+
+        # Applications
+        self.app_unverified = AdoptionApplication.objects.create(
+            applicant=self.customer,
+            pet=self.unverified_pet,
+            status='submitted',
+            living_situation='House',
+            contact_phone='+919876543210'
+        )
+        self.app_verified = AdoptionApplication.objects.create(
+            applicant=self.customer,
+            pet=self.verified_pet,
+            status='submitted',
+            living_situation='Apartment',
+            contact_phone='+919876543211'
+        )
+
+    def test_unverified_shelter_can_read_own_applications(self):
+        self.client.force_authenticate(user=self.unverified_user)
+        # List
+        res_list = self.client.get('/api/v1/shelter/applications/')
+        self.assertEqual(res_list.status_code, status.HTTP_200_OK)
+        # Retrieve
+        res_get = self.client.get(f'/api/v1/shelter/applications/{self.app_unverified.public_id}/')
+        self.assertEqual(res_get.status_code, status.HTTP_200_OK)
+
+    def test_unverified_shelter_blocked_from_review_approve_reject(self):
+        self.client.force_authenticate(user=self.unverified_user)
+        # Review
+        res_rev = self.client.post(f'/api/v1/shelter/applications/{self.app_unverified.public_id}/review/')
+        self.assertEqual(res_rev.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_rev.data.get('code'), 'shelter_not_verified')
+
+        # Approve
+        res_app = self.client.post(f'/api/v1/shelter/applications/{self.app_unverified.public_id}/approve/', {'notes': 'approved'})
+        self.assertEqual(res_app.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_app.data.get('code'), 'shelter_not_verified')
+
+        # Reject
+        res_rej = self.client.post(f'/api/v1/shelter/applications/{self.app_unverified.public_id}/reject/', {'notes': 'rejected'})
+        self.assertEqual(res_rej.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_rej.data.get('code'), 'shelter_not_verified')
+
+        # Legacy status PATCH
+        res_patch = self.client.patch(f'/api/adoptions/{self.app_unverified.public_id}/status/', {'status': 'reviewing'})
+        self.assertEqual(res_patch.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_patch.data.get('code'), 'shelter_not_verified')
+
+    def test_verified_shelter_can_review_and_approve(self):
+        self.client.force_authenticate(user=self.verified_user)
+        res_rev = self.client.post(f'/api/v1/shelter/applications/{self.app_verified.public_id}/review/')
+        self.assertEqual(res_rev.status_code, status.HTTP_200_OK)
+
+        res_app = self.client.post(f'/api/v1/shelter/applications/{self.app_verified.public_id}/approve/', {'notes': 'Great profile'})
+        self.assertEqual(res_app.status_code, status.HTTP_200_OK)
+
+    def test_suspension_immediately_blocks_application_writes(self):
+        self.client.force_authenticate(user=self.verified_user)
+        self.verified_profile.is_verified = False
+        self.verified_profile.save()
+
+        res_rev = self.client.post(f'/api/v1/shelter/applications/{self.app_verified.public_id}/review/')
+        self.assertEqual(res_rev.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_rev.data.get('code'), 'shelter_not_verified')
 
 
 

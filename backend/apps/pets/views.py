@@ -16,7 +16,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
-from django.db.models import F, Value, FloatField, Expression
+from django.db.models import F, Value, FloatField, Expression, Q
 from django.db.models.functions import Radians, Sin, Cos, ASin, Sqrt, Power
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiTypes
 from .models import Pet, PetImage, PetMedicalRecord, FavoritePet
@@ -33,7 +33,8 @@ from .serializers import (
     PetSummarySerializer,
     FavoritePetSerializer,
 )
-from apps.accounts.permissions import IsShelterRole, IsAdminRole
+from apps.accounts.permissions import IsShelterRole, IsAdminRole, IsVerifiedShelter
+from apps.accounts.models import ShelterProfile
 
 class Point:
     """
@@ -92,10 +93,20 @@ class PetViewSet(viewsets.ModelViewSet):
     ordering_fields = ['created_at', 'adoption_fee', 'age_months', 'name']
     ordering = ['-created_at']
 
+    def get_queryset(self):
+        user = self.request.user if hasattr(self, 'request') else None
+        qs = Pet.objects.all().select_related('shelter').prefetch_related('images', 'medical_records')
+        if user and user.is_authenticated:
+            if user.is_superuser or user.role == 'admin':
+                return qs
+            if user.role == 'shelter' and hasattr(user, 'shelter_profile'):
+                return qs.filter(Q(shelter=user.shelter_profile) | Q(shelter__is_verified=True))
+        return qs.filter(shelter__is_verified=True)
+
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
             return [permissions.AllowAny()]
-        return [(IsShelterRole | IsAdminRole)()]
+        return [IsVerifiedShelter()]
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -131,15 +142,16 @@ class PetViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         user = self.request.user
-        if user.is_superuser or user.role == 'admin':
-            shelter = getattr(user, 'shelter_profile', None)
+        shelter = getattr(user, 'shelter_profile', None)
+        if (user.is_superuser or user.role == 'admin') and not shelter:
+            shelter_id = self.request.data.get('shelter') or self.request.data.get('shelter_id')
+            if shelter_id:
+                shelter = ShelterProfile.objects.filter(id=shelter_id).first()
             if not shelter:
-                raise PermissionDenied("Admin user must have a ShelterProfile associated to post pets.")
-        else:
-            if not hasattr(user, 'shelter_profile'):
-                raise PermissionDenied("Only registered shelters can create pet listings.")
-            shelter = user.shelter_profile
-        
+                raise PermissionDenied("Admin user must have a ShelterProfile associated or specify a valid shelter to post pets.")
+        elif not shelter:
+            raise PermissionDenied("Only registered shelters can create pet listings.")
+
         serializer.save(shelter=shelter)
 
 
@@ -151,6 +163,17 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
     lookup_field = 'public_id'
     permission_classes = [IsShelterOwner]
     filterset_class = PetFilter
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve'] and self.request.method in permissions.SAFE_METHODS:
+            return [IsShelterOwner()]
+        if self.action in ['medical', 'images']:
+            if self.request.method in permissions.SAFE_METHODS:
+                return [IsShelterOwner()]
+            return [IsVerifiedShelter(), IsShelterOwner()]
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'delete_image']:
+            return [IsVerifiedShelter(), IsShelterOwner()]
+        return [IsVerifiedShelter(), IsShelterOwner()]
     search_fields = ['name', 'breed', 'description']
     ordering_fields = ['created_at', 'adoption_fee', 'age_months', 'name']
     ordering = ['-created_at']
@@ -309,7 +332,7 @@ class PetImageCreateView(generics.CreateAPIView):
     POST /api/pets/<id>/images/
     """
     serializer_class = PetImageSerializer
-    permission_classes = [IsShelterRole | IsAdminRole]
+    permission_classes = [IsVerifiedShelter]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def create(self, request, *args, **kwargs):
@@ -364,9 +387,9 @@ class PetMedicalRecordListCreateView(generics.ListCreateAPIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_permissions(self):
-        if self.request.method == 'GET':
+        if self.request.method in permissions.SAFE_METHODS:
             return [permissions.AllowAny()]
-        return [(IsShelterRole | IsAdminRole)()]
+        return [IsVerifiedShelter()]
 
     def get_queryset(self):
         if getattr(self, 'swagger_fake_view', False):
@@ -427,6 +450,16 @@ class PublicPetViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         queryset = Pet.objects.filter(status='available').select_related('shelter', 'shelter__user').prefetch_related('images', 'medical_records')
+        user = self.request.user if hasattr(self, 'request') else None
+        if user and user.is_authenticated:
+            if user.is_superuser or user.role == 'admin':
+                pass
+            elif user.role == 'shelter' and hasattr(user, 'shelter_profile'):
+                queryset = queryset.filter(Q(shelter=user.shelter_profile) | Q(shelter__is_verified=True))
+            else:
+                queryset = queryset.filter(shelter__is_verified=True)
+        else:
+            queryset = queryset.filter(shelter__is_verified=True)
 
         if hasattr(self, 'request') and self.request:
             lat = self.request.query_params.get('lat')

@@ -25,6 +25,7 @@ from .serializers import (
 )
 from apps.pets.models import Pet
 from apps.pets.permissions import IsShelterOwner
+from apps.accounts.permissions import IsVerifiedShelter
 
 class CustomerApplicationViewSet(mixins.ListModelMixin, 
                                 mixins.RetrieveModelMixin, 
@@ -79,6 +80,11 @@ class ShelterApplicationViewSet(viewsets.ReadOnlyModelViewSet):
     lookup_field = 'public_id'
     permission_classes = [permissions.IsAuthenticated, IsShelterOwner]
     serializer_class = ShelterApplicationSerializer
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve']:
+            return [permissions.IsAuthenticated(), IsShelterOwner()]
+        return [permissions.IsAuthenticated(), IsVerifiedShelter(), IsShelterOwner()]
 
     def get_queryset(self):
         user = self.request.user
@@ -355,7 +361,7 @@ class AdoptionStatusUpdateView(APIView):
     PATCH /api/adoptions/<id>/status/
     Shelter approve/reject action.
     """
-    permission_classes = [permissions.IsAuthenticated, IsShelterOwner]
+    permission_classes = [permissions.IsAuthenticated, IsVerifiedShelter, IsShelterOwner]
 
     def patch(self, request, id):
         application = resolve_application(id)

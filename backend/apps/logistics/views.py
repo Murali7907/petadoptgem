@@ -25,6 +25,7 @@ from drf_spectacular.utils import extend_schema, OpenApiTypes
 
 from .models import PetDelivery, DeliveryLocationPing, Payment
 from .permissions import IsShelterForDelivery, IsAssignedDeliveryDriver, IsDeliveryParticipant
+from apps.accounts.permissions import IsVerifiedShelter
 from .serializers import (
     DeliveryAssignSerializer,
     DeliveryAssignResponseSerializer,
@@ -85,6 +86,11 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
     serializer_class = ShelterDeliverySerializer
     permission_classes = [IsAuthenticated]
     lookup_field = 'public_id'
+
+    def get_permissions(self):
+        if self.action in ['assign', 'reissue_otp']:
+            return [IsAuthenticated(), IsVerifiedShelter()]
+        return [IsAuthenticated()]
 
     def get_shelter_profile(self):
         user = self.request.user

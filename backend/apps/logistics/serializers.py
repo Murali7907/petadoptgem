@@ -15,17 +15,19 @@ from apps.adoptions.models import AdoptionApplication
 class DeliveryAssignSerializer(serializers.Serializer):
     application_public_id = serializers.UUIDField(required=False)
     application_id = serializers.CharField(required=False)
+    application_ref = serializers.CharField(required=False)
     driver_public_id = serializers.UUIDField(required=False)
     driver_id = serializers.CharField(required=False)
+    driver_ref = serializers.CharField(required=False)
     payment_method = serializers.CharField(required=False, default='unset')
 
     def validate(self, attrs):
-        app_ref = attrs.get('application_public_id') or attrs.get('application_id')
-        driver_ref = attrs.get('driver_public_id') or attrs.get('driver_id')
+        app_ref = attrs.get('application_ref') or attrs.get('application_public_id') or attrs.get('application_id')
+        driver_ref = attrs.get('driver_ref') or attrs.get('driver_public_id') or attrs.get('driver_id')
         if not app_ref:
-            raise serializers.ValidationError("Either application_id or application_public_id is required.")
+            raise serializers.ValidationError("Either application_id, application_public_id, or application_ref is required.")
         if not driver_ref:
-            raise serializers.ValidationError("Either driver_id or driver_public_id is required.")
+            raise serializers.ValidationError("Either driver_id, driver_public_id, or driver_ref is required.")
         attrs['application_ref'] = str(app_ref)
         attrs['driver_ref'] = str(driver_ref)
         return attrs

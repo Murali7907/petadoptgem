@@ -429,3 +429,84 @@ class NotificationAPITests(APITestCase):
         self.assertEqual(len(unread_res3.data), 0)
 
 
+class VerifiedShelterAccountsTests(APITestCase):
+    def setUp(self):
+        self.create_driver_url = '/api/auth/drivers/create/'
+
+        # Unverified shelter
+        self.unverified_user = User.objects.create_user(
+            username='unverified_shelter',
+            email='unverified@shelter.org',
+            password='password123',
+            role='shelter'
+        )
+        self.unverified_profile = ShelterProfile.objects.create(
+            user=self.unverified_user,
+            organization_name='Unverified Haven',
+            pickup_address='123 Pending St',
+            is_verified=False
+        )
+
+        # Verified shelter
+        self.verified_user = User.objects.create_user(
+            username='verified_shelter',
+            email='verified@shelter.org',
+            password='password123',
+            role='shelter'
+        )
+        self.verified_profile = ShelterProfile.objects.create(
+            user=self.verified_user,
+            organization_name='Verified Haven',
+            pickup_address='456 Verified Ave',
+            is_verified=True
+        )
+
+        # Admin user
+        self.admin_user = User.objects.create_superuser(
+            username='admin_boss',
+            email='admin@shelter.org',
+            password='password123'
+        )
+
+        self.driver_payload = {
+            'username': 'new_fleet_driver',
+            'email': 'driver@fleet.org',
+            'password': 'driverpass123',
+            'vehicle_type': 'two_wheeler',
+            'vehicle_number': 'KA-01-VF-9999'
+        }
+
+    def test_unverified_shelter_cannot_create_driver(self):
+        self.client.force_authenticate(user=self.unverified_user)
+        res = self.client.post(self.create_driver_url, self.driver_payload)
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res.data.get('code'), 'shelter_not_verified')
+
+    def test_verified_shelter_can_create_driver(self):
+        self.client.force_authenticate(user=self.verified_user)
+        res = self.client.post(self.create_driver_url, self.driver_payload)
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data['driver']['email'], 'driver@fleet.org')
+
+    def test_admin_bypass_for_driver_creation(self):
+        # Admin bypasses permission check; needs shelter in context or validated data if required
+        self.client.force_authenticate(user=self.admin_user)
+        payload = dict(self.driver_payload)
+        payload['username'] = 'admin_created_driver'
+        payload['email'] = 'admin_driver@fleet.org'
+        payload['shelter_id'] = self.verified_profile.id
+        res = self.client.post(self.create_driver_url, payload)
+        # Should not be blocked by 403 shelter_not_verified
+        self.assertNotEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_suspending_shelter_immediately_blocks_driver_creation(self):
+        self.client.force_authenticate(user=self.verified_user)
+        # Suspend shelter
+        self.verified_profile.is_verified = False
+        self.verified_profile.save()
+
+        res = self.client.post(self.create_driver_url, self.driver_payload)
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res.data.get('code'), 'shelter_not_verified')
+
+

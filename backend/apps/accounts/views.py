@@ -8,7 +8,7 @@ from django.db.models import Sum, Avg
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiTypes
 from django.db import transaction
 from .models import User, ShelterProfile, DeliveryProfile, Notification
-from .permissions import IsAdminRole, IsShelterRole
+from .permissions import IsAdminRole, IsShelterRole, IsVerifiedShelter
 from apps.pets.models import Pet
 from apps.logistics.models import PetDelivery, Payment
 from apps.adoptions.models import AdoptionReview
@@ -68,7 +68,7 @@ class ShelterDriverCreateView(views.APIView):
     Drivers cannot self-register; they are created by their shelter.
     POST /api/auth/drivers/create/
     """
-    permission_classes = [IsAuthenticated, IsShelterRole]
+    permission_classes = [IsAuthenticated, IsVerifiedShelter]
 
     @extend_schema(
         summary="Create a new delivery driver for shelter fleet",
@@ -76,11 +76,17 @@ class ShelterDriverCreateView(views.APIView):
         responses={201: UserProfileSerializer}
     )
     def post(self, request):
-        if not hasattr(request.user, 'shelter_profile') or not request.user.shelter_profile:
-            return Response(
-                {"detail": "Authenticated user is not associated with a shelter profile."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        shelter = getattr(request.user, 'shelter_profile', None)
+        if not shelter:
+            if request.user.role == 'admin' or request.user.is_superuser or request.user.is_staff:
+                shelter_id = request.data.get('shelter_id')
+                if shelter_id:
+                    shelter = ShelterProfile.objects.filter(id=shelter_id).first()
+            if not shelter:
+                return Response(
+                    {"detail": "Authenticated user is not associated with a shelter profile."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
 
         serializer = DriverCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -101,7 +107,7 @@ class ShelterDriverCreateView(views.APIView):
 
             delivery_profile = DeliveryProfile.objects.create(
                 user=driver_user,
-                shelter=request.user.shelter_profile,
+                shelter=shelter,
                 vehicle_type=data.get('vehicle_type', 'car'),
                 vehicle_number=data['vehicle_number'],
                 is_available=True

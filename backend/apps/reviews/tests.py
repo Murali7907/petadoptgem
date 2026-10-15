@@ -36,7 +36,8 @@ class AdoptionReviewAPITestCase(TestCase):
             user=self.shelter_user,
             organization_name='Review Shelter Org',
             pickup_address='123 Shelter St, Bangalore',
-            city='Bangalore'
+            city='Bangalore',
+            is_verified=True
         )
 
         self.driver_user = User.objects.create_user(
