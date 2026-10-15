@@ -207,7 +207,7 @@ This document specifies the canonical and legacy API contracts for the pet deliv
 ---
 
 ### 7. Delivery Tracking (Customer / Shelter / Driver)
-- **URL**: `GET /api/v1/delivery/tasks/{id}/tracking/` (Canonical), `GET /api/tracking/{id}/` (Direct alias), `GET /api/deliveries/{id}/track/` (Legacy alias)
+- **URL**: `GET /api/v1/delivery/tasks/{id}/tracking/` (Canonical), `GET /api/deliveries/{id}/track/` (Legacy alias)
 - **Authentication**: Required (`Bearer <access_token>`)
 - **Permissions**: `IsDeliveryParticipant` required (strictly restricted to the adoption applicant/customer, assigned driver, origin shelter, or platform administrators)
 - **Responses**:

@@ -127,7 +127,7 @@ class AdoptionReviewAPITestCase(TestCase):
             'driver_rating': 5
         }
         response = self.client.post('/api/reviews/', data=payload, format='json')
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_submit_review_delivery_not_completed(self):
         self.delivery.status = 'out_for_delivery'

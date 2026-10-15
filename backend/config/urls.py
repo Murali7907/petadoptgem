@@ -11,7 +11,6 @@ shelter_router.register('', ShelterPetViewSet, basename='shelter-pet')
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
 from apps.pets.urls import router as public_pets_router
-from apps.logistics.views import DriverDeliveryViewSet
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -23,10 +22,6 @@ urlpatterns = [
     path('api/pets/', include('apps.pets.urls')),
     path('api/adoptions/', include('apps.adoptions.urls')),
     path('api/deliveries/', include('apps.logistics.urls')),
-    path('api/tracking/<str:id>/', DriverDeliveryViewSet.as_view({'get': 'tracking'}), name='api-tracking'),
-    path('api/tracking/<uuid:public_id>/', DriverDeliveryViewSet.as_view({'get': 'tracking'}), name='api-tracking-uuid'),
-    path('api/v1/tracking/<str:id>/', DriverDeliveryViewSet.as_view({'get': 'tracking'}), name='v1-tracking'),
-    path('api/v1/tracking/<uuid:public_id>/', DriverDeliveryViewSet.as_view({'get': 'tracking'}), name='v1-tracking-uuid'),
     path('api/reviews/', include('apps.reviews.urls')),
 
     # Backwards compatibility and additional feature routes under /api/v1/

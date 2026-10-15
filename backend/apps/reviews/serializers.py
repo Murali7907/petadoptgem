@@ -42,8 +42,9 @@ class ReviewCreateSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         request = self.context.get('request')
         app = attrs['application_id']
-        if app.applicant_id != request.user.id:
-            raise serializers.ValidationError("You are not authorized to review this application.")
+        from rest_framework.exceptions import PermissionDenied
+        if not request or not request.user or app.applicant_id != request.user.id:
+            raise PermissionDenied("You are not authorized to review this application.")
 
         delivery = getattr(app, 'delivery', None)
         if not delivery or delivery.status != 'delivered':

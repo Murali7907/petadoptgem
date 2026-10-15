@@ -1652,6 +1652,20 @@ class PaymentHardeningTests(TestCase):
         self.delivery.refresh_from_db()
         self.assertEqual(self.delivery.payment_status, 'paid')
 
+    def test_webhook_valid_signature_no_auth_header_success(self):
+        return self.test_webhook_without_auth_header_works_and_bad_signature_returns_400()
+
+    def test_webhook_invalid_signature_rejected_400(self):
+        unauth_client = APIClient()
+        res = unauth_client.post(
+            '/api/v1/payments/webhook/',
+            data=json.dumps({'event': 'payment.captured'}),
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE='invalid_signature_hex'
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Invalid webhook signature", str(res.data))
+
     def test_webhook_amount_mismatch_ignored(self):
         payment = Payment.objects.create(
             delivery=self.delivery,

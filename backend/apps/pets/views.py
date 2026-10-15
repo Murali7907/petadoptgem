@@ -132,9 +132,6 @@ class PetViewSet(viewsets.ModelViewSet):
             obj = queryset.filter(id=int(lookup_val)).first()
 
         if not obj:
-            obj = queryset.filter(public_id=lookup_val).first()
-
-        if not obj:
             raise NotFound("Pet not found.")
 
         self.check_object_permissions(self.request, obj)
@@ -449,7 +446,7 @@ class PublicPetViewSet(viewsets.ReadOnlyModelViewSet):
     ordering = ['-created_at']
 
     def get_queryset(self):
-        queryset = Pet.objects.filter(status='available').select_related('shelter', 'shelter__user').prefetch_related('images', 'medical_records')
+        queryset = Pet.objects.all().select_related('shelter', 'shelter__user').prefetch_related('images', 'medical_records')
         user = self.request.user if hasattr(self, 'request') else None
         if user and user.is_authenticated:
             if user.is_superuser or user.role == 'admin':
@@ -458,8 +455,12 @@ class PublicPetViewSet(viewsets.ReadOnlyModelViewSet):
                 queryset = queryset.filter(Q(shelter=user.shelter_profile) | Q(shelter__is_verified=True))
             else:
                 queryset = queryset.filter(shelter__is_verified=True)
+                if self.action == 'list':
+                    queryset = queryset.filter(status='available')
         else:
             queryset = queryset.filter(shelter__is_verified=True)
+            if self.action == 'list':
+                queryset = queryset.filter(status='available')
 
         if hasattr(self, 'request') and self.request:
             lat = self.request.query_params.get('lat')
@@ -475,6 +476,28 @@ class PublicPetViewSet(viewsets.ReadOnlyModelViewSet):
                     pass
 
         return queryset
+
+    def get_object(self):
+        queryset = self.filter_queryset(self.get_queryset())
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        lookup_val = self.kwargs[lookup_url_kwarg]
+
+        obj = None
+        try:
+            import uuid
+            uuid_val = uuid.UUID(str(lookup_val))
+            obj = queryset.filter(public_id=uuid_val).first()
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+        if not obj and str(lookup_val).isdigit():
+            obj = queryset.filter(id=int(lookup_val)).first()
+
+        if not obj:
+            raise NotFound("Pet not found.")
+
+        self.check_object_permissions(self.request, obj)
+        return obj
 
     def filter_queryset(self, queryset):
         qs = super().filter_queryset(queryset)

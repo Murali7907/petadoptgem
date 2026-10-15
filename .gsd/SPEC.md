@@ -422,7 +422,93 @@ In `DriverDeliveryViewSet.pickup()` / `verify_pickup_service()`:
   3. Correct role but non-owner/cross-tenant -> 403 Forbidden or 404 Not Found.
   4. Legitimate owner/participant -> 200/201/204 Success.
 
+
+---
+
+## 8. Milestone 3 — Logistics Lifecycle Hardening, Authorization Polish & Adopter Integrity
+
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Spec approved and finalized.
+
+### 8.1 Task 1: Milestone 2 Gaps & Authorization Hardening
+1. **Verified Shelter Scope & Permission Enforcement**:
+   - `IsVerifiedShelter` must be strictly enforced on all shelter write endpoints:
+     - `AdoptionApplicationDetailView` (PATCH)
+     - `AdoptionStatusUpdateView` (POST/PATCH)
+     - `ShelterApplicationViewSet` (`review`, `approve`, `reject`)
+     - `PetImageCreateView` (POST)
+     - `PetMedicalRecordViewSet` (POST)
+     - `ShelterPetViewSet` / `PetViewSet` writes (create, update, partial_update, destroy)
+     - `ShelterDeliveryViewSet.assign`
+     - `ShelterDeliveryViewSet.reissue_otp`
+     - `ShelterDriverCreateView` (POST)
+   - Tested on BOTH canonical (`/api/v1/`) and legacy (`/api/`) routes: unverified shelters must receive HTTP 403 `{"code": "shelter_not_verified", "detail": "..."}`.
+2. **Public Catalog Isolation**:
+   - Pet detail endpoints (`/api/v1/pets/<id>/`, `/api/pets/<id>/`) for pets belonging to unverified shelters must return HTTP 404 to anonymous users and regular customers.
+   - The owning shelter and platform staff/superusers retain access.
+3. **Authorization Matrix Expansion**:
+   - Notifications: read/read-all operations across user boundaries must return 404 or 403.
+   - Application Detail: GET and PATCH on an application by a customer other than the applicant must return 404 or 403.
+   - Reviews: Review creation targeting an application not belonging to the customer must return 403 or 400.
+   - Tracking: Tracking endpoint accessed by an unrelated customer (not applicant, shelter, driver, admin) must return 403/404.
+   - Location Ping: GPS ping submitted by a driver not assigned to the active delivery must return 403.
+4. **URL Alias Audit**:
+   - Audit Milestone 2 alias routes (`/api/tracking/<id>/`, `/api/v1/tracking/<id>/`, `/api/reviews/create/`, `/api/v1/shelter/drivers/create/`). Remove unreferenced aliases and repoint tests to canonical routes.
+5. **Webhook Test Verification**:
+   - Verify presence of tests asserting:
+     - Correctly signed webhook with NO `Authorization` header returns HTTP 200.
+     - Webhook with invalid signature returns HTTP 400.
+
+### 8.2 Task 2: Pickup Online Payment Guard
+1. **Payment Guard Gate**:
+   - At pickup verification (inside `verify_pickup_service` / `DriverDeliveryViewSet.pickup`), before checking or consuming pickup OTP attempts:
+     - `total_amount == Decimal('0.00')`: Allowed.
+     - `payment_method == 'cod'`: Allowed.
+     - `payment_method == 'online'`: Allowed ONLY if a `Payment` row exists with `status in ('captured', 'paid')` and `amount >= total_amount * 100` in paise. Otherwise, return HTTP 409 `{"code": "payment_required", "detail": "Online payment incomplete. Total amount Rs. {total_amount} must be paid before dispatching driver for pickup."}`.
+     - `payment_method == 'unset'` with `total_amount > Decimal('0.00')`: Return HTTP 409 `{"code": "payment_method_required", "detail": "Payment method must be selected before pickup."}`.
+   - Single unified validation helper shared between pickup service and payment resolvers.
+   - Preserves pickup OTP attempts: failed payment check does NOT increment `pickup_otp_attempts`.
+   - Payment captured after HTTP 409 allows subsequent pickup OTP verification to succeed.
+
+### 8.3 Task 3: Cash On Delivery (COD) Collection & Verification
+1. **Endpoint `POST /api/v1/delivery/tasks/<id>/collect-cash/`** (and legacy alias):
+   - Assigned driver only; DRF throttle scope `'otp_verify'`.
+   - Request body: `{"amount": "<decimal>"}`.
+   - Database concurrency: Executes within `transaction.atomic()` with `PetDelivery.objects.select_for_update()`.
+   - State & Precondition Validations:
+     - `delivery.status != 'out_for_delivery'`: HTTP 409 Conflict.
+     - `application.payment_method != 'cod'`: HTTP 400 Bad Request.
+     - `application.total_amount <= Decimal('0.00')`: HTTP 400 Bad Request.
+     - `cash_collected >= application.total_amount`: Return HTTP 200 OK idempotently without duplicate ledger rows.
+     - `amount != (total_amount - cash_collected)`: HTTP 400 Bad Request with `{"error": "Amount must equal remaining balance", "remaining_amount": str(remaining)}`.
+   - On Successful Collection:
+     - Update `delivery.cash_collected = total_amount`.
+     - Insert exactly one `Payment` ledger row (`payment_method='cod'`, `status='captured'`, linked to delivery and application).
+     - Update `application.payment_status = 'paid'`.
+2. **Doorstep Gate for COD**:
+   - In `verify_doorstep_service()`, if `application.payment_method == 'cod'` and `application.total_amount > Decimal('0.00')` and `delivery.cash_collected < application.total_amount`:
+     - Return HTTP 409 `{"code": "cash_not_collected", "detail": "Full cash amount Rs. {remaining} must be collected before doorstep verification."}`.
+     - Checks occur BEFORE doorstep OTP evaluation, consuming 0 attempts.
+3. **Failed Delivery Protection**:
+   - A driver cannot mark a delivery as `'failed'` if `delivery.cash_collected > Decimal('0.00')`. Return HTTP 409 Conflict directing driver to contact the shelter.
+   - Legitimate `'failed'` delivery leaves `pet.status = 'pending'` and `application.status = 'approved'`.
+4. **Unified Resolver**:
+   - `resolve_delivery_payment_status()` unified across COD and online payments with no dead branches.
+
+### 8.4 Task 4: Adopter Email Integrity & Delivery Assignment Safety
+1. **Registration Email Requirements**:
+   - User registration requires non-empty, valid email string.
+   - Case-insensitive uniqueness enforced in serializer and database via partial constraint:
+     `UniqueConstraint(Lower('email'), condition=Q(email!=''), name='unique_lower_email_non_empty')`.
+   - Pre-migration data audit and fix step for existing empty or duplicate email rows.
+2. **Delivery Assignment Gate**:
+   - `assign_delivery_task` checks `application.applicant.email`. If empty or null, refuse assignment with HTTP 409 `{"code": "adopter_email_missing", "detail": "Adopter email is required for OTP dispatch and delivery assignment."}`.
+3. **Reissue Response Accuracy**:
+   - When doorstep OTP is reissued, if `email_dispatched is False` (e.g. email sending failed or suppressed), the response message must accurately reflect the outcome rather than claiming "emailed to adopter".
+
 ---
 
 *Last updated: 2026-10-15*
+
 

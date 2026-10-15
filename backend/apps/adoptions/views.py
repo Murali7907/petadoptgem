@@ -30,6 +30,7 @@ from apps.accounts.permissions import IsVerifiedShelter
 class CustomerApplicationViewSet(mixins.ListModelMixin, 
                                 mixins.RetrieveModelMixin, 
                                 mixins.CreateModelMixin, 
+                                mixins.UpdateModelMixin,
                                 viewsets.GenericViewSet):
     """
     ViewSet for Customer users to view their application history, submit new applications,
@@ -414,4 +415,8 @@ class AdoptionStatusUpdateView(APIView):
             "message": f"Application status updated to '{new_status}'.",
             "application": ShelterApplicationSerializer(application).data
         }, status=status.HTTP_200_OK)
+
+
+AdoptionApplicationDetailView = AdoptionStatusUpdateView
+
 
