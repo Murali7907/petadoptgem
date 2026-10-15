@@ -34,6 +34,8 @@ from apps.logistics.serializers import (
 from apps.logistics.otp import issue_otp, check_otp
 from apps.logistics.services import (
     assign_delivery_task,
+    check_pickup_payment_guard,
+    is_payment_satisfied,
     verify_pickup_service,
     verify_doorstep_service,
     OTPVerificationOutcome,
@@ -792,7 +794,9 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         self.driver_profile.save()
         del_fail = assign_delivery_task(app_fail, self.driver_profile, payment_method='online')
         Payment.objects.create(delivery=del_fail, application=app_fail, amount=Decimal('100.00'), amount_in_paise=10000, status='failed', razorpay_order_id='order_sec_fail')
-        otp_fail = self._pickup_and_get_doorstep_otp(del_fail)
+        del_fail.status = 'out_for_delivery'
+        del_fail.save(update_fields=['status'])
+        otp_fail = issue_otp(del_fail, 'doorstep')
         self.client.post(f'/api/v1/delivery/tasks/{del_fail.public_id}/verify-doorstep/', {'otp': otp_fail}, format='json')
         app_fail.refresh_from_db()
         self.assertEqual(app_fail.payment_status, 'pending')
@@ -804,7 +808,9 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         self.driver_profile.save()
         del_under = assign_delivery_task(app_under, self.driver_profile, payment_method='online')
         Payment.objects.create(delivery=del_under, application=app_under, amount=Decimal('100.00'), amount_in_paise=10000, status='captured', razorpay_order_id='order_sec_underpaid')
-        otp_under = self._pickup_and_get_doorstep_otp(del_under)
+        del_under.status = 'out_for_delivery'
+        del_under.save(update_fields=['status'])
+        otp_under = issue_otp(del_under, 'doorstep')
         self.client.post(f'/api/v1/delivery/tasks/{del_under.public_id}/verify-doorstep/', {'otp': otp_under}, format='json')
         app_under.refresh_from_db()
         self.assertEqual(app_under.payment_status, 'pending')
@@ -2032,6 +2038,137 @@ class VerifiedShelterLogisticsPolicyTests(APITestCase):
         res_assign = self.client.post('/api/v1/shelter/deliveries/assign/', assign_payload)
         self.assertEqual(res_assign.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(res_assign.data.get('code'), 'shelter_not_verified')
+
+
+class PickupPaymentGuardTestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.shelter_user = User.objects.create_user(username='guard_shelter', email='guard_shelter@test.org', password='password123', role='shelter')
+        self.shelter = ShelterProfile.objects.create(user=self.shelter_user, organization_name='Guard Shelter', is_verified=True)
+        self.driver_user = User.objects.create_user(username='guard_driver', email='guard_driver@test.org', password='password123', role='delivery')
+        self.driver = DeliveryProfile.objects.create(user=self.driver_user, shelter=self.shelter, is_available=True, vehicle_number='KA-05-PG-1111')
+        self.customer = User.objects.create_user(username='guard_cust', email='guard_cust@test.org', password='password123', role='customer')
+
+    def _create_setup(self, total_amount=Decimal('100.00'), payment_method='unset'):
+        pet = Pet.objects.create(shelter=self.shelter, name='GuardPet', species='dog', breed='Lab', age_months=12, gender='female', status='available')
+        app = AdoptionApplication.objects.create(
+            applicant=self.customer,
+            pet=pet,
+            status='approved',
+            total_amount=total_amount,
+            payment_method=payment_method,
+            payment_status='pending',
+            contact_phone='9999999999'
+        )
+        delivery = assign_delivery_task(app, self.driver, payment_method=payment_method)
+        return app, delivery
+
+    def test_pickup_payment_guard_total_amount_zero_allowed(self):
+        app, delivery = self._create_setup(total_amount=Decimal('0.00'), payment_method='unset')
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+        res = self.client.post(url, {'otp': delivery.raw_pickup_otp}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, 'out_for_delivery')
+
+    def test_pickup_payment_guard_cod_allowed(self):
+        app, delivery = self._create_setup(total_amount=Decimal('150.00'), payment_method='cod')
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+        res = self.client.post(url, {'otp': delivery.raw_pickup_otp}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, 'out_for_delivery')
+
+    def test_pickup_payment_guard_online_without_captured_payment_returns_409(self):
+        app, delivery = self._create_setup(total_amount=Decimal('200.00'), payment_method='online')
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+        res = self.client.post(url, {'otp': delivery.raw_pickup_otp}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'payment_required')
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.pickup_otp_attempts, 0)
+        self.assertEqual(delivery.status, 'assigned')
+
+    def test_pickup_payment_guard_online_underpaid_returns_409(self):
+        app, delivery = self._create_setup(total_amount=Decimal('200.00'), payment_method='online')
+        # Captured payment for 100.00 (half of 200.00)
+        Payment.objects.create(
+            application=app,
+            delivery=delivery,
+            amount=Decimal('100.00'),
+            amount_in_paise=10000,
+            status=PaymentStatus.CAPTURED
+        )
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+        res = self.client.post(url, {'otp': delivery.raw_pickup_otp}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'payment_required')
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.pickup_otp_attempts, 0)
+
+    def test_pickup_payment_guard_unset_with_positive_total_returns_409(self):
+        app, delivery = self._create_setup(total_amount=Decimal('100.00'), payment_method='unset')
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+        res = self.client.post(url, {'otp': delivery.raw_pickup_otp}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'payment_method_required')
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.pickup_otp_attempts, 0)
+        self.assertEqual(delivery.status, 'assigned')
+
+    def test_pickup_payment_guard_online_paid_after_409_succeeds(self):
+        app, delivery = self._create_setup(total_amount=Decimal('300.00'), payment_method='online')
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{delivery.public_id}/pickup/'
+
+        # First attempt without payment -> 409 payment_required
+        res_fail = self.client.post(url, {'otp': delivery.raw_pickup_otp}, format='json')
+        self.assertEqual(res_fail.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res_fail.data.get('code'), 'payment_required')
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.pickup_otp_attempts, 0)
+        self.assertEqual(delivery.status, 'assigned')
+
+        # Customer pays: Payment captured
+        Payment.objects.create(
+            application=app,
+            delivery=delivery,
+            amount=Decimal('300.00'),
+            amount_in_paise=30000,
+            status=PaymentStatus.CAPTURED
+        )
+
+        # Second attempt with payment captured -> 200 OK, out_for_delivery
+        res_ok = self.client.post(url, {'otp': delivery.raw_pickup_otp}, format='json')
+        self.assertEqual(res_ok.status_code, status.HTTP_200_OK)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, 'out_for_delivery')
+
+    def test_helper_direct_evaluation(self):
+        app, delivery = self._create_setup(total_amount=Decimal('50.00'), payment_method='unset')
+        allowed, code, _ = check_pickup_payment_guard(delivery)
+        self.assertFalse(allowed)
+        self.assertEqual(code, 'payment_method_required')
+
+        app.payment_method = 'cod'
+        app.save()
+        allowed, code, _ = check_pickup_payment_guard(delivery)
+        self.assertTrue(allowed)
+
+        app.payment_method = 'online'
+        app.save()
+        allowed, code, _ = check_pickup_payment_guard(delivery)
+        self.assertFalse(allowed)
+        self.assertEqual(code, 'payment_required')
+
+        Payment.objects.create(application=app, delivery=delivery, amount=Decimal('50.00'), amount_in_paise=5000, status=PaymentStatus.CAPTURED)
+        allowed, code, _ = check_pickup_payment_guard(delivery)
+        self.assertTrue(allowed)
 
 
 

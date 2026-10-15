@@ -16,7 +16,7 @@ from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError, APIException
-from .models import PetDelivery
+from .models import PetDelivery, Payment, PaymentStatus
 
 
 class ConflictError(APIException):
@@ -41,6 +41,9 @@ class OTPVerificationOutcome(str, Enum):
     EXPIRED = "expired"
     LOCKED = "locked"
     INVALID = "invalid"
+    PAYMENT_REQUIRED = "payment_required"
+    PAYMENT_METHOD_REQUIRED = "payment_method_required"
+    CASH_NOT_COLLECTED = "cash_not_collected"
 
 
 @dataclass
@@ -49,6 +52,65 @@ class OTPVerificationResult:
     attempts_remaining: int = 0
     delivery: PetDelivery | None = None
     detail: str = ""
+    code: str = ""
+
+
+def is_payment_satisfied(application: AdoptionApplication, delivery: PetDelivery | None = None) -> tuple[bool, int, int]:
+    """
+    Returns (is_satisfied, total_paid_paise, expected_paise).
+    Consolidates payment verification across online (Razorpay) and COD ledger rows.
+    """
+    total_amount = getattr(application, 'total_amount', Decimal('0.00')) or Decimal('0.00')
+    expected_paise = int(round(Decimal(str(total_amount)) * 100))
+    if expected_paise <= 0:
+        return True, 0, 0
+
+    paid_payments = application.payments.filter(status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid'])
+    total_paid_paise = sum(
+        p.amount_in_paise if p.amount_in_paise else int(round(Decimal(str(p.amount)) * 100))
+        for p in paid_payments
+    )
+
+    if delivery and delivery.cash_collected and delivery.cash_collected >= total_amount and delivery.cash_collected > Decimal('0.00'):
+        collected_paise = int(round(Decimal(str(delivery.cash_collected)) * 100))
+        total_paid_paise = max(total_paid_paise, collected_paise)
+
+    return total_paid_paise >= expected_paise, total_paid_paise, expected_paise
+
+
+def check_pickup_payment_guard(delivery: PetDelivery) -> tuple[bool, str, str]:
+    """
+    Validates payment requirements prior to pickup OTP verification.
+    Consumes NO OTP attempts.
+
+    Rules:
+    - total_amount == 0 -> allowed
+    - payment_method 'cod' -> allowed
+    - payment_method 'online' -> allowed only if a Payment is captured with amount >= total in paise, else 409 {"code": "payment_required"}
+    - payment_method 'unset' with total > 0 -> 409 {"code": "payment_method_required"}
+
+    Returns (allowed: bool, code: str, detail: str).
+    """
+    application = getattr(delivery, 'application', None)
+    if not application:
+        return True, "", ""
+
+    total_amount = getattr(application, 'total_amount', Decimal('0.00')) or Decimal('0.00')
+    if total_amount <= Decimal('0.00'):
+        return True, "", ""
+
+    payment_method = getattr(application, 'payment_method', 'unset')
+    if payment_method == 'cod':
+        return True, "", ""
+
+    if payment_method == 'online':
+        satisfied, _, _ = is_payment_satisfied(application, delivery)
+        if satisfied:
+            return True, "", ""
+        return False, "payment_required", "Online payment must be captured before pet pickup."
+
+    # payment_method 'unset' (or unknown) with total > 0
+    return False, "payment_method_required", "Payment method must be selected before pet pickup."
 
 def generate_secure_otp() -> str:
     """
@@ -238,6 +300,19 @@ def verify_pickup_service(delivery_id: int | str, submitted_otp: str) -> OTPVeri
             )
 
         max_attempts = getattr(settings, 'OTP_MAX_ATTEMPTS', 3)
+
+        # Check pickup payment guard before OTP verification (consumes NO attempts)
+        allowed, code, detail = check_pickup_payment_guard(delivery)
+        if not allowed:
+            outcome = OTPVerificationOutcome.PAYMENT_REQUIRED if code == "payment_required" else OTPVerificationOutcome.PAYMENT_METHOD_REQUIRED
+            return OTPVerificationResult(
+                outcome=outcome,
+                attempts_remaining=max(0, max_attempts - delivery.pickup_otp_attempts),
+                delivery=delivery,
+                detail=detail,
+                code=code
+            )
+
         if delivery.pickup_otp_attempts >= max_attempts:
             return OTPVerificationResult(
                 outcome=OTPVerificationOutcome.LOCKED,
@@ -316,35 +391,18 @@ def resolve_delivery_payment_status(delivery: PetDelivery) -> bool:
     Consolidates payment verification into a single authoritative source of truth.
     Returns True if payment was verified and marked 'paid', False otherwise.
 
-    Rules:
-    1. Online payments: Requires verified Payment row(s) with status in ['paid', 'captured']
-       where the total captured amount in paise >= application.total_amount in paise (paise-safe comparison).
-    2. COD payments: Requires delivery.cash_collected >= application.total_amount
-       and delivery.cash_collected > Decimal('0.00').
+    Unifies online captured payments and COD ledger rows through is_payment_satisfied with no dead branch.
     """
     application = getattr(delivery, 'application', None)
     if not application:
         return False
 
-    total_amount = getattr(application, 'total_amount', Decimal('0.00')) or Decimal('0.00')
-    expected_paise = int(round(Decimal(str(total_amount)) * 100))
-    payment_verified = False
-
-    paid_payments = application.payments.filter(status__in=['paid', 'captured'])
-    if paid_payments.exists():
-        total_paid_paise = sum(
-            p.amount_in_paise if p.amount_in_paise else int(round(Decimal(str(p.amount)) * 100))
-            for p in paid_payments
-        )
-        if expected_paise > 0 and total_paid_paise >= expected_paise:
-            payment_verified = True
-    elif application.payment_method == 'cod' and delivery.cash_collected >= total_amount and delivery.cash_collected > Decimal('0.00'):
-        payment_verified = True
-
-    if payment_verified:
+    satisfied, _, _ = is_payment_satisfied(application, delivery)
+    if satisfied:
         application.payment_status = 'paid'
+        return True
 
-    return payment_verified
+    return False
 
 
 def verify_doorstep_service(delivery_id: int | str, submitted_otp: str) -> OTPVerificationResult:

@@ -21,7 +21,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import ValidationError, NotFound
 from rest_framework.throttling import ScopedRateThrottle
 
-from drf_spectacular.utils import extend_schema, OpenApiTypes
+from drf_spectacular.utils import extend_schema, OpenApiTypes, OpenApiResponse
 
 from .models import PetDelivery, DeliveryLocationPing, Payment
 from .permissions import IsShelterForDelivery, IsAssignedDeliveryDriver, IsDeliveryParticipant
@@ -49,6 +49,7 @@ from .serializers import (
 from .otp import check_otp, issue_otp
 from .services import (
     assign_delivery_task,
+    check_pickup_payment_guard,
     verify_pickup_service,
     verify_doorstep_service,
     OTPVerificationOutcome,
@@ -280,10 +281,23 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
     def driver_active(self, request):
         return self.active(request)
 
-    @extend_schema(request=OTPVerificationSerializer, responses={200: DeliveryPickupResponseSerializer})
+    @extend_schema(
+        request=OTPVerificationSerializer,
+        responses={
+            200: DeliveryPickupResponseSerializer,
+            409: OpenApiResponse(description="Payment required or conflict"),
+        }
+    )
     @action(detail=True, methods=['post'], url_path='pickup',
             permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
     def pickup(self, request, *args, **kwargs):
+        delivery_obj = self.get_object()
+
+        # Guard: Validate payment requirements before checking OTP (consumes no attempts)
+        allowed, code, detail = check_pickup_payment_guard(delivery_obj)
+        if not allowed:
+            return Response({"code": code, "detail": detail}, status=status.HTTP_409_CONFLICT)
+
         raw_otp = request.data.get('otp') or request.data.get('code') or request.data.get('secret_otp')
         if not raw_otp:
             return Response({"detail": "OTP is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -292,11 +306,12 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         if not re.match(r'^\d{6}$', val):
             return Response({"detail": "OTP must be a 6-digit numeric string."}, status=status.HTTP_400_BAD_REQUEST)
 
-        delivery_obj = self.get_object()
         result = verify_pickup_service(delivery_obj.id, val)
 
         if result.outcome == OTPVerificationOutcome.WRONG_STATE:
             return Response({"detail": result.detail}, status=status.HTTP_409_CONFLICT)
+        elif result.outcome in (OTPVerificationOutcome.PAYMENT_REQUIRED, OTPVerificationOutcome.PAYMENT_METHOD_REQUIRED):
+            return Response({"code": result.code, "detail": result.detail}, status=status.HTTP_409_CONFLICT)
         elif result.outcome == OTPVerificationOutcome.LOCKED:
             return Response({"detail": result.detail}, status=423)
         elif result.outcome == OTPVerificationOutcome.EXPIRED:

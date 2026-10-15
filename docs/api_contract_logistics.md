@@ -115,7 +115,10 @@ This document specifies the canonical and legacy API contracts for the pet deliv
     }
     ```
   - `403 Forbidden`: Authenticated driver is not assigned to this delivery task.
-  - `409 Conflict`: Delivery is not in `assigned` status (e.g. already picked up).
+  - `409 Conflict`:
+    - `{"code": "payment_required"}`: Online payment has not been captured for an application with `payment_method='online'`. Consumes no OTP attempts.
+    - `{"code": "payment_method_required"}`: Payment method is unset for an application with `total_amount > 0`. Consumes no OTP attempts.
+    - `{"detail": "Cannot verify pickup for delivery in '<status>' state."}`: Delivery is not in `assigned` status (e.g. already picked up or failed).
   - `410 Gone`: Pickup OTP has expired. Reissue required via shelter.
   - `423 Locked`: Maximum verification attempts (3) exceeded.
   - `429 Too Many Requests`: Rate limit throttled.
