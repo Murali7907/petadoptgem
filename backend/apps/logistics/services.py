@@ -220,6 +220,14 @@ def assign_delivery_task(application: AdoptionApplication, driver: DeliveryProfi
     Sends driver-assigned notice to adopter with driver details and NO OTP.
     """
     with transaction.atomic():
+        applicant = getattr(application, 'applicant', None)
+        adopter_email = (getattr(applicant, 'email', '') or '').strip()
+        if not adopter_email:
+            raise ConflictError(
+                detail={"code": "adopter_email_missing", "detail": "Cannot assign delivery task: adopter has no email address."},
+                code="adopter_email_missing"
+            )
+
         existing_delivery = PetDelivery.objects.select_for_update().filter(application=application).first()
 
         if existing_delivery and existing_delivery.status in ['out_for_delivery', 'delivered']:
@@ -683,8 +691,10 @@ def reissue_delivery_otp(delivery: PetDelivery, purpose: str) -> dict:
         except Exception as e:
             logger.error(f"Failed to email reissued doorstep OTP for delivery #{delivery.id}: {e}", exc_info=True)
 
+        msg = "Doorstep OTP reissued and emailed to adopter." if email_sent else "Doorstep OTP reissued (email delivery failed)."
         return {
-            "detail": "Doorstep OTP reissued and emailed to adopter.",
+            "detail": msg,
+            "message": msg,
             "purpose": "doorstep",
             "email_dispatched": email_sent,
             "expires_at": delivery.doorstep_otp_expires_at.isoformat() if delivery.doorstep_otp_expires_at else None

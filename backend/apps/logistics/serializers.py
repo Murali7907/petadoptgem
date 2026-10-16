@@ -348,10 +348,12 @@ class DeliveryReissueOTPRequestSerializer(serializers.Serializer):
 
 
 class DeliveryReissueOTPResponseSerializer(serializers.Serializer):
-    message = serializers.CharField()
+    message = serializers.CharField(required=False)
+    detail = serializers.CharField(required=False)
     purpose = serializers.CharField()
     pickup_otp = serializers.CharField(required=False, allow_blank=True)
     doorstep_otp = serializers.CharField(required=False, allow_blank=True)
+    email_dispatched = serializers.BooleanField(required=False)
     expires_at = serializers.DateTimeField()
 
 

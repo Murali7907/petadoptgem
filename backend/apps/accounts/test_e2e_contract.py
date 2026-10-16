@@ -260,8 +260,14 @@ class EndToEndContractFlowTestCase(TestCase):
         customer_doorstep_otp = match.group(1) if match else ''
         self.assertTrue(bool(customer_doorstep_otp))
 
-        # 4.6 Driver Verifies Doorstep OTP (/api/deliveries/<id>/verify-otp/)
+        # 4.5b Driver Collects COD Cash (/api/deliveries/<id>/collect-cash/)
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {driver_token}')
+        res_cash = self.client.post(f'/api/deliveries/{delivery_public_id}/collect-cash/', data={
+            'amount': str(delivery_obj.application.total_amount)
+        }, format='json')
+        self.assertEqual(res_cash.status_code, status.HTTP_200_OK)
+
+        # 4.6 Driver Verifies Doorstep OTP (/api/deliveries/<id>/verify-otp/)
         with self.captureOnCommitCallbacks(execute=True):
             res_verify_otp = self.client.post(f'/api/deliveries/{delivery_public_id}/verify-otp/', data={
                 'otp': customer_doorstep_otp

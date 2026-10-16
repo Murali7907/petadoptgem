@@ -510,3 +510,76 @@ class VerifiedShelterAccountsTests(APITestCase):
         self.assertEqual(res.data.get('code'), 'shelter_not_verified')
 
 
+class AdopterEmailEnforcementTests(APITestCase):
+    def setUp(self):
+        self.register_url = reverse('auth_register')
+        self.valid_data = {
+            'username': 'unique_user',
+            'email': 'unique.user@example.com',
+            'password': 'password123',
+            'first_name': 'Unique',
+            'last_name': 'User',
+            'role': 'customer',
+            'phone': '1234567890',
+            'address': '123 Unique St'
+        }
+
+    def test_registration_requires_non_empty_email(self):
+        # Empty string
+        data_empty = dict(self.valid_data, username='user_empty', email='')
+        res = self.client.post(self.register_url, data_empty, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('email', res.data)
+
+        # Whitespace only
+        data_ws = dict(self.valid_data, username='user_ws', email='   ')
+        res_ws = self.client.post(self.register_url, data_ws, format='json')
+        self.assertEqual(res_ws.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('email', res_ws.data)
+
+        # Missing email key
+        data_missing = dict(self.valid_data, username='user_missing')
+        data_missing.pop('email')
+        res_missing = self.client.post(self.register_url, data_missing, format='json')
+        self.assertEqual(res_missing.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('email', res_missing.data)
+
+    def test_registration_requires_valid_email_format(self):
+        data_invalid = dict(self.valid_data, username='user_invalid', email='not-a-valid-email')
+        res = self.client.post(self.register_url, data_invalid, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('email', res.data)
+
+    def test_registration_enforces_case_insensitive_uniqueness(self):
+        # Register mixed-case
+        data1 = dict(self.valid_data, username='mixed_user', email='John.Doe@Example.com')
+        res1 = self.client.post(self.register_url, data1, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_201_CREATED)
+
+        # Register lowercase duplicate
+        data2 = dict(self.valid_data, username='lower_user', email='john.doe@example.com')
+        res2 = self.client.post(self.register_url, data2, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('email', res2.data)
+
+        # Register uppercase duplicate
+        data3 = dict(self.valid_data, username='upper_user', email='JOHN.DOE@EXAMPLE.COM')
+        res3 = self.client.post(self.register_url, data3, format='json')
+        self.assertEqual(res3.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('email', res3.data)
+
+    def test_db_unique_constraint_on_lower_email_non_empty(self):
+        from django.db import IntegrityError
+        # Multiple users with empty string email are allowed (partial index where email != '')
+        u1 = User.objects.create_user(username='empty1', email='', password='pass123password')
+        u2 = User.objects.create_user(username='empty2', email='', password='pass123password')
+        self.assertEqual(u1.email, '')
+        self.assertEqual(u2.email, '')
+
+        # Non-empty email duplicate (case-insensitive) at DB level raises IntegrityError
+        User.objects.create_user(username='unique1', email='db_test@example.com', password='pass123password')
+        with self.assertRaises(IntegrityError):
+            User.objects.create_user(username='unique2', email='DB_TEST@EXAMPLE.COM', password='pass123password')
+
+
+

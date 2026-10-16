@@ -102,6 +102,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(required=True, allow_blank=False)
     password = serializers.CharField(write_only=True, min_length=6)
     organization_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
     license_no = serializers.CharField(write_only=True, required=False, allow_blank=True)
@@ -128,6 +129,14 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             'latitude',
             'longitude',
         ]
+
+    def validate_email(self, value):
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("Email is required.")
+        email_clean = str(value).strip().lower()
+        if User.objects.filter(email__iexact=email_clean).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return email_clean
 
     def validate_role(self, value):
         if value not in ('customer', 'shelter'):
@@ -181,9 +190,12 @@ class DriverCreateSerializer(serializers.Serializer):
         return value
 
     def validate_email(self, value):
-        if User.objects.filter(email=value).exists():
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("Email is required.")
+        email_clean = str(value).strip().lower()
+        if User.objects.filter(email__iexact=email_clean).exists():
             raise serializers.ValidationError("A user with this email already exists.")
-        return value
+        return email_clean
 
 
 class AdminShelterDetailSerializer(serializers.ModelSerializer):

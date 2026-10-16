@@ -62,6 +62,7 @@ from .services import (
     reissue_delivery_otp,
     send_delivery_completed_notice,
     resolve_delivery_payment_status,
+    ConflictError,
 )
 from .payment_services import (
     create_razorpay_order,
@@ -177,7 +178,12 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
         if driver.shelter_id != shelter.id:
             return Response({"detail": "Driver is not registered under your shelter."}, status=status.HTTP_400_BAD_REQUEST)
 
-        delivery = assign_delivery_task(application=application, driver=driver, payment_method=payment_method)
+        try:
+            delivery = assign_delivery_task(application=application, driver=driver, payment_method=payment_method)
+        except ConflictError as e:
+            if isinstance(e.detail, dict):
+                return Response(e.detail, status=status.HTTP_409_CONFLICT)
+            return Response({"detail": str(e.detail)}, status=status.HTTP_409_CONFLICT)
         response_serializer = ShelterDeliverySerializer(delivery)
         data = dict(response_serializer.data)
         if hasattr(delivery, 'raw_pickup_otp') and delivery.raw_pickup_otp:

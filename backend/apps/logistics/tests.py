@@ -224,6 +224,8 @@ class LogisticsTestCase(TestCase):
         Attempt 4 returns HTTP 423 Locked.
         """
         delivery = assign_delivery_task(self.application, self.driver_profile, payment_method='cod')
+        delivery.cash_collected = Decimal('150.00')
+        delivery.save(update_fields=['cash_collected'])
         verify_pickup_otp(delivery, delivery.raw_pickup_otp)
 
         self.client.force_authenticate(user=self.driver_user)
@@ -255,6 +257,8 @@ class LogisticsTestCase(TestCase):
     def test_successful_doorstep_otp_verification(self):
         with self.captureOnCommitCallbacks(execute=True):
             delivery = assign_delivery_task(self.application, self.driver_profile, payment_method='cod')
+        delivery.cash_collected = Decimal('150.00')
+        delivery.save(update_fields=['cash_collected'])
         mail.outbox.clear()
         with self.captureOnCommitCallbacks(execute=True):
             verify_pickup_otp(delivery, delivery.raw_pickup_otp)
@@ -676,7 +680,9 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_410_GONE)
 
     def test_idempotent_doorstep_verification(self):
-        delivery = assign_delivery_task(self.application, self.driver_profile)
+        delivery = assign_delivery_task(self.application, self.driver_profile, payment_method='cod')
+        delivery.cash_collected = self.application.total_amount
+        delivery.save(update_fields=['cash_collected'])
         with self.captureOnCommitCallbacks(execute=True):
             verify_pickup_otp(delivery, delivery.raw_pickup_otp)
         match = re.search(r"OTP is:\s*(\d{6})", mail.outbox[-1].body)
@@ -753,21 +759,31 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         3. Online paid: verified Payment ('paid'/'captured') exists -> payment_status='paid'
         4. Online unpaid: no verified Payment ('created'/'failed') -> payment_status='pending'
         """
-        # Case 1: COD underpaid -> remains pending
+        # Case 1: COD underpaid -> doorstep verification blocked with 409 cash_not_collected
         del1 = assign_delivery_task(self.application, self.driver_profile, payment_method='cod')
-        del1.cash_collected = Decimal('50.00')  # less than total_amount of 200.00
+        del1.cash_collected = Decimal('50.00')  # less than total_amount of 150.00
         del1.save(update_fields=['cash_collected'])
         otp1 = self._pickup_and_get_doorstep_otp(del1)
         self.client.force_authenticate(user=self.driver_user)
-        self.client.post(f'/api/v1/delivery/tasks/{del1.public_id}/verify-doorstep/', {'otp': otp1}, format='json')
+        res_blocked = self.client.post(f'/api/v1/delivery/tasks/{del1.public_id}/verify-doorstep/', {'otp': otp1}, format='json')
+        self.assertEqual(res_blocked.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res_blocked.data.get('code'), 'cash_not_collected')
         self.application.refresh_from_db()
         self.assertEqual(self.application.payment_status, 'pending')
+
+        # Pay remaining balance to complete del1 and free the driver
+        del1.cash_collected = self.application.total_amount
+        del1.save(update_fields=['cash_collected'])
+        res_ok = self.client.post(f'/api/v1/delivery/tasks/{del1.public_id}/verify-doorstep/', {'otp': otp1}, format='json')
+        self.assertEqual(res_ok.status_code, status.HTTP_200_OK)
+        del1.refresh_from_db()
+        self.assertEqual(del1.status, 'delivered')
+        self.driver_profile.refresh_from_db()
+        self.assertTrue(self.driver_profile.is_available)
 
         # Case 2: COD fully paid -> payment_status='paid'
         pet_cod = Pet.objects.create(shelter=self.shelter_profile, name='CodPet', species='dog', breed='Lab', age_months=10, gender='male', status='available')
         app_cod = AdoptionApplication.objects.create(applicant=self.customer_user, pet=pet_cod, status='approved', payment_method='cod', payment_status='pending', total_amount=Decimal('150.00'))
-        self.driver_profile.is_available = True
-        self.driver_profile.save()
         del_cod = assign_delivery_task(app_cod, self.driver_profile, payment_method='cod')
         del_cod.cash_collected = Decimal('150.00')  # equals total_amount
         del_cod.save(update_fields=['cash_collected'])
@@ -830,7 +846,9 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         immediately upon returning HTTP 400 (verified by reading back via a fresh query).
         Tested for both pickup and doorstep verification.
         """
-        delivery = assign_delivery_task(self.application, self.driver_profile)
+        delivery = assign_delivery_task(self.application, self.driver_profile, payment_method='cod')
+        delivery.cash_collected = self.application.total_amount
+        delivery.save(update_fields=['cash_collected'])
         self.client.force_authenticate(user=self.driver_user)
 
         # 1. Pickup verification wrong OTP
@@ -924,6 +942,11 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         self.assertEqual(res_reissue.status_code, status.HTTP_200_OK)
         match_reissue = re.search(r'\b\d{6}\b', mail.outbox[-1].body)
         reissued_doorstep_code = match_reissue.group(0) if match_reissue else ''
+
+        # Satisfy cash collection before doorstep verification
+        delivery.refresh_from_db()
+        delivery.cash_collected = self.application.total_amount
+        delivery.save(update_fields=['cash_collected'])
 
         # 4. Doorstep verification
         self.client.force_authenticate(user=self.driver_user)
@@ -1064,6 +1087,10 @@ class DeliveryOnCommitEmailTests(TestCase):
         doorstep_otp = match.group(1)
         mail.outbox.clear()
 
+        delivery.refresh_from_db()
+        delivery.cash_collected = Decimal('150.00')
+        delivery.save(update_fields=['cash_collected'])
+
         with self.captureOnCommitCallbacks(execute=True):
             res = verify_doorstep_service(delivery.id, doorstep_otp)
 
@@ -1177,6 +1204,10 @@ class DeliveryConcurrencyTests(TransactionTestCase):
         self.assertTrue(bool(doorstep_otp))
 
         mail.outbox.clear()
+
+        delivery.refresh_from_db()
+        delivery.cash_collected = self.application.total_amount
+        delivery.save(update_fields=['cash_collected'])
 
         url = f'/api/v1/delivery/tasks/{delivery.public_id}/verify-doorstep/'
         barrier = threading.Barrier(2)
@@ -1303,6 +1334,9 @@ class DeliveryReassignmentTests(TestCase):
         # Advance to delivered
         match = re.search(r"OTP is:\s*(\d{6})", mail.outbox[-1].body)
         doorstep_otp = match.group(1) if match else ''
+        delivery.refresh_from_db()
+        delivery.cash_collected = Decimal('150.00')
+        delivery.save(update_fields=['cash_collected'])
         verify_doorstep_otp(delivery, doorstep_otp)
         delivery.refresh_from_db()
         self.assertEqual(delivery.status, 'delivered')
@@ -2403,6 +2437,130 @@ class CODCashCollectionConcurrencyTestCase(TransactionTestCase):
         self.assertEqual(Payment.objects.filter(delivery=delivery).count(), 1)
         delivery.refresh_from_db()
         self.assertEqual(delivery.cash_collected, Decimal('100.00'))
+
+
+class AdopterEmailLogisticsTests(APITestCase):
+    def setUp(self):
+        from apps.accounts.models import ShelterProfile, DeliveryProfile
+        from apps.pets.models import Pet
+        from apps.adoptions.models import AdoptionApplication
+
+        self.shelter_user = User.objects.create_user(
+            username='shelter_adopter_test',
+            email='shelter@adoptertest.org',
+            password='password123',
+            role='shelter'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user,
+            organization_name='Adopter Test Shelter',
+            pickup_address='123 Test St',
+            is_verified=True
+        )
+        self.driver_user = User.objects.create_user(
+            username='driver_adopter_test',
+            email='driver@adoptertest.org',
+            password='password123',
+            role='delivery'
+        )
+        self.driver_profile = DeliveryProfile.objects.create(
+            user=self.driver_user,
+            shelter=self.shelter_profile,
+            vehicle_type='car',
+            vehicle_number='KA-05-EM-1111',
+            is_available=True
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter_profile,
+            name='NoEmailPet',
+            species='dog',
+            breed='Terrier',
+            age_months=12,
+            size='medium',
+            gender='male',
+            status='available'
+        )
+        # Adopter user with empty email
+        self.adopter_no_email = User.objects.create_user(
+            username='adopter_no_email',
+            email='',
+            password='password123',
+            role='customer'
+        )
+        self.application_no_email = AdoptionApplication.objects.create(
+            pet=self.pet,
+            applicant=self.adopter_no_email,
+            status='approved',
+            total_amount=Decimal('0.00'),
+            payment_status='paid'
+        )
+
+        # Adopter user with valid email
+        self.adopter_with_email = User.objects.create_user(
+            username='adopter_with_email',
+            email='adopter.valid@example.com',
+            password='password123',
+            role='customer'
+        )
+        self.pet2 = Pet.objects.create(
+            shelter=self.shelter_profile,
+            name='EmailPet',
+            species='cat',
+            breed='Persian',
+            age_months=8,
+            size='small',
+            gender='female',
+            status='available'
+        )
+        self.application_with_email = AdoptionApplication.objects.create(
+            pet=self.pet2,
+            applicant=self.adopter_with_email,
+            status='approved',
+            total_amount=Decimal('0.00'),
+            payment_status='paid'
+        )
+
+    def test_assign_delivery_refuses_when_adopter_has_no_email_service(self):
+        with self.assertRaises(ConflictError) as ctx:
+            assign_delivery_task(self.application_no_email, self.driver_profile)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.detail.get('code'), 'adopter_email_missing')
+
+    def test_assign_delivery_refuses_when_adopter_has_no_email_api(self):
+        self.client.force_authenticate(user=self.shelter_user)
+        payload = {
+            'application_id': str(self.application_no_email.public_id),
+            'driver_id': str(self.driver_profile.public_id),
+            'payment_method': 'cod'
+        }
+        res = self.client.post('/api/v1/shelter/deliveries/assign/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'adopter_email_missing')
+
+    def test_reissue_response_message_matches_email_dispatch_outcome(self):
+        # Assign delivery for application with email
+        delivery = assign_delivery_task(self.application_with_email, self.driver_profile)
+        delivery.status = 'out_for_delivery'
+        delivery.save(update_fields=['status'])
+
+        reissue_url = f'/api/v1/shelter/deliveries/{delivery.public_id}/reissue-otp/'
+        self.client.force_authenticate(user=self.shelter_user)
+
+        # 1. When email succeeds
+        with patch('apps.logistics.services.dispatch_doorstep_otp', return_value=True):
+            res_success = self.client.post(reissue_url, {'purpose': 'doorstep'}, format='json')
+            self.assertEqual(res_success.status_code, status.HTTP_200_OK)
+            self.assertTrue(res_success.data.get('email_dispatched'))
+            self.assertIn("emailed to adopter", res_success.data.get('detail', ''))
+
+        # 2. When email fails
+        with patch('apps.logistics.services.dispatch_doorstep_otp', return_value=False):
+            res_fail = self.client.post(reissue_url, {'purpose': 'doorstep'}, format='json')
+            self.assertEqual(res_fail.status_code, status.HTTP_200_OK)
+            self.assertFalse(res_fail.data.get('email_dispatched'))
+            self.assertNotIn("emailed to adopter", res_fail.data.get('detail', ''))
+            self.assertIn("failed", res_fail.data.get('detail', ''))
+
 
 
 

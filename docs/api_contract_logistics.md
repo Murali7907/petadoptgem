@@ -49,9 +49,9 @@ This document specifies the canonical and legacy API contracts for the pet deliv
     ```
     *(Note: `pickup_otp` is returned in plaintext ONCE upon creation so shelter staff can verify driver handoff).*
   - `400 Bad Request`: Validation failure or driver unavailable.
-  - `403 Forbidden`: User does not possess a shelter profile or does not own the pet's shelter.
-  - `404 Not Found`: Application or Driver not found.
-  - `409 Conflict`: Cannot reassign delivery when already in-flight (`out_for_delivery`) or completed (`delivered`). (Reassignment in `assigned` or `failed` safely frees previous driver, resets `dispatched_at`, and issues fresh OTPs).
+  - `409 Conflict`:
+    - `{"code": "adopter_email_missing"}`: Adopter does not have an email address registered (`409 {"code": "adopter_email_missing"}`).
+    - Cannot reassign delivery when already in-flight (`out_for_delivery`) or completed (`delivered`). (Reassignment in `assigned` or `failed` safely frees previous driver, resets `dispatched_at`, and issues fresh OTPs).
 
 ---
 
@@ -211,15 +211,26 @@ This document specifies the canonical and legacy API contracts for the pet deliv
     }
     ```
   - `200 OK (purpose="doorstep")`:
-    ```json
-    {
-      "message": "Doorstep OTP reissued and emailed to adopter.",
-      "purpose": "doorstep",
-      "recipient": "adopter@example.com",
-      "doorstep_otp_sent_at": "2026-10-14T12:00:00Z",
-      "expires_at": "2026-10-15T12:00:00Z"
-    }
-    ```
+    - If email dispatch succeeds:
+      ```json
+      {
+        "detail": "Doorstep OTP reissued and emailed to adopter.",
+        "message": "Doorstep OTP reissued and emailed to adopter.",
+        "purpose": "doorstep",
+        "email_dispatched": true,
+        "expires_at": "2026-10-15T12:00:00Z"
+      }
+      ```
+    - If email dispatch fails (e.g. SMTP/network failure):
+      ```json
+      {
+        "detail": "Doorstep OTP reissued (email delivery failed).",
+        "message": "Doorstep OTP reissued (email delivery failed).",
+        "purpose": "doorstep",
+        "email_dispatched": false,
+        "expires_at": "2026-10-15T12:00:00Z"
+      }
+      ```
   - `400 Bad Request`: Invalid purpose (must be `"pickup"` or `"doorstep"`).
   - `403 Forbidden`: User is not associated with the managing shelter.
   - `409 Conflict`: State invariant violation (e.g. attempting pickup reissue when already out for delivery, or doorstep reissue while still in assigned status).
