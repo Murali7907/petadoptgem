@@ -220,13 +220,11 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
             doc_file = request.FILES.get('document') or request.FILES.get('file')
             data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
             if doc_file:
-                from django.core.files.storage import default_storage, storages
-                try:
-                    storage = storages['raw']
-                except Exception:
-                    storage = default_storage
-                saved_path = storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
-                doc_url = storage.url(saved_path)
+                from .validators import validate_medical_document
+                validate_medical_document(doc_file)
+                from django.core.files.storage import default_storage
+                saved_path = default_storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
+                doc_url = default_storage.url(saved_path)
                 curr_desc = data.get('description', '')
                 if not curr_desc and medical_record:
                     curr_desc = medical_record.clinical_description
@@ -261,6 +259,9 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
             created_images = []
 
             if image_files:
+                from .validators import validate_pet_image
+                for img_file in image_files:
+                    validate_pet_image(img_file)
                 caption = request.data.get('caption', f"Gallery image for {pet.name}")
                 is_primary = str(request.data.get('is_primary', 'false')).lower() in ('true', '1') if isinstance(request.data.get('is_primary'), str) else bool(request.data.get('is_primary', False))
                 for img_file in image_files:
@@ -341,8 +342,11 @@ class PetImageCreateView(generics.CreateAPIView):
                 raise PermissionDenied("You can only add images to your own shelter's pets.")
 
         # Support multi-image files in request.FILES
-        files = request.FILES.getlist('images') or request.FILES.getlist('image')
+        files = request.FILES.getlist('images') or request.FILES.getlist('image') or request.FILES.getlist('file')
         if files:
+            from .validators import validate_pet_image
+            for f in files:
+                validate_pet_image(f)
             created_images = []
             caption = request.data.get('caption', f"Gallery image for {pet.name}")
             is_primary = str(request.data.get('is_primary', 'false')).lower() in ('true', '1') if isinstance(request.data.get('is_primary'), str) else bool(request.data.get('is_primary', False))
@@ -402,13 +406,11 @@ class PetMedicalRecordListCreateView(generics.ListCreateAPIView):
 
         doc_file = self.request.FILES.get('document') or self.request.FILES.get('file')
         if doc_file and 'document' not in serializer.validated_data:
-            from django.core.files.storage import default_storage, storages
-            try:
-                storage = storages['raw']
-            except Exception:
-                storage = default_storage
-            saved_path = storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
-            doc_url = storage.url(saved_path)
+            from .validators import validate_medical_document
+            validate_medical_document(doc_file)
+            from django.core.files.storage import default_storage
+            saved_path = default_storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
+            doc_url = default_storage.url(saved_path)
             desc = serializer.validated_data.get('description', '')
             desc_with_doc = f"{desc}\nDocument: {doc_url}".strip() if desc else f"Document: {doc_url}"
             serializer.save(pet=pet, description=desc_with_doc)

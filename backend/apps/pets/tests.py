@@ -567,8 +567,13 @@ class MediaStoragePipelineTests(APITestCase):
         self.assertIn('API_SECRET', settings.CLOUDINARY_STORAGE)
 
     def test_pet_gallery_image_upload_saves_to_storage(self):
+        from io import BytesIO
+        from PIL import Image
+        bio = BytesIO()
+        Image.new('RGB', (10, 10), color='green').save(bio, format='JPEG')
+        fake_image = SimpleUploadedFile("bella_gallery.jpg", bio.getvalue(), content_type="image/jpeg")
+
         url = f"/api/pets/{self.pet.id}/images/"
-        fake_image = SimpleUploadedFile("bella_gallery.jpg", b"fake_image_binary_data", content_type="image/jpeg")
         response = self.client.post(url, {'image': fake_image, 'caption': 'Bella at park'}, format='multipart')
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -580,7 +585,7 @@ class MediaStoragePipelineTests(APITestCase):
 
     def test_pet_medical_record_document_upload_saves_to_storage(self):
         url = f"/api/pets/{self.pet.id}/medical/"
-        fake_doc = SimpleUploadedFile("rabies_cert.pdf", b"fake_pdf_binary_content", content_type="application/pdf")
+        fake_doc = SimpleUploadedFile("rabies_cert.pdf", b"%PDF-1.4\n%fake_pdf_binary_content\n%%EOF", content_type="application/pdf")
         response = self.client.post(url, {
             'title': 'Rabies Vaccination',
             'record_date': '2026-05-10',
@@ -595,8 +600,13 @@ class MediaStoragePipelineTests(APITestCase):
         self.assertIn('/media/medical/', med_rec.document)
 
     def test_shelter_pet_images_action_upload(self):
+        from io import BytesIO
+        from PIL import Image
+        bio = BytesIO()
+        Image.new('RGB', (10, 10), color='yellow').save(bio, format='JPEG')
+        fake_image = SimpleUploadedFile("bella_action.jpg", bio.getvalue(), content_type="image/jpeg")
+
         url = f"/api/v1/shelter/pets/{self.pet.public_id}/images/"
-        fake_image = SimpleUploadedFile("bella_action.jpg", b"fake_binary_jpeg", content_type="image/jpeg")
         response = self.client.post(url, {'images': fake_image, 'caption': 'Action Photo'}, format='multipart')
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -614,7 +624,7 @@ class MediaStoragePipelineTests(APITestCase):
 
         url = f"/api/v1/shelter/pets/{self.pet.public_id}/medical/"
         # 1. Document-only PATCH should preserve existing description
-        fake_doc = SimpleUploadedFile("report.pdf", b"pdf_data", content_type="application/pdf")
+        fake_doc = SimpleUploadedFile("report.pdf", b"%PDF-1.4\n%pdf_data\n%%EOF", content_type="application/pdf")
         patch_resp = self.client.patch(url, {'document': fake_doc}, format='multipart')
         self.assertEqual(patch_resp.status_code, status.HTTP_200_OK)
         med_rec.refresh_from_db()
@@ -807,5 +817,133 @@ class VerifiedShelterPetPolicyTests(APITestCase):
         })
         self.assertEqual(res_med.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(res_med.data.get('code'), 'shelter_not_verified')
+
+
+class UploadValidationAPITests(APITestCase):
+    def setUp(self):
+        from io import BytesIO
+        from PIL import Image
+
+        self.shelter_user = User.objects.create_user(
+            username='upload_shelter_user',
+            email='upload.shelter@example.org',
+            password='password123',
+            role='shelter'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user,
+            organization_name='Upload Shelter Org',
+            pickup_address='500 Upload Blvd',
+            city='Bangalore',
+            is_verified=True
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter_profile,
+            name='UploadTestPet',
+            species='dog',
+            breed='Poodle',
+            age_months=12,
+            gender='female',
+            status='available'
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+
+    def _create_image_file(self, filename, fmt='JPEG', size=(20, 20)):
+        from io import BytesIO
+        from PIL import Image
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        io = BytesIO()
+        img = Image.new('RGB', size, color='blue')
+        img.save(io, format=fmt)
+        content_type = f"image/{fmt.lower()}"
+        return SimpleUploadedFile(filename, io.getvalue(), content_type=content_type)
+
+    def test_valid_pet_image_upload_success(self):
+        valid_img = self._create_image_file("valid.jpg", fmt='JPEG')
+        url = f'/api/pets/{self.pet.id}/images/'
+        res = self.client.post(url, {'images': [valid_img], 'caption': 'Valid Image'}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+    def test_fake_image_exe_renamed_jpg_rejected_400(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        fake_exe = SimpleUploadedFile("malware.jpg", b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff", content_type="image/jpeg")
+        url = f'/api/pets/{self.pet.id}/images/'
+        res = self.client.post(url, {'images': [fake_exe]}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_mismatched_image_extension_rejected_400(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        # PNG content with .jpg filename
+        png_as_jpg = self._create_image_file("mismatch.jpg", fmt='PNG')
+        url = f'/api/pets/{self.pet.id}/images/'
+        res = self.client.post(url, {'images': [png_as_jpg]}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_oversize_pet_image_rejected_400(self):
+        from unittest.mock import patch
+        valid_img = self._create_image_file("oversize.png", fmt='PNG')
+        url = f'/api/pets/{self.pet.id}/images/'
+        # Force max size limit to 50 bytes
+        with patch('apps.pets.validators.get_pet_image_max_size', return_value=50):
+            res = self.client.post(url, {'images': [valid_img]}, format='multipart')
+            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_disallowed_image_extension_rejected_400(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        gif_file = SimpleUploadedFile("animation.gif", b"GIF89a...", content_type="image/gif")
+        url = f'/api/pets/{self.pet.id}/images/'
+        res = self.client.post(url, {'images': [gif_file]}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_valid_medical_pdf_upload_success(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        valid_pdf = SimpleUploadedFile("report.pdf", b"%PDF-1.4\n%test pdf content\n%%EOF", content_type="application/pdf")
+        url = f'/api/pets/{self.pet.id}/medical/'
+        res = self.client.post(url, {
+            'title': 'Vaccination Certificate',
+            'record_type': 'vaccination',
+            'record_date': '2026-10-15',
+            'document': valid_pdf
+        }, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+    def test_fake_medical_pdf_text_file_rejected_400(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        fake_pdf = SimpleUploadedFile("report.pdf", b"This is plain text pretending to be a pdf file.", content_type="application/pdf")
+        url = f'/api/pets/{self.pet.id}/medical/'
+        res = self.client.post(url, {
+            'title': 'Vaccination Certificate',
+            'record_type': 'vaccination',
+            'record_date': '2026-10-15',
+            'document': fake_pdf
+        }, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_valid_medical_image_upload_success(self):
+        valid_img = self._create_image_file("xray.png", fmt='PNG')
+        url = f'/api/pets/{self.pet.id}/medical/'
+        res = self.client.post(url, {
+            'title': 'Chest X-Ray',
+            'record_type': 'exam',
+            'record_date': '2026-10-15',
+            'document': valid_img
+        }, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+    def test_oversize_medical_document_rejected_400(self):
+        from unittest.mock import patch
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        valid_pdf = SimpleUploadedFile("large_report.pdf", b"%PDF-1.4\n%test content\n%%EOF", content_type="application/pdf")
+        url = f'/api/pets/{self.pet.id}/medical/'
+        with patch('apps.pets.validators.get_medical_doc_max_size', return_value=10):
+            res = self.client.post(url, {
+                'title': 'Large Report',
+                'record_type': 'exam',
+                'record_date': '2026-10-15',
+                'document': valid_pdf
+            }, format='multipart')
+            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
 
 
