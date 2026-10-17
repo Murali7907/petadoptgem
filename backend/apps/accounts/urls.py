@@ -1,8 +1,10 @@
 from django.urls import path, include
 from rest_framework.routers import SimpleRouter
-from rest_framework_simplejwt.views import TokenRefreshView, TokenVerifyView
+from rest_framework_simplejwt.views import TokenVerifyView
 from .views import (
     CustomTokenObtainPairView, 
+    CustomTokenRefreshView,
+    LogoutView,
     RegisterView, 
     UserProfileView,
     ShelterDriverCreateView,
@@ -19,8 +21,9 @@ router.register(r'admin/shelters', AdminShelterVerificationViewSet, basename='ad
 urlpatterns = [
     path('register/', RegisterView.as_view(), name='auth_register'),
     path('login/', CustomTokenObtainPairView.as_view(), name='auth_login'),
+    path('logout/', LogoutView.as_view(), name='auth_logout'),
     path('drivers/create/', ShelterDriverCreateView.as_view(), name='auth_driver_create'),
-    path('token/refresh/', TokenRefreshView.as_view(), name='auth_token_refresh'),
+    path('token/refresh/', CustomTokenRefreshView.as_view(), name='auth_token_refresh'),
     path('token/verify/', TokenVerifyView.as_view(), name='auth_token_verify'),
     path('me/', UserProfileView.as_view(), name='auth_me'),
     path('notifications/', NotificationListView.as_view(), name='notification-list'),

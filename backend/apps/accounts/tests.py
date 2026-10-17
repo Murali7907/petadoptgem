@@ -512,6 +512,8 @@ class VerifiedShelterAccountsTests(APITestCase):
 
 class AdopterEmailEnforcementTests(APITestCase):
     def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
         self.register_url = reverse('auth_register')
         self.valid_data = {
             'username': 'unique_user',
@@ -580,6 +582,104 @@ class AdopterEmailEnforcementTests(APITestCase):
         User.objects.create_user(username='unique1', email='db_test@example.com', password='pass123password')
         with self.assertRaises(IntegrityError):
             User.objects.create_user(username='unique2', email='DB_TEST@EXAMPLE.COM', password='pass123password')
+
+
+class AuthAbuseProtectionTests(APITestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.user = User.objects.create_user(
+            username='auth_abuse_user',
+            email='auth_abuse@example.com',
+            password='testpassword123',
+            role='customer'
+        )
+
+    def tearDown(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    def test_login_throttled_after_limit(self):
+        from django.core.cache import cache
+        cache.clear()
+        url = '/api/v1/auth/login/'
+        payload = {'username': 'auth_abuse_user', 'password': 'wrongpassword'}
+
+        for i in range(10):
+            res = self.client.post(url, payload, format='json')
+            self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # 11th request must be throttled
+        res_throttled = self.client.post(url, payload, format='json')
+        self.assertEqual(res_throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_register_throttled_after_limit(self):
+        from django.core.cache import cache
+        cache.clear()
+        url = '/api/v1/auth/register/'
+
+        for i in range(5):
+            payload = {
+                'username': f'reg_throttle_user_{i}',
+                'email': f'reg_throttle_{i}@example.com',
+                'password': 'password123',
+                'role': 'customer'
+            }
+            res = self.client.post(url, payload, format='json')
+            self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+        # 6th request must be throttled
+        payload_6 = {
+            'username': 'reg_throttle_user_6',
+            'email': 'reg_throttle_6@example.com',
+            'password': 'password123',
+            'role': 'customer'
+        }
+        res_throttled = self.client.post(url, payload_6, format='json')
+        self.assertEqual(res_throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_logout_blacklists_refresh_token_and_rejected_by_refresh(self):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        refresh = RefreshToken.for_user(self.user)
+        refresh_str = str(refresh)
+
+        # Logout by blacklisting refresh token
+        logout_url = '/api/v1/auth/logout/'
+        res_logout = self.client.post(logout_url, {'refresh': refresh_str}, format='json')
+        self.assertEqual(res_logout.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_logout.data.get('message'), 'Successfully logged out.')
+
+        # Attempt to use blacklisted refresh token on refresh endpoint -> rejected with 401
+        refresh_url = '/api/v1/auth/token/refresh/'
+        res_after = self.client.post(refresh_url, {'refresh': refresh_str}, format='json')
+        self.assertEqual(res_after.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_logout_twice_is_harmless_idempotent(self):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        refresh = RefreshToken.for_user(self.user)
+        refresh_str = str(refresh)
+        logout_url = '/api/v1/auth/logout/'
+
+        # First logout
+        res1 = self.client.post(logout_url, {'refresh': refresh_str}, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+
+        # Second logout (harmless)
+        res2 = self.client.post(logout_url, {'refresh': refresh_str}, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+
+    def test_logout_with_invalid_token_returns_400(self):
+        logout_url = '/api/v1/auth/logout/'
+
+        # Invalid string
+        res_invalid = self.client.post(logout_url, {'refresh': 'garbage_not_a_valid_token'}, format='json')
+        self.assertEqual(res_invalid.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res_invalid.data.get('code'), 'invalid_token')
+
+        # Empty payload
+        res_empty = self.client.post(logout_url, {}, format='json')
+        self.assertEqual(res_empty.status_code, status.HTTP_400_BAD_REQUEST)
+
 
 
 

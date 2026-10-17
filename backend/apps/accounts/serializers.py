@@ -280,3 +280,8 @@ class NotificationSerializer(serializers.ModelSerializer):
         read_only_fields = ['public_id', 'created_at']
 
 
+class LogoutSerializer(serializers.Serializer):
+    refresh = serializers.CharField(help_text="The refresh JWT token to blacklist.")
+
+
+

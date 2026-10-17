@@ -3,9 +3,11 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from django.db.models import Sum, Avg
-from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiTypes
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiTypes, OpenApiResponse
 from django.db import transaction
 from .models import User, ShelterProfile, DeliveryProfile, Notification
 from .permissions import IsAdminRole, IsShelterRole, IsVerifiedShelter
@@ -20,22 +22,84 @@ from .serializers import (
     AdminPlatformStatsSerializer,
     NotificationSerializer,
     DriverCreateSerializer,
+    LogoutSerializer,
 )
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     """
     Login endpoint returning access and refresh JWT tokens with custom embedded role claims.
+    Throttled per IP via auth_login scope.
     """
     serializer_class = CustomTokenObtainPairSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_login'
+
+
+class CustomTokenRefreshView(TokenRefreshView):
+    """
+    Token refresh endpoint generating new access token from refresh token.
+    Throttled per IP via auth_refresh scope.
+    """
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_refresh'
+
+
+class LogoutView(views.APIView):
+    """
+    Logout endpoint blacklisting the provided refresh token.
+    Logging out twice is harmless (idempotent).
+    """
+    permission_classes = [AllowAny]
+    serializer_class = LogoutSerializer
+
+    @extend_schema(
+        summary="Logout and blacklist refresh token",
+        description="Blacklists the provided refresh token. Logging out twice is harmless.",
+        request=LogoutSerializer,
+        responses={
+            200: OpenApiResponse(description="Successfully logged out"),
+            400: OpenApiResponse(description="Missing or invalid token")
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = LogoutSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        refresh_token = serializer.validated_data['refresh']
+        try:
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+        except TokenError as e:
+            if 'blacklisted' in str(e).lower():
+                return Response({
+                    "message": "Successfully logged out (token already blacklisted)."
+                }, status=status.HTTP_200_OK)
+            return Response({
+                "error": str(e),
+                "code": "invalid_token"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            return Response({
+                "error": "Invalid token.",
+                "code": "invalid_token"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            "message": "Successfully logged out."
+        }, status=status.HTTP_200_OK)
 
 
 class RegisterView(generics.CreateAPIView):
     """
     User registration endpoint open to all applicants.
+    Throttled per IP via auth_register scope.
     """
     queryset = User.objects.all()
     serializer_class = UserRegistrationSerializer
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_register'
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
