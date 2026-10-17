@@ -2562,6 +2562,215 @@ class AdopterEmailLogisticsTests(APITestCase):
             self.assertIn("failed", res_fail.data.get('detail', ''))
 
 
+class ShelterCancelDeliveryAPITests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+        # 1. Owner shelter (verified)
+        self.owner_shelter_user = User.objects.create_user(
+            username='owner_shelter_cancel',
+            email='owner.cancel@shelter.org',
+            password='password123',
+            role='shelter'
+        )
+        self.owner_shelter = ShelterProfile.objects.create(
+            user=self.owner_shelter_user,
+            organization_name='Owner Shelter Org',
+            pickup_address='100 Shelter Way',
+            city='Bangalore',
+            is_verified=True
+        )
+
+        # 2. Other shelter (verified)
+        self.other_shelter_user = User.objects.create_user(
+            username='other_shelter_cancel',
+            email='other.cancel@shelter.org',
+            password='password123',
+            role='shelter'
+        )
+        self.other_shelter = ShelterProfile.objects.create(
+            user=self.other_shelter_user,
+            organization_name='Other Shelter Org',
+            pickup_address='200 Foreign Rd',
+            city='Bangalore',
+            is_verified=True
+        )
+
+        # 3. Unverified shelter
+        self.unverified_shelter_user = User.objects.create_user(
+            username='unverified_shelter_cancel',
+            email='unverified.cancel@shelter.org',
+            password='password123',
+            role='shelter'
+        )
+        self.unverified_shelter = ShelterProfile.objects.create(
+            user=self.unverified_shelter_user,
+            organization_name='Unverified Shelter Org',
+            pickup_address='300 Pending Ave',
+            city='Bangalore',
+            is_verified=False
+        )
+
+        # 4. Admin user
+        self.admin_user = User.objects.create_user(
+            username='admin_cancel_user',
+            email='admin.cancel@platform.org',
+            password='password123',
+            role='admin',
+            is_staff=True
+        )
+
+        # 5. Driver
+        self.driver_user = User.objects.create_user(
+            username='driver_cancel_test',
+            email='driver.cancel@delivery.org',
+            password='password123',
+            role='delivery'
+        )
+        self.driver_profile = DeliveryProfile.objects.create(
+            user=self.driver_user,
+            shelter=self.owner_shelter,
+            vehicle_type='bike',
+            vehicle_number='KA-01-CN-1234',
+            is_available=False
+        )
+
+        # 6. Adopter
+        self.adopter = User.objects.create_user(
+            username='adopter_cancel_test',
+            email='adopter.cancel@example.com',
+            password='password123',
+            role='customer'
+        )
+
+        # 7. Pet and Application
+        self.pet = Pet.objects.create(
+            shelter=self.owner_shelter,
+            name='CancelPet',
+            species='dog',
+            breed='Labrador',
+            age_months=10,
+            gender='male',
+            status='pending'
+        )
+        self.application = AdoptionApplication.objects.create(
+            pet=self.pet,
+            applicant=self.adopter,
+            status='approved',
+            total_amount=Decimal('500.00'),
+            payment_method='cod',
+            payment_status='pending'
+        )
+
+        # 8. Delivery
+        self.delivery = PetDelivery.objects.create(
+            application=self.application,
+            driver=self.driver_profile,
+            status='assigned',
+            cash_collected=Decimal('0.00')
+        )
+
+    def test_owner_shelter_can_cancel_assigned_delivery(self):
+        self.client.force_authenticate(user=self.owner_shelter_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel/'
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('status'), 'failed')
+
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'failed')
+
+        self.driver_profile.refresh_from_db()
+        self.assertTrue(self.driver_profile.is_available)
+
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'pending')
+
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.status, 'approved')
+
+    def test_owner_shelter_can_cancel_out_for_delivery(self):
+        self.delivery.status = 'out_for_delivery'
+        self.delivery.save(update_fields=['status'])
+
+        self.client.force_authenticate(user=self.owner_shelter_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel/'
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('status'), 'failed')
+
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'failed')
+        self.driver_profile.refresh_from_db()
+        self.assertTrue(self.driver_profile.is_available)
+
+    def test_admin_can_cancel_delivery(self):
+        self.client.force_authenticate(user=self.admin_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel/'
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'failed')
+
+    def test_other_shelter_cannot_cancel_returns_403(self):
+        self.client.force_authenticate(user=self.other_shelter_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel/'
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'assigned')
+
+    def test_unverified_shelter_cannot_cancel_returns_403(self):
+        self.client.force_authenticate(user=self.unverified_shelter_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel/'
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res.data.get('code'), 'shelter_not_verified')
+
+    def test_cash_collected_blocks_cancellation_returns_409(self):
+        self.delivery.cash_collected = Decimal('500.00')
+        self.delivery.save(update_fields=['cash_collected'])
+
+        self.client.force_authenticate(user=self.owner_shelter_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel/'
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'cash_collected')
+
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'assigned')
+
+    def test_cancellation_is_idempotent_for_already_failed(self):
+        self.delivery.status = 'failed'
+        self.delivery.save(update_fields=['status'])
+
+        self.client.force_authenticate(user=self.owner_shelter_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel/'
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('status'), 'failed')
+        self.assertTrue(res.data.get('idempotent'))
+
+    def test_cancellation_blocked_for_completed_delivery(self):
+        self.delivery.status = 'delivered'
+        self.delivery.delivered_at = timezone.now()
+        self.delivery.save(update_fields=['status', 'delivered_at'])
+
+        self.client.force_authenticate(user=self.owner_shelter_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel/'
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_legacy_url_alias_cancel(self):
+        self.client.force_authenticate(user=self.owner_shelter_user)
+        url = f'/api/deliveries/{self.delivery.public_id}/cancel/'
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'failed')
+
+
+
 
 
 

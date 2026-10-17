@@ -70,5 +70,10 @@ urlpatterns = [
     path('shelter/deliveries/<uuid:public_id>/reissue-otp/', ShelterDeliveryViewSet.as_view({'post': 'reissue_otp'}), name='delivery-reissue-otp-uuid'),
     path('<str:id>/reissue-otp/', ShelterDeliveryViewSet.as_view({'post': 'reissue_otp'}), name='delivery-reissue-otp-legacy'),
     path('<uuid:public_id>/reissue-otp/', ShelterDeliveryViewSet.as_view({'post': 'reissue_otp'}), name='delivery-reissue-otp-legacy-uuid'),
+    # POST /api/v1/shelter/deliveries/<id>/cancel/ & legacy aliases
+    path('shelter/deliveries/<str:id>/cancel/', ShelterDeliveryViewSet.as_view({'post': 'cancel'}), name='delivery-cancel'),
+    path('shelter/deliveries/<uuid:public_id>/cancel/', ShelterDeliveryViewSet.as_view({'post': 'cancel'}), name='delivery-cancel-uuid'),
+    path('<str:id>/cancel/', ShelterDeliveryViewSet.as_view({'post': 'cancel'}), name='delivery-cancel-legacy'),
+    path('<uuid:public_id>/cancel/', ShelterDeliveryViewSet.as_view({'post': 'cancel'}), name='delivery-cancel-legacy-uuid'),
     path('', include(router.urls)),
 ]

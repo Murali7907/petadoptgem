@@ -127,6 +127,7 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_THROTTLE_RATES': {
         'otp_verify': OTP_THROTTLE_RATE,
+        'shelter_cancel': os.getenv('SHELTER_CANCEL_THROTTLE_RATE', '20/min'),
     },
 }
 

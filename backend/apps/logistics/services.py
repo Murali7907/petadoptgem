@@ -750,3 +750,116 @@ def send_delivery_completed_notice(delivery: PetDelivery) -> bool:
         return False
 
 
+def cancel_delivery_by_shelter(delivery: PetDelivery, user) -> dict:
+    """
+    Cancels an active delivery by verified shelter or admin.
+    - Permitted only from 'assigned' or 'out_for_delivery'
+    - Blocked if cash_collected > 0 (HTTP 409 {"code": "cash_collected"})
+    - Idempotent if already 'failed' (HTTP 200)
+    - Sets delivery status = 'failed'
+    - Frees assigned driver (is_available = True)
+    - Leaves pet status 'pending' and application status 'approved'
+    - Dispatches notification to adopter on_commit
+    """
+    if delivery.status == 'failed':
+        return {
+            "detail": "Delivery is already marked as failed.",
+            "delivery_id": str(delivery.public_id),
+            "status": "failed",
+            "idempotent": True
+        }
+
+    if delivery.status not in ['assigned', 'out_for_delivery']:
+        raise ValidationError({
+            "detail": f"Cannot cancel delivery in '{delivery.status}' status. Only assigned or out_for_delivery deliveries can be cancelled."
+        })
+
+    if delivery.cash_collected and delivery.cash_collected > Decimal('0.00'):
+        raise ConflictError({
+            "code": "cash_collected",
+            "detail": "Cannot cancel delivery after cash has been collected. Please reconcile with driver."
+        })
+
+    with transaction.atomic():
+        locked_delivery = PetDelivery.objects.select_for_update().get(id=delivery.id)
+        if locked_delivery.status == 'failed':
+            return {
+                "detail": "Delivery is already marked as failed.",
+                "delivery_id": str(locked_delivery.public_id),
+                "status": "failed",
+                "idempotent": True
+            }
+
+        if locked_delivery.status not in ['assigned', 'out_for_delivery']:
+            raise ValidationError({
+                "detail": f"Cannot cancel delivery in '{locked_delivery.status}' status. Only assigned or out_for_delivery deliveries can be cancelled."
+            })
+
+        if locked_delivery.cash_collected and locked_delivery.cash_collected > Decimal('0.00'):
+            raise ConflictError({
+                "code": "cash_collected",
+                "detail": "Cannot cancel delivery after cash has been collected. Please reconcile with driver."
+            })
+
+        locked_delivery.status = 'failed'
+        locked_delivery.save(update_fields=['status'])
+
+        # Free the driver
+        if locked_delivery.driver:
+            driver = locked_delivery.driver
+            driver.is_available = True
+            driver.save(update_fields=['is_available'])
+
+        # Pet status remains 'pending'
+        if locked_delivery.application and locked_delivery.application.pet:
+            pet = locked_delivery.application.pet
+            pet.status = 'pending'
+            pet.save(update_fields=['status'])
+
+        # Application status remains 'approved'
+        if locked_delivery.application:
+            app = locked_delivery.application
+            app.status = 'approved'
+            app.save(update_fields=['status'])
+
+        # Adopter notification on_commit
+        adopter = getattr(locked_delivery.application, 'customer', None) or getattr(locked_delivery.application, 'applicant', None)
+        pet_name = getattr(locked_delivery.application.pet, 'name', 'your pet') if locked_delivery.application and locked_delivery.application.pet else 'your pet'
+
+        def notify_adopter():
+            if adopter:
+                from apps.accounts.models import Notification
+                try:
+                    Notification.objects.create(
+                        recipient=adopter,
+                        title=f"Delivery Cancelled: Update on your adoption of {pet_name}",
+                        message=f"The delivery for your adoption of {pet_name} has been cancelled by the shelter. Your adoption application remains approved.",
+                        notification_type='delivery'
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to create cancellation notification: {e}")
+
+                if adopter.email:
+                    try:
+                        from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@kindheart.org')
+                        send_mail(
+                            subject=f"Delivery Cancelled: Update on your adoption of {pet_name}",
+                            message=f"Hello {adopter.username},\n\nThe scheduled delivery for {pet_name} has been cancelled by the shelter. Your adoption application remains approved.\n\nThank you,\nKindHeart Team",
+                            from_email=from_email,
+                            recipient_list=[adopter.email],
+                            fail_silently=True
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send cancellation email: {e}")
+
+        transaction.on_commit(notify_adopter)
+
+        return {
+            "detail": "Delivery cancelled successfully.",
+            "delivery_id": str(locked_delivery.public_id),
+            "status": "failed",
+            "idempotent": False
+        }
+
+
+

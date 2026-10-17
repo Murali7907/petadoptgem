@@ -408,3 +408,11 @@ class CollectCashResponseSerializer(serializers.Serializer):
     payment_id = serializers.UUIDField(required=False)
 
 
+class DeliveryCancelResponseSerializer(serializers.Serializer):
+    detail = serializers.CharField()
+    delivery_id = serializers.CharField()
+    status = serializers.CharField()
+    idempotent = serializers.BooleanField(required=False)
+
+
+

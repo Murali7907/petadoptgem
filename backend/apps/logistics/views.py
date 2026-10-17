@@ -46,7 +46,8 @@ from .serializers import (
     PaymentVerifySerializer,
     PaymentLedgerSerializer,
     CollectCashRequestSerializer,
-    CollectCashResponseSerializer
+    CollectCashResponseSerializer,
+    DeliveryCancelResponseSerializer
 )
 from .otp import check_otp, issue_otp
 from .services import (
@@ -62,6 +63,7 @@ from .services import (
     reissue_delivery_otp,
     send_delivery_completed_notice,
     resolve_delivery_payment_status,
+    cancel_delivery_by_shelter,
     ConflictError,
 )
 from .payment_services import (
@@ -93,9 +95,14 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
     lookup_field = 'public_id'
 
     def get_permissions(self):
-        if self.action in ['assign', 'reissue_otp']:
+        if self.action in ['assign', 'reissue_otp', 'cancel']:
             return [IsAuthenticated(), IsVerifiedShelter()]
         return [IsAuthenticated()]
+
+    def get_throttles(self):
+        if self.action == 'cancel':
+            self.throttle_scope = 'shelter_cancel'
+        return super().get_throttles()
 
     def get_shelter_profile(self):
         user = self.request.user
@@ -210,6 +217,37 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
             return Response(result, status=status.HTTP_200_OK)
         except APIException as e:
             return Response({"detail": e.detail}, status=e.status_code)
+
+    @extend_schema(
+        summary="Cancel delivery task",
+        description="Verified shelter or platform administrator cancels an assigned or out_for_delivery task when no cash has been collected.",
+        responses={
+            200: DeliveryCancelResponseSerializer,
+            400: OpenApiResponse(description="Invalid delivery status for cancellation"),
+            403: OpenApiResponse(description="Unauthorized or foreign shelter"),
+            409: OpenApiResponse(description="Cash already collected")
+        }
+    )
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, *args, **kwargs):
+        delivery = self.get_object()
+        user = request.user
+        if not (user.is_staff or user.is_superuser or user.role == 'admin'):
+            shelter = self.get_shelter_profile()
+            if not delivery.application or not delivery.application.pet or delivery.application.pet.shelter_id != shelter.id:
+                return Response({"detail": "Delivery belongs to a different shelter."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            result = cancel_delivery_by_shelter(delivery, user)
+            return Response(result, status=status.HTTP_200_OK)
+        except ConflictError as e:
+            if isinstance(e.detail, dict):
+                return Response(e.detail, status=status.HTTP_409_CONFLICT)
+            return Response({"detail": str(e.detail)}, status=status.HTTP_409_CONFLICT)
+        except ValidationError as e:
+            if isinstance(e.detail, dict):
+                return Response(e.detail, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": str(e.detail)}, status=status.HTTP_400_BAD_REQUEST)
 
     @extend_schema(responses={200: DriverListSerializer(many=True)})
     @action(detail=False, methods=['get'], url_path='drivers')

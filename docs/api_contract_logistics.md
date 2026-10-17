@@ -404,6 +404,35 @@ This document specifies the canonical and legacy API contracts for the pet deliv
   - `200 OK`: Event processed or safely ignored.
   - `400 Bad Request`: Invalid signature or malformed payload.
 
+### 1.1 Cancel Delivery Task
+- **URL**: `POST /api/v1/shelter/deliveries/{id}/cancel/` (Legacy alias: `POST /api/deliveries/{id}/cancel/`)
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: `IsVerifiedShelter` required (role `shelter` with `shelter_profile.is_verified=True` owning the delivery, or platform administrator)
+- **Rate Limit**: 20 requests / minute (`shelter_cancel`)
+- **Preconditions & Rules**:
+  - Allowed strictly when `status in ('assigned', 'out_for_delivery')` AND `cash_collected == 0`.
+  - If `cash_collected > 0`: Returns HTTP `409 Conflict` `{"code": "cash_collected", "detail": "Cannot cancel delivery after cash has been collected. Please reconcile with driver."}`.
+  - Idempotent: If delivery is already in `'failed'` status, returns HTTP `200 OK` with `{"idempotent": true}` without side effects.
+  - State Transitions upon cancellation:
+    - `delivery.status` transitions to `'failed'`.
+    - `driver.is_available` is reset to `True` (driver freed).
+    - `pet.status` remains `'pending'`.
+    - `application.status` remains `'approved'`.
+    - In-app notification and email dispatched to the adopter via `transaction.on_commit`.
+- **Responses**:
+  - `200 OK`: Delivery cancelled successfully (or already failed).
+    ```json
+    {
+      "detail": "Delivery cancelled successfully.",
+      "delivery_id": "5fa85f64-5717-4562-b3fc-2c963f66afa8",
+      "status": "failed",
+      "idempotent": false
+    }
+    ```
+  - `400 Bad Request`: Delivery is in an un-cancellable state (e.g. `delivered`).
+  - `403 Forbidden`: Requesting user is not a verified shelter, or delivery belongs to a different shelter (`{"code": "shelter_not_verified"}` or `{"detail": "Delivery belongs to a different shelter."}`).
+  - `409 Conflict`: Cash has already been collected by driver (`{"code": "cash_collected"}`).
+
 ---
 
 ## Operational Notes
