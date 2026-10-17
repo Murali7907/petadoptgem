@@ -509,6 +509,103 @@ In `DriverDeliveryViewSet.pickup()` / `verify_pickup_service()`:
 
 ---
 
-*Last updated: 2026-10-15*
+## 9. Milestone 4 — Production Hardening, Validation, API Standards & Operational Hygiene
+
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Milestone 4 approved and finalized.
+
+### 9.1 Task 1: Review 500 Guard
+- **Problem**: In PostgreSQL, the `trg_check_review_eligibility` trigger raises an unhandled database exception when a review is submitted for an application where the delivery is not in `delivered` status (or has no delivery). This surfaces as an internal server error (HTTP 500) instead of a clean, structured client validation response.
+- **Solution**:
+  - Add explicit pre-insert validation in `ReviewCreateAPIView` and `ReviewSerializer`.
+  - Validate:
+    1. Authenticated user is the applicant (`403 Forbidden` if foreign applicant).
+    2. Application is approved/completed and a delivery exists for this application.
+    3. Delivery status is `delivered` (`409 Conflict` or `400 Bad Request` with structured detail message: `"Reviews can only be submitted after delivery is marked as delivered."`).
+    4. Review does not already exist for this application (`400 Bad Request` duplicate review prevention).
+  - Preserve the PostgreSQL database trigger as a defence-in-depth safety rail.
+
+### 9.2 Task 2: Shelter Cancel Delivery
+- **Endpoint**: `POST /api/v1/shelter/deliveries/<id>/cancel/` (and legacy alias).
+- **Permissions**: Verified shelter owning the delivery (`IsVerifiedShelter`) or platform administrator.
+- **Lifecycle & Invariants**:
+  - Allowed strictly from `status in ('assigned', 'out_for_delivery')` AND `cash_collected == 0`.
+  - On cancellation:
+    - Set `delivery.status = 'failed'`.
+    - Free the driver: `driver.is_available = True`.
+    - Pet status remains `'pending'`; application status remains `'approved'`.
+    - Adopter notification dispatched via `transaction.on_commit`.
+  - If `cash_collected > Decimal('0.00')`: refuse with HTTP 409 `{"code": "cash_collected", "detail": "Cannot cancel delivery after cash has been collected. Please reconcile with driver."}`.
+  - Idempotent: If delivery is already `'failed'`, return HTTP 200 OK without side effects.
+- **Report-Only Architecture (SPEC.md)**:
+  - *(a) Refund/Handling Design*:
+    - **Cash collected**: If driver collected cash and delivery is subsequently aborted/failed, money is physically held by the driver. Requires an in-person cash return by driver or shelter dispatch, followed by an offline refund ledger entry (`Payment` with `status='refunded'`).
+    - **Online captured payments**: Captured Razorpay payments for a cancelled/failed delivery must trigger Razorpay Refunds API (`client.payment.refund(payment_id, {'amount': paise})`). A corresponding ledger row (`status='refunded'`) is recorded.
+  - *(b) Shelter Cash-Reconciliation Endpoint & is_cash_settled_with_shelter*:
+    - Shelter manager or admin writes `is_cash_settled_with_shelter = True` when driver physically deposits collected cash at the shelter facility.
+    - Endpoint: `POST /api/v1/shelter/deliveries/<id>/reconcile-cash/`. Body: `{"notes": "Cash verified and deposited in shelter safe"}`.
+  - *(c) Payment Method Selection Lifecycle*:
+    - `apply`: default initialized to `'unset'`.
+    - `assign`: shelter staff can designate `'cod'` or `'online'`.
+    - `create-order`: initiates online checkout and locks application `payment_method` to `'online'`.
+    - Adopter cannot unilaterally switch from `'online'` to `'cod'` once an order is created or paid unless shelter reassigns or cancels the order.
+
+### 9.3 Task 3: Authentication Abuse Protection
+- **Rate Throttling**:
+  - Separate throttle scopes: `auth_login` (10/min default), `auth_register` (5/min default), `auth_refresh` (30/min default).
+  - Rates configured via environment variables with fallback defaults, keyed by client IP for unauthenticated requests.
+- **Token Blacklisting / Logout**:
+  - Endpoint: `POST /api/v1/auth/logout/`.
+  - Accepts `{"refresh": "<refresh_token>"}`.
+  - Blacklists token using `rest_framework_simplejwt.token_blacklist`.
+  - Idempotent: Attempting to log out a blacklisted token returns HTTP 200 OK. Invalid/malformed tokens return HTTP 400 Bad Request.
+
+### 9.4 Task 4: Upload Validation
+- **Pet Images**:
+  - Allowlist: `.jpg`, `.jpeg`, `.png`, `.webp`.
+  - Pillow `Image.verify()` validation to verify genuine image binary contents, disallowing extension mismatches or executable polyglots.
+  - Size limit: from env `PET_IMAGE_MAX_SIZE_BYTES` (default 10 MB).
+- **Medical Documents**:
+  - Allowlist: `.pdf`, `.jpg`, `.jpeg`, `.png`.
+  - Magic byte verification: PDF must begin with `%PDF-`; images verified via Pillow.
+  - Size limit: from env `MEDICAL_DOC_MAX_SIZE_BYTES` (default 15 MB).
+- **Storage**: Standardized via `django.core.files.storage.default_storage`. Content-Type header is untrusted; file signatures dictate validity.
+
+### 9.5 Task 5: Settings & Production Dependency Management
+- **Caches**:
+  - `REDIS_URL` present -> `django.core.cache.backends.redis.RedisCache`.
+  - Absent -> `LocMemCache` if `DEBUG=True`. If `DEBUG=False` without `REDIS_URL`, log warning on startup regarding per-process rate limits (no crash).
+- **Logging**:
+  - Formatter / filter redacts OTPs, tokens, and hashes from logs.
+- **Security Headers & Flags (when DEBUG=False)**:
+  - `SECURE_SSL_REDIRECT`, `SECURE_HSTS_SECONDS`, `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE`, `SECURE_CONTENT_TYPE_NOSNIFF`, `SECURE_REFERRER_POLICY`.
+  - `SECURE_PROXY_SSL_HEADER` enabled conditionally only when `BEHIND_PROXY=True`.
+- **Dependency Locking**:
+  - `requirements.txt` retained as loose list.
+  - `requirements.lock.txt` generated with exact installed versions (UTF-8 without BOM).
+
+### 9.6 Task 6: OpenAPI Schema & Route Collision Resolution
+- **OpenAPI Schema Errors**:
+  - Fix 4 schema errors in `apps/adoptions/views.py` (`AdoptionStatusUpdateView`, `CustomerApplicationApplyView`, `CustomerMyApplicationsView`, `ShelterApplicationsListView`) using `@extend_schema`.
+- **Collision & Legacy Hook**:
+  - Add `SPECTACULAR_SETTINGS['PREPROCESSING_HOOKS']` to filter schema generation to canonical `/api/v1/` routes only, eliminating `operationId` collisions without breaking runtime URL routing.
+  - Target: 0 errors, 0 collisions.
+
+### 9.7 Task 7: Stale Schema File & Trigger Audit
+- Audit PostgreSQL database `pg_trigger` for `trg_sync_pet_status`.
+- Document trigger impact on `Pet.status` transitions.
+- Archive `backend/schema.sql` to `docs/legacy/schema.sql.old` with deprecation disclaimer.
+
+### 9.8 Task 8: Medical Records Visibility Security Options (Report Only)
+- Analysis of 3 options:
+  1. *Public (Status Quo)*: Anonymous access to records & documents.
+  2. *Authenticated Only*: `IsAuthenticated` required for all medical endpoints.
+  3. *Hybrid*: Public medical metadata; document URLs restricted to authenticated users / approved adopters.
+
+---
+
+*Last updated: 2026-10-17*
+
 
 

@@ -22,7 +22,21 @@ class ReviewCreateAPIView(generics.CreateAPIView):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
-        review = serializer.save()
+        try:
+            review = serializer.save()
+        except Exception as exc:
+            from django.db import DatabaseError, IntegrityError
+            if isinstance(exc, (DatabaseError, IntegrityError)):
+                err_msg = str(exc)
+                if 'Reviews can only be submitted for completed deliveries' in err_msg:
+                    return Response({
+                        "error": "Reviews can only be submitted for completed deliveries."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                if 'duplicate key' in err_msg.lower() or 'unique constraint' in err_msg.lower():
+                    return Response({
+                        "error": "A review has already been submitted for this application."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+            raise exc
         response_data = AdoptionReviewDetailSerializer(review).data
         return Response({
             "message": "Review submitted successfully.",

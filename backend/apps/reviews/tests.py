@@ -119,7 +119,7 @@ class AdoptionReviewAPITestCase(TestCase):
         response = self.client.post('/api/reviews/', data=payload, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_submit_review_unauthorized_user(self):
+    def test_submit_review_foreign_applicant_forbidden(self):
         self.client.force_authenticate(user=self.other_customer)
         payload = {
             'application_id': str(self.application.public_id),
@@ -128,8 +128,9 @@ class AdoptionReviewAPITestCase(TestCase):
         }
         response = self.client.post('/api/reviews/', data=payload, format='json')
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertNotEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    def test_submit_review_delivery_not_completed(self):
+    def test_submit_review_delivery_not_delivered_clean_400(self):
         self.delivery.status = 'out_for_delivery'
         self.delivery.save()
 
@@ -141,3 +142,20 @@ class AdoptionReviewAPITestCase(TestCase):
         }
         response = self.client.post('/api/reviews/', data=payload, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertNotEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertIn('Reviews can only be submitted for completed deliveries', str(response.data))
+
+    def test_submit_review_no_delivery_row_clean_400(self):
+        self.delivery.delete()
+
+        self.client.force_authenticate(user=self.customer)
+        payload = {
+            'application_id': str(self.application.public_id),
+            'shelter_rating': 5,
+            'driver_rating': 5
+        }
+        response = self.client.post('/api/reviews/', data=payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertNotEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertIn('Reviews can only be submitted for completed deliveries', str(response.data))
+

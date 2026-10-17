@@ -43,10 +43,12 @@ class ReviewCreateSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         app = attrs['application_id']
         from rest_framework.exceptions import PermissionDenied
+        from apps.logistics.models import PetDelivery
+
         if not request or not request.user or app.applicant_id != request.user.id:
             raise PermissionDenied("You are not authorized to review this application.")
 
-        delivery = getattr(app, 'delivery', None)
+        delivery = PetDelivery.objects.filter(application=app).first()
         if not delivery or delivery.status != 'delivered':
             raise serializers.ValidationError("Reviews can only be submitted for completed deliveries.")
 
