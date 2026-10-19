@@ -593,19 +593,58 @@ In `DriverDeliveryViewSet.pickup()` / `verify_pickup_service()`:
   - Target: 0 errors, 0 collisions.
 
 ### 9.7 Task 7: Stale Schema File & Trigger Audit
-- Audit PostgreSQL database `pg_trigger` for `trg_sync_pet_status`.
-- Document trigger impact on `Pet.status` transitions.
-- Archive `backend/schema.sql` to `docs/legacy/schema.sql.old` with deprecation disclaimer.
+- **Audit Result (pg_trigger inspection)**:
+  - Non-internal triggers present in database:
+    1. `trg_sync_pet_status` on `adoption_applications`
+    2. `trg_update_application_timestamp` on `adoption_applications`
+    3. `trg_check_review_eligibility` on `adoption_reviews`
+  - `trg_sync_pet_status` **EXISTS** (`True`) in the PostgreSQL development database.
+- **Trigger Behavior on `Pet.status`**:
+  - Attached procedure: `sync_pet_status_on_application_change()`
+  - Execution rules:
+    - `NEW.status = 'approved'`: Executes `UPDATE pets SET status = 'pending' WHERE id = NEW.pet_id;`.
+    - `NEW.status = 'completed'`: Executes `UPDATE pets SET status = 'adopted' WHERE id = NEW.pet_id;`.
+    - `NEW.status = 'rejected'`: Checks whether any other active approved or completed application exists for this pet (`WHERE pet_id = NEW.pet_id AND status IN ('approved', 'completed') AND id <> NEW.id`). If none exist, executes `UPDATE pets SET status = 'available' WHERE id = NEW.pet_id;`.
+    - `NEW.status = 'cancelled'`: The trigger does **not** catch `'cancelled'`, leaving `Pet.status` transitions on application cancellation to Django application code.
+- **Legacy Schema Archive**:
+  - `backend/schema.sql` has been relocated to `docs/legacy/schema.sql.old`.
+  - A prominent header comment was added specifying that `schema.sql.old` is outdated and Django migrations (`apps/*/migrations/`) are the definitive source of truth.
 
-### 9.8 Task 8: Medical Records Visibility Security Options (Report Only)
-- Analysis of 3 options:
-  1. *Public (Status Quo)*: Anonymous access to records & documents.
-  2. *Authenticated Only*: `IsAuthenticated` required for all medical endpoints.
-  3. *Hybrid*: Public medical metadata; document URLs restricted to authenticated users / approved adopters.
+### 9.8 Task 8: Medical Records Visibility Security Options (Report Only - No Code)
+Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medical-records/`) and expose binary document links (`document_url`). Below are the three architectural options, trade-offs, and required test suites:
+
+#### Option 1: Public Access (Status Quo)
+- **Description**: Anyone (anonymous or authenticated) can view medical history, vaccination logs, and download medical certificates.
+- **Trade-offs**:
+  - *Pros*: Maximum transparency for potential adopters evaluating pet health before initiating an application.
+  - *Cons*: PII and shelter veterinarian details on medical certificates are publicly scrapable without rate limits or access tracking.
+- **Required Tests**:
+  - `GET /api/v1/pets/<id>/medical-records/` as anonymous user returns 200 OK with `document_url`.
+  - `GET /api/v1/pets/<id>/medical-records/` with invalid pet ID returns 404.
+
+#### Option 2: Logged-in Only (`IsAuthenticated`)
+- **Description**: Medical records endpoint requires valid JWT authentication. Anonymous users are rejected with 401 Unauthorized.
+- **Trade-offs**:
+  - *Pros*: Completely stops anonymous scraping and crawling of pet health histories and documents.
+  - *Cons*: Users browsing pets without an account cannot verify vaccination status before creating an account.
+- **Required Tests**:
+  - `GET /api/v1/pets/<id>/medical-records/` as anonymous user returns 401 Unauthorized.
+  - `GET /api/v1/pets/<id>/medical-records/` as authenticated user (any role) returns 200 OK with medical list and `document_url`.
+
+#### Option 3: Hybrid — Public Metadata, Authenticated Document Links
+- **Description**: Anonymous and authenticated users can view medical record summaries (`record_type`, `title`, `description`, `administered_date`), but `document_url` is `None` (or omitted) for anonymous users. Only authenticated users with an active application or verified shelter owners receive signed/resolved `document_url`.
+- **Trade-offs**:
+  - *Pros*: Balances adopter pre-application transparency with document confidentiality and abuse prevention.
+  - *Cons*: Slightly increased serializer complexity (`SerializerMethodField` checking `request.user.is_authenticated`).
+- **Required Tests**:
+  - `GET /api/v1/pets/<id>/medical-records/` as anonymous returns 200 OK; each item has `document_url: null`.
+  - `GET /api/v1/pets/<id>/medical-records/` as authenticated user returns 200 OK; items contain valid `document_url`.
+  - Verification that shelter owner and applicant can download document while anonymous crawler cannot access direct download URL.
 
 ---
 
-*Last updated: 2026-10-17*
+*Last updated: 2026-10-19*
+
 
 
 

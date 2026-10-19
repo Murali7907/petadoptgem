@@ -1,3 +1,11 @@
+-- =============================================================================
+-- LEGACY / OUTDATED SCHEMA ARCHIVE
+-- =============================================================================
+-- WARNING: This file is outdated and preserved for historical reference only.
+-- Django migrations (in apps/*/migrations/) are the definitive source of truth.
+-- DO NOT EXECUTE THIS FILE TO INITIALIZE OR MIGRATE THE DATABASE.
+-- =============================================================================
+
 -- PostgreSQL Schema DDL Script for Pet Adoption System
 -- Database: pet_adoption
 
