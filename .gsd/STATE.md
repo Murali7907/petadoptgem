@@ -1,64 +1,76 @@
 ---
-updated: 2026-10-15T12:10:00+05:30
+updated: 2026-10-19T17:35:00+05:30
 ---
 
-# Project State: Milestone 3 — Milestone 2 Gaps, Payment Guards, COD Cash Collection & Adopter Email Integrity
+# Project State: Milestone 4 — Production Hardening, Validation, API Standards & Operational Hygiene
 
 ## Current Position
 
-**Milestone:** milestone-3-gaps-and-cod-cash-collection
-**Phase:** Complete (Tasks 1, 2, 3, 4 Completed, Tested & Committed)
+**Milestone:** milestone-4-hardening-and-operational-hygiene
+**Phase:** Complete (All Tasks 1 through 8 Completed, Verified & Committed)
 **Status:** completed
 **Active Plan:** Milestone Complete
 
-## Milestone 3 Tasks Completed
+## Milestone 4 Tasks Completed
 
-- **Task 1: Milestone 2 Gaps & Hardened Authorization Matrix** (`a0a7c9d`):
-  - Audited `IsVerifiedShelter` across all shelter write views and viewsets on both canonical and legacy routes (`{"code": "shelter_not_verified"}`).
-  - Fixed public pet detail endpoint by public_id/id: returns 404 for pets belonging to unverified shelters when requested by anonymous users or other customers (owner shelter and admin still see it).
-  - Expanded authorization matrix in `apps/accounts/test_authorization_matrix.py` covering:
-    - Notification read/read-all cross-user boundary isolation (404/403).
-    - Application detail GET/PATCH by cross-customer isolation (404/403).
-    - Review creation on someone else's application (403).
-    - Tracking endpoint access by unrelated user (403).
-    - Location ping by unassigned driver (403).
-  - Audited Milestone 2 URL aliases: removed unreferenced aliases (`/api/tracking/<id>/`, `/api/v1/tracking/<id>/`, `/api/reviews/create/`, `/api/v1/shelter/drivers/create/`) and repointed all tests and docs to canonical routes.
-  - Added standalone tests verifying correctly signed webhooks without `Authorization` header return 200, and invalid signatures return 400.
+- **Task 1: Review 500 Guard** (`937a3e9`):
+  - Pre-insert validation in `ReviewCreateSerializer` and `ReviewCreateAPIView`.
+  - Catches database-level trigger exceptions (`trg_check_review_eligibility`) gracefully, mapping them to 400 clean response.
+  - Tests verify: non-delivered delivery (400), non-existent delivery (400), duplicate review (400), foreign applicant (403).
+  - App test summary: `Ran 5 tests in 14.945s. OK.`
 
-- **Task 2: Pickup Online Payment Guard** (`054d532`):
-  - Documented payment method lifecycle: `apply` defaults to `'unset'`; `assign` sets optional payment method; `create-order` transitions `'unset'`/`'online'` to `'online'`; `'unset'` with `total_amount > 0` blocks pickup until method selected.
-  - Implemented `is_payment_satisfied` and `check_pickup_payment_guard` in `apps/logistics/services.py`.
-  - Enforced gate at pickup verification: `total_amount == 0` allowed; `cod` allowed; `online` allowed only if a captured payment exists with amount >= total in paise, else 409 `{"code": "payment_required"}`; `unset` with total > 0 returns 409 `{"code": "payment_method_required"}`.
-  - Verified failed payment check consumes 0 OTP attempts, and capturing online payment after 409 allows pickup to succeed.
-  - Reused `is_payment_satisfied` helper inside `resolve_delivery_payment_status`.
+- **Task 2: Shelter Cancel Delivery** (`1421ad0`):
+  - Added `POST /api/v1/shelter/deliveries/<id>/cancel/` with `throttle_scope = 'shelter_cancel'`.
+  - Restricted to verified owning shelter (`IsVerifiedShelter`) or platform admin.
+  - Invariants: allowed strictly from `assigned` or `out_for_delivery` AND `cash_collected == 0`.
+  - Sets delivery to `failed`, frees the driver, retains pet in `pending` and application in `approved`, sends adopter notification on transaction commit.
+  - Blocks cancellation if `cash_collected > 0` with 409 `{"code": "cash_collected"}`. Idempotent for already-failed deliveries.
+  - Documented in `docs/api_contract_logistics.md`.
+  - App test summary: `Ran 88 tests in 223.518s. OK.`
 
-- **Task 3: Cash On Delivery (COD) Collection & Verification** (`4ea2a72`):
-  - Created `POST /api/v1/delivery/tasks/<id>/collect-cash/` (and legacy alias `/api/deliveries/<id>/collect-cash/`) with `throttle_scope = 'otp_verify'`.
-  - Enforced `select_for_update` under `transaction.atomic()`: validates `out_for_delivery` (409), `payment_method == 'cod'` (400), `total_amount > 0` (400), exact remaining balance check (400 with `remaining_amount`), idempotent return if already collected.
-  - On success: updates `cash_collected`, creates exactly one `Payment` ledger row (`method='cod'`, `status='captured'`), and updates `application.payment_status='paid'`.
-  - Enforced doorstep payment gate: COD with total > 0 and `cash_collected < total_amount` returns 409 `{"code": "cash_not_collected"}` before OTP verification and consumes 0 attempts.
-  - Blocked drivers from marking deliveries as `'failed'` once `cash_collected > 0` (409 with shelter contact instructions). Documented that failed deliveries leave pet in `'pending'` and application in `'approved'`.
-  - Added multi-threaded concurrency testing proving at most one Payment row is recorded and doorstep verification gates safely.
+- **Task 3: Auth Abuse Protection** (`1ade1f4`):
+  - Added rate throttling for `auth_login` (10/min), `auth_register` (5/min), and `auth_refresh` (30/min), overridable via env.
+  - Added `POST /api/v1/auth/logout/` blacklisting refresh tokens; idempotent for blacklisted tokens (200), rejects invalid tokens (400).
+  - App test summary: `Ran 44 tests in 134.821s. OK.`
 
-- **Task 4: Adopter Email Integrity & Delivery Assignment Safety** (`5fa5d81`):
-  - Read-only dev database inspection: found exactly 1 user (`admin123`) with empty email and 0 duplicate emails.
-  - Added migration `0006_unique_lower_email_non_empty` containing data-fix step `deduplicate_existing_emails` followed by database `UniqueConstraint(Lower('email'), condition=~Q(email=''), name='unique_lower_email_non_empty')`.
-  - Enforced non-empty, valid, case-insensitive unique email in `UserRegistrationSerializer` and `DriverCreateSerializer`.
-  - Added gate in `assign_delivery_task`: refuses with 409 `{"code": "adopter_email_missing"}` when adopter has no email.
-  - Reissue response detail message accurately reflects outcome: does NOT claim "emailed to adopter" when email dispatch fails (`email_dispatched=False`).
-  - Updated API contract documentation in `docs/api_contract_logistics.md`.
-  - All test suites passing across all 5 apps.
+- **Task 4: Upload Validation** (`0c47615`):
+  - Validates pet image binary signatures via Pillow `Image.verify()` and format matching (`.jpg`, `.jpeg`, `.png`, `.webp`), 10 MB limit.
+  - Validates medical document content signatures (`%PDF-` for PDFs, Pillow for images), 15 MB limit.
+  - Rejects renamed executables/text files with 400. Enforces `default_storage` only.
+  - App test summary: `Ran 34 tests in 47.787s. OK.`
+
+- **Task 5: Settings and Dependencies** (`825996d`):
+  - `CACHES`: Redis when `REDIS_URL` is set; LocMemCache when `DEBUG=True`; startup warning when `DEBUG=False` without Redis.
+  - `LOGGING`: Console handler with level from `LOG_LEVEL` (default `INFO`) and `MaskSensitiveDataFilter`/`MaskSensitiveFormatter` redacting OTPs, tokens, and secrets.
+  - Production security headers when `DEBUG=False`: `SECURE_SSL_REDIRECT`, `SECURE_HSTS_SECONDS`, `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE`, `SECURE_CONTENT_TYPE_NOSNIFF`, `SECURE_REFERRER_POLICY`, optional `SECURE_PROXY_SSL_HEADER`.
+  - Pinned dependencies to `requirements.lock.txt` (UTF-8 without BOM).
+  - Updated `backend/.env.example` with all new variables.
+  - Deploy check achieves 0 security warnings (`Ran 46 tests in 151.980s. OK.`).
+
+- **Task 6: OpenAPI and Routes** (`5d235a9`):
+  - Resolved 4 schema errors in `apps/adoptions/views.py` with `@extend_schema`.
+  - Implemented `SPECTACULAR_SETTINGS['PREPROCESSING_HOOKS']` in `backend/config/openapi.py` filtering to canonical `/api/v1/` routes.
+  - Eliminated all operationId collisions (before: 26+, after: 0). Schema errors: 0.
+  - App test summary: `Ran 14 tests in 79.614s. OK.`
+
+- **Task 7: Stale Schema File and Trigger Audit** (`49aadf2`):
+  - Audited `pg_trigger` in PostgreSQL dev database: `trg_sync_pet_status` exists on `adoption_applications` calling `sync_pet_status_on_application_change()`.
+  - Relocated `backend/schema.sql` to `docs/legacy/schema.sql.old` with deprecation disclaimer.
+  - Documented trigger lifecycle behavior in `.gsd/SPEC.md`.
+
+- **Task 8: Medical Records Visibility Security Options (Report Only)**:
+  - Documented three visibility architectures (Public, Logged-in only, Hybrid) and their respective test suites in `.gsd/SPEC.md` and final report.
 
 ## Active Decisions
 
 | Decision | Choice | Made | Affects |
 |---|---|---|---|
-| Pickup Payment Guard | Enforce online capture or cod before pickup OTP verification; consumes 0 attempts | 2026-10-15 | Driver pickup handoff |
-| COD Cash Collection | Driver collects cash prior to doorstep OTP check; updates ledger atomically; doorstep verification refuses with 409 `cash_not_collected` if balance remaining | 2026-10-15 | COD doorstep delivery |
-| Adopter Email Constraint | Partial unique constraint on `Lower(email)` where `email != ''`; registration requires valid non-empty unique email; assignment refuses without email | 2026-10-16 | User registration & delivery assignment |
-| Reissue Outcome Reporting | Response message and `email_dispatched` flag strictly match dispatch outcome without false claims | 2026-10-16 | Reissue OTP API |
+| Review 500 Guard | Explicit application & delivery status check before review insert | 2026-10-17 | Review submission |
+| Shelter Delivery Cancellation | Allowed from assigned/out_for_delivery with cash_collected == 0; frees driver; leaves pet pending | 2026-10-17 | Logistics delivery management |
+| Auth Throttling & Logout | Scoped rate limits per endpoint; token blacklist on logout | 2026-10-17 | Auth endpoints |
+| Upload Validation | Binary magic byte verification (Pillow / PDF header) ignoring Content-Type | 2026-10-17 | Pet image & medical uploads |
+| OpenAPI Schema Cleaning | drf-spectacular preprocessing hook keeps canonical /api/v1/ endpoints, resolving collisions | 2026-10-19 | API documentation & OpenAPI schema |
 
 ## Blockers
 
 *None.*
-
