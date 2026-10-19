@@ -8,6 +8,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from decimal import Decimal
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_field, OpenApiTypes
 from .models import PetDelivery, DeliveryLocationPing, Payment
 from apps.accounts.models import DeliveryProfile
 from apps.adoptions.models import AdoptionApplication
@@ -68,6 +69,7 @@ class DeliveryDriverTaskSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.CharField())
     def get_destination_address(self, obj):
         if obj.application:
             app = obj.application
@@ -83,31 +85,37 @@ class DeliveryDriverTaskSerializer(serializers.ModelSerializer):
                 return app.applicant.address
         return "N/A"
 
+    @extend_schema_field(serializers.CharField())
     def get_delivery_address(self, obj):
         if obj.application:
             return obj.application.delivery_address or obj.application.dropoff_address or ""
         return ""
 
+    @extend_schema_field(serializers.CharField())
     def get_delivery_city(self, obj):
         if obj.application:
             return obj.application.delivery_city or ""
         return ""
 
+    @extend_schema_field(serializers.CharField())
     def get_delivery_pincode(self, obj):
         if obj.application:
             return obj.application.delivery_pincode or ""
         return ""
 
+    @extend_schema_field(serializers.FloatField(allow_null=True))
     def get_destination_latitude(self, obj):
         if obj.application:
-            return obj.application.destination_latitude if obj.application.destination_latitude is not None else obj.application.customer_latitude
+            return float(obj.application.destination_latitude) if obj.application.destination_latitude is not None else (float(obj.application.customer_latitude) if obj.application.customer_latitude is not None else None)
         return None
 
+    @extend_schema_field(serializers.FloatField(allow_null=True))
     def get_destination_longitude(self, obj):
         if obj.application:
-            return obj.application.destination_longitude if obj.application.destination_longitude is not None else obj.application.customer_longitude
+            return float(obj.application.destination_longitude) if obj.application.destination_longitude is not None else (float(obj.application.customer_longitude) if obj.application.customer_longitude is not None else None)
         return None
 
+    @extend_schema_field(serializers.CharField())
     def get_customer_phone(self, obj):
         if obj.application:
             if obj.application.contact_phone:
@@ -116,12 +124,14 @@ class DeliveryDriverTaskSerializer(serializers.ModelSerializer):
                 return obj.application.applicant.phone
         return ""
 
+    @extend_schema_field(serializers.CharField())
     def get_customer_name(self, obj):
         if obj.application and obj.application.applicant:
             user = obj.application.applicant
             return user.get_full_name() or user.username
         return ""
 
+    @extend_schema_field(OpenApiTypes.OBJECT)
     def get_pet_summary(self, obj):
         if obj.application and obj.application.pet:
             pet = obj.application.pet
@@ -158,6 +168,7 @@ class DeliveryCustomerSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(OpenApiTypes.OBJECT)
     def get_driver_details(self, obj):
         driver = obj.driver or obj.delivery_partner
         if driver and driver.user:
@@ -170,6 +181,7 @@ class DeliveryCustomerSerializer(serializers.ModelSerializer):
             }
         return None
 
+    @extend_schema_field(OpenApiTypes.OBJECT)
     def get_pet_summary(self, obj):
         if obj.application and obj.application.pet:
             pet = obj.application.pet
@@ -212,16 +224,19 @@ class ShelterDeliverySerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_driver_name(self, obj):
         if obj.driver and obj.driver.user:
             return obj.driver.user.get_full_name() or obj.driver.user.username
         return None
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_customer_name(self, obj):
         if obj.application and obj.application.applicant:
             return obj.application.applicant.get_full_name() or obj.application.applicant.username
         return None
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_pet_name(self, obj):
         if obj.application and obj.application.pet:
             return obj.application.pet.name
@@ -248,6 +263,7 @@ class DriverListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.CharField())
     def get_name(self, obj):
         return obj.user.get_full_name() or obj.user.username
 

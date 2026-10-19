@@ -7,6 +7,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_field
 from django.db import IntegrityError
 from .models import AdoptionApplication, AdoptionReview
 from apps.pets.models import Pet
@@ -18,7 +19,9 @@ class PetSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = Pet
         fields = ['public_id', 'name', 'species', 'breed', 'adoption_fee', 'status', 'primary_image']
+        ref_name = 'AdoptionPetSummary'
 
+    @extend_schema_field(serializers.URLField(allow_null=True))
     def get_primary_image(self, obj):
         primary = obj.images.filter(is_primary=True).first()
         if primary:
@@ -263,6 +266,7 @@ class AdoptionReviewDetailSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.CharField())
     def get_reviewer_name(self, obj):
         if obj.reviewer:
             return obj.reviewer.get_full_name() or obj.reviewer.username

@@ -7,6 +7,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_field, OpenApiTypes
 from .models import Pet, PetImage, PetMedicalRecord, FavoritePet
 from apps.accounts.serializers import ShelterProfileSerializer
 
@@ -50,6 +51,7 @@ class PetMedicalRecordSerializer(serializers.ModelSerializer):
         fields = ['id', 'public_id', 'title', 'description', 'vet_name', 'record_date', 'administered_date', 'document', 'document_url', 'created_at']
         read_only_fields = ['id', 'public_id', 'created_at']
 
+    @extend_schema_field(serializers.URLField(allow_null=True))
     def get_document_url(self, obj):
         return obj.document
 
@@ -104,7 +106,7 @@ class PetMedicalRecordSerializer(serializers.ModelSerializer):
 
 class PetListSerializer(serializers.ModelSerializer):
     shelter_name = serializers.ReadOnlyField(source='shelter.organization_name')
-    age_display = serializers.ReadOnlyField()
+    age_display = serializers.CharField(read_only=True)
     primary_image = serializers.SerializerMethodField()
 
     class Meta:
@@ -131,6 +133,7 @@ class PetListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'public_id', 'created_at']
 
+    @extend_schema_field(serializers.URLField(allow_null=True))
     def get_primary_image(self, obj):
         all_images = obj.images.all()
         primary = next((img for img in all_images if img.is_primary), None)
@@ -149,7 +152,7 @@ class PetDetailSerializer(serializers.ModelSerializer):
     shelter = ShelterProfileSerializer(read_only=True)
     images = PetImageSerializer(many=True, read_only=True)
     medical_records = PetMedicalRecordSerializer(many=True, read_only=True)
-    age_display = serializers.ReadOnlyField()
+    age_display = serializers.CharField(read_only=True)
     primary_image = serializers.SerializerMethodField()
 
     class Meta:
@@ -177,6 +180,7 @@ class PetDetailSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'public_id', 'created_at']
 
+    @extend_schema_field(serializers.URLField(allow_null=True))
     def get_primary_image(self, obj):
         primary = obj.images.filter(is_primary=True).first()
         if primary:
@@ -239,6 +243,7 @@ class PublicPetListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.URLField(allow_null=True))
     def get_primary_image(self, obj):
         primary = obj.images.filter(is_primary=True).first()
         if primary:
@@ -251,11 +256,13 @@ class PublicPetListSerializer(serializers.ModelSerializer):
         first_img = obj.images.first()
         return first_img.image_url if first_img else None
 
+    @extend_schema_field(serializers.CharField())
     def get_shelter_city(self, obj):
         if obj.shelter:
             return getattr(obj.shelter, 'city', '') or obj.shelter.pickup_address
         return ''
 
+    @extend_schema_field(serializers.FloatField(allow_null=True))
     def get_distance_km(self, obj):
         if hasattr(obj, 'distance_meters') and obj.distance_meters is not None:
             return round(float(obj.distance_meters) / 1000.0, 2)
@@ -291,6 +298,7 @@ class PublicPetDetailSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.URLField(allow_null=True))
     def get_primary_image(self, obj):
         primary = obj.images.filter(is_primary=True).first()
         if primary:
@@ -303,6 +311,7 @@ class PublicPetDetailSerializer(serializers.ModelSerializer):
         first_img = obj.images.first()
         return first_img.image_url if first_img else None
 
+    @extend_schema_field(OpenApiTypes.OBJECT)
     def get_medical_overview(self, obj):
         records = obj.medical_records.all()
         return {
@@ -317,6 +326,7 @@ class PublicPetDetailSerializer(serializers.ModelSerializer):
             ]
         }
 
+    @extend_schema_field(OpenApiTypes.OBJECT)
     def get_shelter(self, obj):
         if not obj.shelter:
             return None
@@ -330,6 +340,7 @@ class PublicPetDetailSerializer(serializers.ModelSerializer):
             'phone': obj.shelter.user.phone if obj.shelter.user else '',
         }
 
+    @extend_schema_field(serializers.FloatField(allow_null=True))
     def get_distance_km(self, obj):
         if hasattr(obj, 'distance_meters') and obj.distance_meters is not None:
             return round(float(obj.distance_meters) / 1000.0, 2)
@@ -338,7 +349,7 @@ class PublicPetDetailSerializer(serializers.ModelSerializer):
 
 class PetSummarySerializer(serializers.ModelSerializer):
     shelter_name = serializers.ReadOnlyField(source='shelter.organization_name')
-    age_display = serializers.ReadOnlyField()
+    age_display = serializers.CharField(read_only=True)
     primary_image = serializers.SerializerMethodField()
 
     class Meta:
@@ -363,6 +374,7 @@ class PetSummarySerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.URLField(allow_null=True))
     def get_primary_image(self, obj):
         primary = obj.images.filter(is_primary=True).first()
         if primary:

@@ -90,6 +90,7 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
     - GET  /api/v1/shelter/deliveries/drivers/
     - GET  /api/v1/shelter/deliveries/
     """
+    queryset = PetDelivery.objects.none()
     serializer_class = ShelterDeliverySerializer
     permission_classes = [IsAuthenticated]
     lookup_field = 'public_id'

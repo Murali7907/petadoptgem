@@ -142,6 +142,12 @@ SPECTACULAR_SETTINGS = {
     'SERVE_INCLUDE_SCHEMA': False,
     'COMPONENT_SPLIT_REQUEST': True,
     'PREPROCESSING_HOOKS': ['config.openapi.preprocessing_filter_spec_endpoints'],
+    'ENUM_NAME_OVERRIDES': {
+        'PetStatus': 'apps.pets.models.Pet.STATUS_CHOICES',
+        'ApplicationStatus': 'apps.adoptions.models.AdoptionApplication.STATUS_CHOICES',
+        'DeliveryStatus': 'apps.logistics.models.PetDelivery.STATUS_CHOICES',
+        'PaymentStatus': 'apps.logistics.models.PaymentStatus.CHOICES',
+    },
     'SECURITY': [{'jwt_auth': []}],
     'SECURITY_SCHEMES': {
         'jwt_auth': {

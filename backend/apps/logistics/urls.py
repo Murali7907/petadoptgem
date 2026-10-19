@@ -49,12 +49,9 @@ urlpatterns = [
     # POST /api/deliveries/<id>/ping/
     path('<str:id>/ping/', DriverDeliveryViewSet.as_view({'post': 'ping'}), name='delivery-ping'),
     path('<uuid:public_id>/ping/', DriverDeliveryViewSet.as_view({'post': 'ping'}), name='delivery-ping-uuid'),
-    # GET /api/deliveries/<id>/track/ and /tracking/
+    # GET /api/deliveries/<id>/track/
     path('<str:id>/track/', DriverDeliveryViewSet.as_view({'get': 'tracking'}), name='delivery-track'),
     path('<uuid:public_id>/track/', DriverDeliveryViewSet.as_view({'get': 'tracking'}), name='delivery-track-uuid'),
-    path('<str:id>/tracking/', DriverDeliveryViewSet.as_view({'get': 'tracking'}), name='delivery-tracking'),
-    path('tracking/<str:id>/', DriverDeliveryViewSet.as_view({'get': 'tracking'}), name='direct-tracking'),
-    path('tracking/<uuid:public_id>/', DriverDeliveryViewSet.as_view({'get': 'tracking'}), name='direct-tracking-uuid'),
     # POST /api/deliveries/<id>/verify-otp/ & /verify-doorstep/
     path('<str:id>/verify-otp/', DriverDeliveryViewSet.as_view({'post': 'verify_doorstep'}), name='delivery-verify-otp'),
     path('<uuid:public_id>/verify-otp/', DriverDeliveryViewSet.as_view({'post': 'verify_doorstep'}), name='delivery-verify-otp-uuid'),
