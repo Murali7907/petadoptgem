@@ -681,5 +681,49 @@ class AuthAbuseProtectionTests(APITestCase):
         self.assertEqual(res_empty.status_code, status.HTTP_400_BAD_REQUEST)
 
 
+class SettingsAndLoggingTests(APITestCase):
+    def test_mask_sensitive_data_filter_redacts_otp(self):
+        import logging
+        from config.logging_filters import MaskSensitiveDataFilter, MaskSensitiveFormatter
+
+        record = logging.LogRecord(
+            name='test_logger',
+            level=logging.INFO,
+            pathname='test.py',
+            lineno=10,
+            msg='Dispatching doorstep OTP 987654 to customer@example.com with code: 123456 and password=secretpass',
+            args=(),
+            exc_info=None
+        )
+        filt = MaskSensitiveDataFilter()
+        filt.filter(record)
+
+        self.assertNotIn('987654', record.msg)
+        self.assertNotIn('123456', record.msg)
+        self.assertNotIn('secretpass', record.msg)
+        self.assertIn('[REDACTED_OTP]', record.msg)
+
+    def test_mask_sensitive_formatter_redacts_jwt(self):
+        import logging
+        from config.logging_filters import MaskSensitiveFormatter
+
+        jwt_sample = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.do_not_leak_this_sig'
+        record = logging.LogRecord(
+            name='test_logger',
+            level=logging.INFO,
+            pathname='test.py',
+            lineno=20,
+            msg=f'Authorization header: Bearer {jwt_sample}',
+            args=(),
+            exc_info=None
+        )
+        formatter = MaskSensitiveFormatter('%(message)s')
+        formatted = formatter.format(record)
+
+        self.assertNotIn(jwt_sample, formatted)
+        self.assertIn('[REDACTED_TOKEN]', formatted)
+
+
+
 
 

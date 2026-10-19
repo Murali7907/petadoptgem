@@ -114,8 +114,12 @@ class EndToEndContractFlowTestCase(TestCase):
         pet_public_id = res_pet_create.data['public_id']
 
         # 2.2 Upload Pet Image (/api/pets/<id>/images/)
+        import io
+        from PIL import Image
         from django.core.files.uploadedfile import SimpleUploadedFile
-        test_img = SimpleUploadedFile("rocky.jpg", b"fake_image_bytes", content_type="image/jpeg")
+        img_io = io.BytesIO()
+        Image.new('RGB', (10, 10), color='blue').save(img_io, format='JPEG')
+        test_img = SimpleUploadedFile("rocky.jpg", img_io.getvalue(), content_type="image/jpeg")
         res_img = self.client.post(
             f'/api/pets/{pet_public_id}/images/',
             data={'images': [test_img], 'is_primary': 'true'},

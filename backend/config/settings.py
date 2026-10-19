@@ -302,3 +302,102 @@ else:
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ]
+
+# Cache Configuration
+REDIS_URL = os.getenv('REDIS_URL', '').strip()
+if REDIS_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': REDIS_URL,
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'kindheart-locmem-cache',
+        }
+    }
+    if not DEBUG:
+        import logging
+        logging.getLogger('django.security').warning(
+            "REDIS_URL is not set while DEBUG is False. Throttling and caching fall back to LocMemCache (per-process only)."
+        )
+
+# Logging Configuration
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'filters': {
+        'mask_sensitive_data': {
+            '()': 'config.logging_filters.MaskSensitiveDataFilter',
+        },
+    },
+    'formatters': {
+        'standard': {
+            '()': 'config.logging_filters.MaskSensitiveFormatter',
+            'format': '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        },
+    },
+    'handlers': {
+        'console': {
+            'level': LOG_LEVEL,
+            'class': 'logging.StreamHandler',
+            'formatter': 'standard',
+            'filters': ['mask_sensitive_data'],
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': LOG_LEVEL,
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+        'apps': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+    },
+}
+
+# File and Data Upload Limits
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('DATA_UPLOAD_MAX_MEMORY_SIZE', str(10 * 1024 * 1024)))
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv('FILE_UPLOAD_MAX_MEMORY_SIZE', str(15 * 1024 * 1024)))
+
+# Deployment Security Headers (Active when DEBUG is False, individually overridable via env)
+if not DEBUG:
+    SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'True').strip().lower() in ('true', '1', 't', 'yes', 'y')
+    SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '31536000'))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv('SECURE_HSTS_INCLUDE_SUBDOMAINS', 'True').strip().lower() in ('true', '1', 't', 'yes', 'y')
+    SECURE_HSTS_PRELOAD = os.getenv('SECURE_HSTS_PRELOAD', 'True').strip().lower() in ('true', '1', 't', 'yes', 'y')
+    SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', 'True').strip().lower() in ('true', '1', 't', 'yes', 'y')
+    CSRF_COOKIE_SECURE = os.getenv('CSRF_COOKIE_SECURE', 'True').strip().lower() in ('true', '1', 't', 'yes', 'y')
+    SECURE_CONTENT_TYPE_NOSNIFF = os.getenv('SECURE_CONTENT_TYPE_NOSNIFF', 'True').strip().lower() in ('true', '1', 't', 'yes', 'y')
+    SECURE_REFERRER_POLICY = os.getenv('SECURE_REFERRER_POLICY', 'same-origin').strip()
+
+    SECURE_PROXY_SSL_HEADER_ENABLED = os.getenv('SECURE_PROXY_SSL_HEADER_ENABLED', 'False').strip().lower() in ('true', '1', 't', 'yes', 'y')
+    if SECURE_PROXY_SSL_HEADER_ENABLED:
+        header_name = os.getenv('SECURE_PROXY_SSL_HEADER_NAME', 'HTTP_X_FORWARDED_PROTO').strip()
+        header_value = os.getenv('SECURE_PROXY_SSL_HEADER_VALUE', 'https').strip()
+        SECURE_PROXY_SSL_HEADER = (header_name, header_value)
+    else:
+        SECURE_PROXY_SSL_HEADER = None
+else:
+    SECURE_SSL_REDIRECT = False
+    SECURE_HSTS_SECONDS = 0
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+    SECURE_HSTS_PRELOAD = False
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
+    SECURE_CONTENT_TYPE_NOSNIFF = False
+    SECURE_REFERRER_POLICY = 'same-origin'
+    SECURE_PROXY_SSL_HEADER = None
+
