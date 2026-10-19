@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, PermissionDenied, NotFound
+from drf_spectacular.utils import extend_schema
 from .models import AdoptionApplication, AdoptionReview
 from .permissions import IsCustomer, IsApplicationOwner, IsShelterForApplication, IsDeliveredApplicationCustomer
 from .serializers import (
@@ -302,11 +303,16 @@ def resolve_application(identifier):
     return app
 
 
+@extend_schema(
+    request=ApplicationCreateSerializer,
+    responses={201: CustomerApplicationSerializer}
+)
 class CustomerApplicationApplyView(APIView):
     """
     POST /api/adoptions/apply/
     Customer application submission with duplicate checks and distance calculation.
     """
+    serializer_class = ApplicationCreateSerializer
     permission_classes = [permissions.IsAuthenticated, IsCustomer]
 
     def post(self, request):
@@ -316,11 +322,15 @@ class CustomerApplicationApplyView(APIView):
         return Response(CustomerApplicationSerializer(application, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema(
+    responses={200: CustomerApplicationSerializer(many=True)}
+)
 class CustomerMyApplicationsView(APIView):
     """
     GET /api/adoptions/my-applications/
     Returns authenticated customer's application history.
     """
+    serializer_class = CustomerApplicationSerializer
     permission_classes = [permissions.IsAuthenticated, IsCustomer]
 
     def get(self, request):
@@ -328,11 +338,15 @@ class CustomerMyApplicationsView(APIView):
         return Response(CustomerApplicationSerializer(applications, many=True, context={'request': request}).data, status=status.HTTP_200_OK)
 
 
+@extend_schema(
+    responses={200: ShelterApplicationSerializer(many=True)}
+)
 class ShelterApplicationsListView(APIView):
     """
     GET /api/adoptions/shelter-applications/
     Returns applications for pets belonging to the shelter.
     """
+    serializer_class = ShelterApplicationSerializer
     permission_classes = [permissions.IsAuthenticated, IsShelterOwner]
 
     def get(self, request):
@@ -357,11 +371,16 @@ class ShelterApplicationsListView(APIView):
         return Response(ShelterApplicationSerializer(qs, many=True).data, status=status.HTTP_200_OK)
 
 
+@extend_schema(
+    request=ApplicationDecisionSerializer,
+    responses={200: ShelterApplicationSerializer}
+)
 class AdoptionStatusUpdateView(APIView):
     """
     PATCH /api/adoptions/<id>/status/
     Shelter approve/reject action.
     """
+    serializer_class = ApplicationDecisionSerializer
     permission_classes = [permissions.IsAuthenticated, IsVerifiedShelter, IsShelterOwner]
 
     def patch(self, request, id):
@@ -418,5 +437,6 @@ class AdoptionStatusUpdateView(APIView):
 
 
 AdoptionApplicationDetailView = AdoptionStatusUpdateView
+
 
 

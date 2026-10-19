@@ -141,6 +141,7 @@ SPECTACULAR_SETTINGS = {
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
     'COMPONENT_SPLIT_REQUEST': True,
+    'PREPROCESSING_HOOKS': ['config.openapi.preprocessing_filter_spec_endpoints'],
     'SECURITY': [{'jwt_auth': []}],
     'SECURITY_SCHEMES': {
         'jwt_auth': {
