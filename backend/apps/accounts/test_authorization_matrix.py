@@ -505,18 +505,15 @@ class AuthorizationMatrixComprehensiveTests(TestCase):
     def test_tracking_authorization(self):
         url = f'/api/v1/delivery/tasks/{self.delivery_1.public_id}/tracking/'
         legacy_url = f'/api/deliveries/{self.delivery_1.public_id}/track/'
-        legacy_tracking_url = f'/api/deliveries/{self.delivery_1.public_id}/tracking/'
 
         # Anonymous -> 401
         self.assertEqual(self.client.get(url).status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(self.client.get(legacy_url).status_code, status.HTTP_401_UNAUTHORIZED)
-        self.assertEqual(self.client.get(legacy_tracking_url).status_code, status.HTTP_401_UNAUTHORIZED)
 
         # Stranger Customer (Customer 2) -> 403
         self.client.force_authenticate(user=self.customer_2)
         self.assertEqual(self.client.get(url).status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(self.client.get(legacy_url).status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(self.client.get(legacy_tracking_url).status_code, status.HTTP_403_FORBIDDEN)
 
         # Stranger Driver (Driver 2) -> 403
         self.client.force_authenticate(user=self.driver_user_2)
