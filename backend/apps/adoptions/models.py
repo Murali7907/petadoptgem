@@ -66,6 +66,7 @@ class AdoptionApplication(models.Model):
     class Meta:
         db_table = 'adoption_applications'
         managed = True
+        ordering = ['-submitted_at', '-id']
 
     def save(self, *args, **kwargs):
         if not self.dropoff_address and self.delivery_address:
@@ -138,6 +139,7 @@ class AdoptionReview(models.Model):
     class Meta:
         db_table = 'adoption_reviews'
         managed = True
+        ordering = ['-created_at', '-id']
 
     def save(self, *args, **kwargs):
         if not self.rating:

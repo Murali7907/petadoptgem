@@ -48,6 +48,7 @@ class PetDelivery(models.Model):
     class Meta:
         db_table = 'pet_deliveries'
         managed = True
+        ordering = ['-created_at', '-id']
         indexes = [
             models.Index(fields=['status'], name='pet_delivery_status_idx'),
             models.Index(fields=['driver', 'status'], name='pet_delivery_drv_status_idx'),

@@ -485,4 +485,116 @@ class VerifiedShelterAdoptionPolicyTests(APITestCase):
         self.assertEqual(res_rev.data.get('code'), 'shelter_not_verified')
 
 
+class AdoptionPaginationStabilityTests(APITestCase):
+    """
+    Task 10: Verify deterministic ordering and stable pagination
+    without duplicates, gaps, or UnorderedObjectListWarning.
+    """
+    def setUp(self):
+        import warnings
+        from django.core.paginator import UnorderedObjectListWarning
+
+        self.shelter_user = User.objects.create_user(
+            username='pag_shelter',
+            email='pag_shelter@example.com',
+            password='shelterpass123',
+            role='shelter'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user,
+            organization_name='Pagination Rescue Org',
+            pickup_address='789 Stability Way',
+            is_verified=True
+        )
+        self.customer = User.objects.create_user(
+            username='pag_customer',
+            email='pag_customer@example.com',
+            password='customerpass123',
+            role='customer'
+        )
+
+        from datetime import timedelta
+        base_time = timezone.now()
+        self.applications = []
+
+        # Create 18 pets and applications to span 2 pages (PAGE_SIZE = 12)
+        for i in range(18):
+            pet = Pet.objects.create(
+                shelter=self.shelter_profile,
+                name=f"Pet {i:02d}",
+                species='dog',
+                breed='Labrador',
+                age_months=12 + i,
+                adoption_fee=100.00,
+                status='available'
+            )
+            # Alternate timestamps; give some identical timestamps to test tie-breaking on -id
+            submitted_time = base_time - timedelta(minutes=(i // 2) * 10)
+            app = AdoptionApplication.objects.create(
+                pet=pet,
+                applicant=self.customer,
+                living_situation='Apartment',
+                contact_phone='9876543210',
+                delivery_address='100 Pagination Rd',
+                delivery_city='Bengaluru',
+                status='submitted'
+            )
+            # Update auto_now_add submitted_at directly to guarantee exact timestamps
+            AdoptionApplication.objects.filter(id=app.id).update(submitted_at=submitted_time)
+            app.refresh_from_db()
+            self.applications.append(app)
+
+    def test_pagination_two_pages_have_no_duplicates_no_gaps_and_no_warning(self):
+        import warnings
+        from django.core.paginator import UnorderedObjectListWarning
+
+        self.client.force_authenticate(user=self.shelter_user)
+
+        with warnings.catch_warnings(record=True) as caught_warnings:
+            warnings.simplefilter("always")
+
+            # Page 1
+            res_p1 = self.client.get('/api/v1/shelter/applications/?page=1')
+            self.assertEqual(res_p1.status_code, status.HTTP_200_OK)
+            data_p1 = res_p1.data
+
+            # Page 2
+            res_p2 = self.client.get('/api/v1/shelter/applications/?page=2')
+            self.assertEqual(res_p2.status_code, status.HTTP_200_OK)
+            data_p2 = res_p2.data
+
+            # Ensure no UnorderedObjectListWarning was triggered
+            unordered_warnings = [
+                w for w in caught_warnings if issubclass(w.category, UnorderedObjectListWarning)
+            ]
+            self.assertEqual(
+                len(unordered_warnings), 0,
+                f"UnorderedObjectListWarning detected during pagination: {unordered_warnings}"
+            )
+
+        self.assertEqual(data_p1['count'], 18)
+        self.assertEqual(len(data_p1['results']), 12)
+        self.assertEqual(len(data_p2['results']), 6)
+
+        page1_ids = [item['public_id'] for item in data_p1['results']]
+        page2_ids = [item['public_id'] for item in data_p2['results']]
+
+        # 1. No duplicates between page 1 and page 2
+        overlap = set(page1_ids).intersection(set(page2_ids))
+        self.assertEqual(len(overlap), 0, f"Duplicate items across pages: {overlap}")
+
+        # 2. No gaps: union of both pages covers all 18 applications
+        all_paginated_ids = set(page1_ids).union(set(page2_ids))
+        self.assertEqual(len(all_paginated_ids), 18)
+
+        # 3. Deterministic order matches database (-submitted_at, -id)
+        expected_ids = [
+            str(pid) for pid in AdoptionApplication.objects.filter(
+                pet__shelter=self.shelter_profile
+            ).order_by('-submitted_at', '-id').values_list('public_id', flat=True)
+        ]
+        self.assertEqual(page1_ids + page2_ids, expected_ids)
+
+
+
 

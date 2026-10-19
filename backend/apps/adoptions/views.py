@@ -39,12 +39,13 @@ class CustomerApplicationViewSet(mixins.ListModelMixin,
     """
     lookup_field = 'public_id'
     permission_classes = [permissions.IsAuthenticated, IsCustomer]
+    ordering = ['-submitted_at', '-id']
 
     def get_queryset(self):
         user = self.request.user
         if not user.is_authenticated:
             return AdoptionApplication.objects.none()
-        return AdoptionApplication.objects.filter(applicant=user).select_related('pet', 'pet__shelter')
+        return AdoptionApplication.objects.filter(applicant=user).select_related('pet', 'pet__shelter').order_by('-submitted_at', '-id')
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -82,6 +83,7 @@ class ShelterApplicationViewSet(viewsets.ReadOnlyModelViewSet):
     lookup_field = 'public_id'
     permission_classes = [permissions.IsAuthenticated, IsShelterOwner]
     serializer_class = ShelterApplicationSerializer
+    ordering = ['-submitted_at', '-id']
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
@@ -93,7 +95,7 @@ class ShelterApplicationViewSet(viewsets.ReadOnlyModelViewSet):
         if not user.is_authenticated or not hasattr(user, 'shelter_profile'):
             return AdoptionApplication.objects.none()
 
-        qs = AdoptionApplication.objects.filter(pet__shelter=user.shelter_profile).select_related('applicant', 'pet', 'pet__shelter')
+        qs = AdoptionApplication.objects.filter(pet__shelter=user.shelter_profile).select_related('applicant', 'pet', 'pet__shelter').order_by('-submitted_at', '-id')
 
         # Filter by status query param
         app_status = self.request.query_params.get('status')
@@ -253,7 +255,7 @@ class ShelterReviewListView(APIView):
             return Response({"detail": "User is not associated with a shelter profile."}, status=status.HTTP_403_FORBIDDEN)
 
         shelter = request.user.shelter_profile
-        reviews = AdoptionReview.objects.filter(application__pet__shelter=shelter).order_by('-created_at')
+        reviews = AdoptionReview.objects.filter(application__pet__shelter=shelter).order_by('-created_at', '-id')
         avg_score = reviews.aggregate(models.Avg('shelter_rating'))['shelter_rating__avg']
 
         return Response({
@@ -276,7 +278,7 @@ class DeliveryReviewListView(APIView):
             return Response({"detail": "User is not associated with a delivery profile."}, status=status.HTTP_403_FORBIDDEN)
 
         driver = request.user.delivery_profile
-        reviews = AdoptionReview.objects.filter(application__delivery__driver=driver).order_by('-created_at')
+        reviews = AdoptionReview.objects.filter(application__delivery__driver=driver).order_by('-created_at', '-id')
         avg_score = reviews.aggregate(models.Avg('driver_rating'))['driver_rating__avg']
 
         return Response({
@@ -334,7 +336,7 @@ class CustomerMyApplicationsView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsCustomer]
 
     def get(self, request):
-        applications = AdoptionApplication.objects.filter(applicant=request.user).select_related('pet', 'pet__shelter').order_by('-submitted_at')
+        applications = AdoptionApplication.objects.filter(applicant=request.user).select_related('pet', 'pet__shelter').order_by('-submitted_at', '-id')
         return Response(CustomerApplicationSerializer(applications, many=True, context={'request': request}).data, status=status.HTTP_200_OK)
 
 
@@ -353,7 +355,7 @@ class ShelterApplicationsListView(APIView):
         if not hasattr(request.user, 'shelter_profile') or not request.user.shelter_profile:
             return Response({"detail": "User is not associated with a shelter profile."}, status=status.HTTP_403_FORBIDDEN)
 
-        qs = AdoptionApplication.objects.filter(pet__shelter=request.user.shelter_profile).select_related('applicant', 'pet', 'pet__shelter').order_by('-submitted_at')
+        qs = AdoptionApplication.objects.filter(pet__shelter=request.user.shelter_profile).select_related('applicant', 'pet', 'pet__shelter').order_by('-submitted_at', '-id')
         app_status = request.query_params.get('status')
         if app_status:
             qs = qs.filter(status=app_status)

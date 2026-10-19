@@ -93,6 +93,7 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
     queryset = PetDelivery.objects.none()
     serializer_class = ShelterDeliverySerializer
     permission_classes = [IsAuthenticated]
+    ordering = ['-created_at', '-id']
     lookup_field = 'public_id'
 
     def get_permissions(self):
@@ -271,6 +272,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
     serializer_class = DeliveryDriverTaskSerializer
     permission_classes = [IsAuthenticated]
     queryset = PetDelivery.objects.all()
+    ordering = ['-created_at', '-id']
     lookup_field = 'public_id'
 
     def get_object(self):

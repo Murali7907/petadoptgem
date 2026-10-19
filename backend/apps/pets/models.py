@@ -43,6 +43,7 @@ class Pet(models.Model):
     class Meta:
         db_table = 'pets'
         managed = True
+        ordering = ['-created_at', '-id']
 
     def __str__(self):
         return f"{self.name} ({self.get_species_display()} - {self.shelter.organization_name})"
