@@ -61,6 +61,29 @@ updated: 2026-10-19T17:35:00+05:30
 - **Task 8: Medical Records Visibility Security Options (Report Only)**:
   - Documented three visibility architectures (Public, Logged-in only, Hybrid) and their respective test suites in `.gsd/SPEC.md` and final report.
 
+- **Task 9: Schema Quality for Client Generator** (`f304d49`):
+  - Decorated all `SerializerMethodField` methods with `@extend_schema_field` specifying exact primitive and object types (`URLField`, `CharField`, `FloatField`, `OpenApiTypes.OBJECT`).
+  - Added `ref_name = 'AdoptionPetSummary'` to `apps.adoptions.serializers.PetSummarySerializer` preventing component collision with `apps.pets.serializers.PetSummarySerializer`.
+  - Configured `ENUM_NAME_OVERRIDES` in `SPECTACULAR_SETTINGS` for `PetStatus`, `ApplicationStatus`, `DeliveryStatus`, and `PaymentStatus`, eliminating all `Status497Enum`-style collisions.
+  - Set `queryset = PetDelivery.objects.none()` on `ShelterDeliveryViewSet` to remove queryset warning.
+  - Cleaned up unused legacy tracking aliases from `backend/apps/logistics/urls.py`.
+  - Achieved target schema quality: **0 Errors, 0 Warnings, 0 Collisions, 0 Type-Hint Warnings** (down from 42 warnings).
+
+- **Task 10: Stable Pagination** (`f6f1fee`):
+  - Enforced deterministic ordering (`ordering = ['-submitted_at', '-id']` and `['-created_at', '-id']`) across models (`AdoptionApplication`, `AdoptionReview`, `Pet`, `PetDelivery`) and viewsets.
+  - Eliminated `UnorderedObjectListWarning`.
+  - Added `AdoptionPaginationStabilityTests` verifying two consecutive pages contain 0 duplicates and 0 gaps, with deterministic ordering matching database order.
+
+- **Task 11: Test Speed Acceleration** (`afc2dea`):
+  - Profiled `apps.accounts` with `--durations 15`, revealing password hashing (PBKDF2 with 720k iterations) dominated execution (~10.5s per test, 301.9s suite).
+  - Configured test-only fast MD5 password hasher (`django.contrib.auth.hashers.MD5PasswordHasher`) in `settings.py`, enabled strictly when `'test' in sys.argv`, never in production.
+  - Execution speed improvements:
+    - `apps.accounts`: 301.902s -> **4.047s** (75x speedup, 46 tests pass)
+    - `apps.adoptions`: 81.574s -> **1.231s** (66x speedup, 15 tests pass)
+    - `apps.pets`: 98.922s -> **2.397s** (41x speedup, 34 tests pass)
+    - `apps.logistics`: 223.518s -> **9.591s** (23x speedup, 88 tests pass)
+    - `apps.reviews`: 14.945s -> **0.200s** (74x speedup, 5 tests pass)
+
 ## Active Decisions
 
 | Decision | Choice | Made | Affects |
