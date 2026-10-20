@@ -780,6 +780,18 @@ def cancel_delivery_by_shelter(delivery: PetDelivery, user) -> dict:
             "detail": "Cannot cancel delivery after cash has been collected. Please reconcile with driver."
         })
 
+    if delivery.application_id:
+        has_captured_payment = Payment.objects.filter(
+            application_id=delivery.application_id,
+            status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid']
+        ).exists()
+        if has_captured_payment:
+            raise ConflictError({
+                "code": "refund_required",
+                "detail": "Cannot cancel delivery: online payment has already been captured. A refund must be processed before cancellation.",
+                "message": "Cannot cancel delivery: online payment has already been captured. A refund must be processed before cancellation."
+            })
+
     with transaction.atomic():
         locked_delivery = PetDelivery.objects.select_for_update().get(id=delivery.id)
         if locked_delivery.status == 'failed':
@@ -800,6 +812,18 @@ def cancel_delivery_by_shelter(delivery: PetDelivery, user) -> dict:
                 "code": "cash_collected",
                 "detail": "Cannot cancel delivery after cash has been collected. Please reconcile with driver."
             })
+
+        if locked_delivery.application_id:
+            has_captured_payment = Payment.objects.filter(
+                application_id=locked_delivery.application_id,
+                status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid']
+            ).exists()
+            if has_captured_payment:
+                raise ConflictError({
+                    "code": "refund_required",
+                    "detail": "Cannot cancel delivery: online payment has already been captured. A refund must be processed before cancellation.",
+                    "message": "Cannot cancel delivery: online payment has already been captured. A refund must be processed before cancellation."
+                })
 
         locked_delivery.status = 'failed'
         locked_delivery.save(update_fields=['status'])

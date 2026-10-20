@@ -227,7 +227,7 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
             200: DeliveryCancelResponseSerializer,
             400: OpenApiResponse(description="Invalid delivery status for cancellation"),
             403: OpenApiResponse(description="Unauthorized or foreign shelter"),
-            409: OpenApiResponse(description="Cash already collected")
+            409: OpenApiResponse(description="Cash already collected or online payment captured (refund required)")
         }
     )
     @action(detail=True, methods=['post'], url_path='cancel')

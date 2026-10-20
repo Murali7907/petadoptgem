@@ -643,6 +643,85 @@ Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medic
 
 ---
 
+## 10. Milestone 5 — Client Quality, Payment Invariants, Trigger Decoupling, and Hybrid Visibility
+
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Milestone 5 approved and finalized.
+
+### 10.1 Task 1: Typed OpenAPI Schema Quality (Status: COMMITTED - `f304d49`)
+- Resolved all "unable to resolve type hint" warnings via explicit `@extend_schema_field` definitions for:
+  - `pet_summary`, `medical_overview`, `shelter`, `driver_details` as structured OpenApiTypes.OBJECTs or inline serializers.
+  - `latitude`, `longitude`, `distance_km` as nullable floats/numbers.
+  - `names`, `phones`, `addresses`, `cities`, `age_display` as strings.
+  - `primary_image` as nullable URI strings.
+- Distinct `ref_name` assigned across `PetSummarySerializer` classes.
+- Enum overrides configured for `PetStatus`, `ApplicationStatus`, `DeliveryStatus`, and `PaymentStatus`.
+- Schema generation guarded for `ShelterDeliveryViewSet` (`swagger_fake_view`).
+- OperationId collisions completely resolved (0 errors, 0 warnings, 0 collisions).
+
+### 10.2 Task 2: Deterministic Pagination & Ordering (Status: COMMITTED - `f6f1fee`)
+- Enforced explicit, deterministic ordering across `AdoptionApplication` (`-created_at`, `-id`), `PetDelivery`, `Pet`, `Review`, and related viewsets/models.
+- Completely removed `UnorderedObjectListWarning`. Verified that consecutive paginated pages contain no duplicates and no omitted records.
+
+### 10.3 Task 3: Shelter Cancel vs Online Payment Invariant
+- **Invariant**:
+  - A delivery cannot be cancelled by shelter staff if a captured online payment exists for the application (`Payment.objects.filter(application=..., status__in=['captured', 'paid'])`).
+  - Cancellation attempt raises `ConflictError` resulting in HTTP 409 Conflict with body:
+    ```json
+    {
+      "code": "refund_required",
+      "detail": "Cannot cancel delivery: online payment has already been captured. A refund must be processed before cancellation."
+    }
+    ```
+  - Refunds are deliberately not automated at this stage.
+  - Allowed cancellations:
+    - COD delivery with `cash_collected == 0` (or `None`).
+    - Online application where payment order was created or failed, but never captured (`status` is not `captured` or `paid`).
+- **Driver-Reported Failed Delivery Behavior with Captured Online Payment**:
+  - *Current Behavior*:
+    - When driver reports a failed delivery (`status = 'failed'` via `DriverDeliveryViewSet.update_status`), the delivery status changes to `'failed'`, `driver.is_available` is reset to `True`, but the payment record remains `'captured'`. The application remains `'approved'`, and the pet remains `'pending'`.
+  - *Architectural Options for Driver-Failed Deliveries with Online Payments*:
+    - **Option A (Shelter Reassignment — Default Workflow)**:
+      - *Mechanics*: Keep payment as captured and pet as pending. The shelter investigates (e.g. adopter was temporarily unreachable) and re-assigns a new driver or reschedules delivery via `POST /api/v1/shelter/deliveries/<id>/assign/` without re-charging the adopter.
+      - *Pros*: Handles common real-world delivery delays without incurring Razorpay transaction fee overhead for cancellation/re-charge.
+      - *Cons*: Delivery record is marked 'failed' while payment remains captured, requiring clear dashboard UI state so shelter staff know reassignment is required.
+    - **Option B (Automated Refund on Terminal Failure)**:
+      - *Mechanics*: Add a dedicated terminal cancellation/failure action. If a failed delivery cannot be rescheduled, shelter triggers a cancellation flow that invokes `razorpay_client.payment.refund(payment.payment_id)`, moves application to `cancelled`, releases pet to `available`, and transitions payment to `refunded`.
+      - *Pros*: Full monetary and lifecycle consistency; adopter is automatically refunded if adoption delivery falls through completely.
+      - *Cons*: Requires integration with payment refund APIs, webhooks for async refund confirmation, and dispute handling.
+    - **Option C (Escrow / Holding State with Manual Shelter Resolution)**:
+      - *Mechanics*: On driver failure with captured payment, flag delivery into an `action_required` / `pending_resolution` state. Shelter staff must choose in UI between "Reschedule Delivery" (re-dispatches driver) or "Initiate Refund & Cancel Adoption".
+      - *Pros*: Prevents automated accidental refunds while giving shelter operational control with clear audit trail.
+      - *Cons*: Introduces additional intermediate status values and UI screens.
+
+### 10.4 Task 4: Database Trigger Convergence & Decoupling
+- **Goal**: Ensure Django application code strictly and deterministically governs `Pet.status` without relying on PostgreSQL database triggers (`trg_sync_pet_status`).
+- **Lifecycle Assertions**:
+  1. Application approval -> `pet.status = 'pending'`.
+  2. Competing applications for the same pet -> auto-rejected upon approval.
+  3. Rejection or cancellation of an approved application -> `pet.status = 'available'` (provided no other active approved/completed application exists for this pet).
+  4. Delivery doorstep OTP success -> `pet.status = 'adopted'`, `application.status = 'completed'`.
+  5. Driver-reported delivery failure or shelter delivery cancellation -> `pet.status` remains `'pending'`, `application.status` remains `'approved'`.
+- **Database Migration**:
+  - Add Django migration executing `RunSQL` to drop trigger `trg_sync_pet_status` on `adoption_applications` and function `sync_pet_status_on_application_change()` using `IF EXISTS` (with `reverse_sql=RunSQL.noop`).
+  - Migration plan will be verified with `manage.py migrate --plan` without applying to the live dev database.
+
+### 10.5 Task 5: Hybrid Medical Record Visibility (Option 3)
+- **Model / Endpoints**: `PetMedicalRecord` list/detail endpoints and `Pet` public detail `medical_overview`.
+- **Hybrid Access Rules**:
+  - Anonymous visitors: See medical metadata (`title`, `record_type`, `description`, `record_date`, `veterinarian_name`), but `document_url` is strictly `null`.
+  - Non-applicant authenticated customers: See medical metadata; `document_url` is strictly `null`.
+  - Authenticated applicants (users with an `AdoptionApplication` for this pet): Receive the signed/direct `document_url`.
+  - Owning shelter staff and platform admins: Receive the `document_url`.
+  - Public pet detail endpoint: Medical overview entries follow identical masking (no document URL leaks).
+
+### 10.6 Task 6: Test Suite Performance Optimization (Status: COMMITTED - `afc2dea`)
+- Configured fast MD5 password hasher for test execution (`'test' in sys.argv`).
+- Accelerated unit testing execution across all applications without modifying test assertions.
+
+---
+
 *Last updated: 2026-10-19*
 
 

@@ -2769,6 +2769,59 @@ class ShelterCancelDeliveryAPITests(APITestCase):
         self.delivery.refresh_from_db()
         self.assertEqual(self.delivery.status, 'failed')
 
+    def test_captured_online_payment_blocks_cancellation_returns_409(self):
+        Payment.objects.create(
+            application=self.application,
+            delivery=self.delivery,
+            status=PaymentStatus.CAPTURED,
+            amount=Decimal('500.00'),
+            razorpay_payment_id='pay_captured_test_123'
+        )
+        self.client.force_authenticate(user=self.owner_shelter_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel/'
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'refund_required')
+        self.assertIn('refund', res.data.get('detail', '').lower())
+
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'assigned')
+
+    def test_cod_with_no_cash_cancellation_allowed(self):
+        self.delivery.cash_collected = Decimal('0.00')
+        self.delivery.save(update_fields=['cash_collected'])
+
+        self.client.force_authenticate(user=self.owner_shelter_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel/'
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('status'), 'failed')
+
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'failed')
+
+    def test_unpaid_online_order_cancellation_allowed(self):
+        self.application.payment_method = 'online'
+        self.application.payment_status = 'pending'
+        self.application.save(update_fields=['payment_method', 'payment_status'])
+
+        Payment.objects.create(
+            application=self.application,
+            delivery=self.delivery,
+            status=PaymentStatus.CREATED,
+            amount=Decimal('500.00'),
+            razorpay_order_id='order_unpaid_123'
+        )
+
+        self.client.force_authenticate(user=self.owner_shelter_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel/'
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('status'), 'failed')
+
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'failed')
+
 
 
 
