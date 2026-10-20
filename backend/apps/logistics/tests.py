@@ -2822,6 +2822,26 @@ class ShelterCancelDeliveryAPITests(APITestCase):
         self.delivery.refresh_from_db()
         self.assertEqual(self.delivery.status, 'failed')
 
+    def test_cod_payment_row_with_zero_cash_allows_cancellation(self):
+        # Even if a COD payment row exists, if cash_collected is 0, cancellation is allowed
+        Payment.objects.create(
+            application=self.application,
+            delivery=self.delivery,
+            status=PaymentStatus.CAPTURED,
+            payment_method='cod',
+            amount=Decimal('500.00'),
+            transaction_id='cod_tx_123'
+        )
+        self.delivery.cash_collected = Decimal('0.00')
+        self.delivery.save(update_fields=['cash_collected'])
+
+        self.client.force_authenticate(user=self.owner_shelter_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel/'
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('status'), 'failed')
+
+
 
 
 

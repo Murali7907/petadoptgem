@@ -784,7 +784,7 @@ def cancel_delivery_by_shelter(delivery: PetDelivery, user) -> dict:
         has_captured_payment = Payment.objects.filter(
             application_id=delivery.application_id,
             status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid']
-        ).exists()
+        ).exclude(payment_method='cod').exists()
         if has_captured_payment:
             raise ConflictError({
                 "code": "refund_required",
@@ -817,7 +817,7 @@ def cancel_delivery_by_shelter(delivery: PetDelivery, user) -> dict:
             has_captured_payment = Payment.objects.filter(
                 application_id=locked_delivery.application_id,
                 status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid']
-            ).exists()
+            ).exclude(payment_method='cod').exists()
             if has_captured_payment:
                 raise ConflictError({
                     "code": "refund_required",

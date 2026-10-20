@@ -791,6 +791,41 @@ class ApplicationPetStatusConvergenceTests(APITestCase):
         self.assertEqual(self.pet.status, 'pending')
         self.assertEqual(app.status, 'approved')
 
+    def test_adopter_cannot_cancel_approved_app_with_captured_online_payment(self):
+        from apps.logistics.models import Payment, PaymentStatus
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='online', total_amount=Decimal('100.00')
+        )
+        Payment.objects.create(
+            application=app, status=PaymentStatus.CAPTURED, payment_method='razorpay',
+            amount=Decimal('100.00'), razorpay_payment_id='pay_online_captured_app'
+        )
+        self.client.force_authenticate(user=self.adopter_1)
+        res = self.client.post(f'/api/v1/applications/{app.public_id}/cancel/')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'refund_required')
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'approved')
+
+    def test_shelter_cannot_reject_approved_app_with_captured_online_payment(self):
+        from apps.logistics.models import Payment, PaymentStatus
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='online', total_amount=Decimal('100.00')
+        )
+        Payment.objects.create(
+            application=app, status=PaymentStatus.CAPTURED, payment_method='razorpay',
+            amount=Decimal('100.00'), razorpay_payment_id='pay_online_captured_app2'
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(f'/api/v1/shelter/applications/{app.public_id}/reject/', {'notes': 'No longer eligible'})
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'refund_required')
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'approved')
+
+
 
 
 

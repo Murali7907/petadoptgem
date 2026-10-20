@@ -67,7 +67,16 @@ class CustomerApplicationViewSet(mixins.ListModelMixin,
             raise ValidationError(f"Cannot cancel application with status '{application.get_status_display()}'.")
 
         if application.status == 'approved':
-            from apps.logistics.models import PetDelivery
+            from apps.logistics.models import Payment, PaymentStatus, PetDelivery
+            if Payment.objects.filter(
+                application=application,
+                status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid']
+            ).exclude(payment_method='cod').exists():
+                return Response({
+                    "code": "refund_required",
+                    "detail": "Cannot cancel application: online payment has already been captured. Please contact the shelter to arrange a refund before cancellation."
+                }, status=status.HTTP_409_CONFLICT)
+
             deliv = PetDelivery.objects.filter(application=application).first()
             if deliv and deliv.status in ['out_for_delivery', 'delivered']:
                 raise ValidationError("Cannot cancel application while delivery is in progress or completed.")
@@ -189,7 +198,16 @@ class ShelterApplicationViewSet(viewsets.ReadOnlyModelViewSet):
             raise ValidationError(f"Cannot reject an application with status '{application.get_status_display()}'.")
 
         if application.status == 'approved':
-            from apps.logistics.models import PetDelivery
+            from apps.logistics.models import Payment, PaymentStatus, PetDelivery
+            if Payment.objects.filter(
+                application=application,
+                status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid']
+            ).exclude(payment_method='cod').exists():
+                return Response({
+                    "code": "refund_required",
+                    "detail": "Cannot reject application: online payment has already been captured. A refund must be processed before rejection."
+                }, status=status.HTTP_409_CONFLICT)
+
             active_delivery = PetDelivery.objects.filter(
                 application=application,
                 status__in=['assigned', 'out_for_delivery']
@@ -442,6 +460,17 @@ class AdoptionStatusUpdateView(APIView):
                     comp.save()
 
         elif new_status == 'rejected':
+            if application.status == 'approved':
+                from apps.logistics.models import Payment, PaymentStatus
+                if Payment.objects.filter(
+                    application=application,
+                    status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid']
+                ).exclude(payment_method='cod').exists():
+                    return Response({
+                        "code": "refund_required",
+                        "detail": "Cannot reject application: online payment has already been captured. A refund must be processed before rejection."
+                    }, status=status.HTTP_409_CONFLICT)
+
             application.status = 'rejected'
             if notes:
                 application.application_notes = f"{application.application_notes}\n[Rejection Reason]: {notes}".strip()
