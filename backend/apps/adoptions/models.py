@@ -92,11 +92,9 @@ class AdoptionApplication(models.Model):
 
         super().save(*args, **kwargs)
 
-        # Application code status convergence (independent of DB triggers)
-        if (prev_status != 'approved') and self.status == 'approved':
-            from apps.pets.models import Pet
-            Pet.objects.filter(id=self.pet_id, status='available').update(status='pending')
-        elif prev_status == 'approved' and self.status in ['rejected', 'cancelled']:
+        # Application code status convergence: if an approved application is rejected or cancelled,
+        # restore pet to available if no other approved/completed application exists
+        if prev_status == 'approved' and self.status in ['rejected', 'cancelled']:
             has_other = AdoptionApplication.objects.filter(
                 pet_id=self.pet_id,
                 status__in=['approved', 'completed']
