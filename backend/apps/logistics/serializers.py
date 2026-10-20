@@ -35,6 +35,29 @@ class DeliveryAssignSerializer(serializers.Serializer):
         return attrs
 
 
+class DriverTaskPetSummarySerializer(serializers.Serializer):
+    public_id = serializers.UUIDField(help_text="Public UUID of the pet")
+    name = serializers.CharField(help_text="Pet name")
+    species = serializers.CharField(help_text="Pet species (e.g. dog, cat)")
+    breed = serializers.CharField(help_text="Pet breed")
+    age_months = serializers.IntegerField(help_text="Pet age in months")
+
+
+class CustomerTrackingPetSummarySerializer(serializers.Serializer):
+    public_id = serializers.UUIDField(help_text="Public UUID of the pet")
+    name = serializers.CharField(help_text="Pet name")
+    species = serializers.CharField(help_text="Pet species")
+    breed = serializers.CharField(help_text="Pet breed")
+
+
+class DeliveryDriverDetailsSerializer(serializers.Serializer):
+    public_id = serializers.UUIDField(help_text="Public UUID of the delivery driver")
+    driver_name = serializers.CharField(help_text="Driver full name or username")
+    driver_phone = serializers.CharField(allow_blank=True, help_text="Driver contact phone")
+    vehicle_type = serializers.CharField(help_text="Driver vehicle type display")
+    vehicle_number = serializers.CharField(allow_blank=True, help_text="Driver vehicle registration number")
+
+
 class DeliveryDriverTaskSerializer(serializers.ModelSerializer):
     destination_address = serializers.SerializerMethodField()
     delivery_address = serializers.SerializerMethodField()
@@ -131,7 +154,7 @@ class DeliveryDriverTaskSerializer(serializers.ModelSerializer):
             return user.get_full_name() or user.username
         return ""
 
-    @extend_schema_field(OpenApiTypes.OBJECT)
+    @extend_schema_field(DriverTaskPetSummarySerializer)
     def get_pet_summary(self, obj):
         if obj.application and obj.application.pet:
             pet = obj.application.pet
@@ -168,7 +191,7 @@ class DeliveryCustomerSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
-    @extend_schema_field(OpenApiTypes.OBJECT)
+    @extend_schema_field(DeliveryDriverDetailsSerializer)
     def get_driver_details(self, obj):
         driver = obj.driver or obj.delivery_partner
         if driver and driver.user:
@@ -181,7 +204,7 @@ class DeliveryCustomerSerializer(serializers.ModelSerializer):
             }
         return None
 
-    @extend_schema_field(OpenApiTypes.OBJECT)
+    @extend_schema_field(CustomerTrackingPetSummarySerializer)
     def get_pet_summary(self, obj):
         if obj.application and obj.application.pet:
             pet = obj.application.pet

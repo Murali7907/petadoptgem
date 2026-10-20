@@ -11,6 +11,31 @@ from drf_spectacular.utils import extend_schema_field, OpenApiTypes
 from .models import Pet, PetImage, PetMedicalRecord, FavoritePet
 from apps.accounts.serializers import ShelterProfileSerializer
 
+
+class MedicalOverviewRecordSerializer(serializers.Serializer):
+    title = serializers.CharField(help_text="Title or procedure name of the medical record")
+    description = serializers.CharField(allow_null=True, required=False, help_text="Clinical description or notes")
+    record_date = serializers.DateField(help_text="Date the record or treatment was administered")
+    vet_name = serializers.CharField(allow_null=True, required=False, help_text="Administering veterinarian or clinic name")
+    document_url = serializers.CharField(allow_null=True, required=False, help_text="Direct document link (null for anonymous users or non-applicants)")
+
+
+class MedicalOverviewSerializer(serializers.Serializer):
+    is_vaccinated = serializers.BooleanField(help_text="Whether the pet is fully vaccinated")
+    is_neutered = serializers.BooleanField(help_text="Whether the pet is spayed or neutered")
+    medical_records = MedicalOverviewRecordSerializer(many=True, help_text="List of medical records")
+
+
+class PublicPetShelterSerializer(serializers.Serializer):
+    public_id = serializers.UUIDField(help_text="Public UUID of the shelter organization")
+    organization_name = serializers.CharField(help_text="Name of the shelter organization")
+    pickup_address = serializers.CharField(help_text="Physical pickup address")
+    city = serializers.CharField(help_text="City of the shelter")
+    latitude = serializers.CharField(allow_null=True, required=False, help_text="Shelter latitude coordinates")
+    longitude = serializers.CharField(allow_null=True, required=False, help_text="Shelter longitude coordinates")
+    phone = serializers.CharField(help_text="Contact phone number")
+
+
 class PetImageSerializer(serializers.ModelSerializer):
     image = serializers.FileField(required=False, write_only=True)
 
@@ -212,7 +237,7 @@ class PetDetailSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'public_id', 'created_at']
 
-    @extend_schema_field(OpenApiTypes.OBJECT)
+    @extend_schema_field(MedicalOverviewSerializer)
     def get_medical_overview(self, obj):
         request = self.context.get('request')
         user = getattr(request, 'user', None) if request else None
@@ -364,7 +389,7 @@ class PublicPetDetailSerializer(serializers.ModelSerializer):
         first_img = obj.images.first()
         return first_img.image_url if first_img else None
 
-    @extend_schema_field(OpenApiTypes.OBJECT)
+    @extend_schema_field(MedicalOverviewSerializer)
     def get_medical_overview(self, obj):
         request = self.context.get('request')
         user = getattr(request, 'user', None) if request else None
@@ -385,7 +410,7 @@ class PublicPetDetailSerializer(serializers.ModelSerializer):
             ]
         }
 
-    @extend_schema_field(OpenApiTypes.OBJECT)
+    @extend_schema_field(PublicPetShelterSerializer)
     def get_shelter(self, obj):
         if not obj.shelter:
             return None
