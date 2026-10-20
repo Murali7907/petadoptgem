@@ -63,8 +63,20 @@ class CustomerApplicationViewSet(mixins.ListModelMixin,
     def cancel(self, request, public_id=None):
         application = self.get_object()
 
-        if application.status not in ['submitted', 'reviewing']:
+        if application.status not in ['submitted', 'reviewing', 'approved']:
             raise ValidationError(f"Cannot cancel application with status '{application.get_status_display()}'.")
+
+        if application.status == 'approved':
+            from apps.logistics.models import PetDelivery
+            deliv = PetDelivery.objects.filter(application=application).first()
+            if deliv and deliv.status in ['out_for_delivery', 'delivered']:
+                raise ValidationError("Cannot cancel application while delivery is in progress or completed.")
+            if deliv and deliv.status == 'assigned':
+                deliv.status = 'failed'
+                deliv.save(update_fields=['status'])
+                if deliv.driver:
+                    deliv.driver.is_available = True
+                    deliv.driver.save(update_fields=['is_available'])
 
         application.status = 'cancelled'
         application.save()
@@ -173,8 +185,17 @@ class ShelterApplicationViewSet(viewsets.ReadOnlyModelViewSet):
         decision_serializer.is_valid(raise_exception=True)
         notes = decision_serializer.validated_data.get('notes', '')
 
-        if application.status in ['approved', 'completed', 'cancelled']:
+        if application.status in ['completed', 'cancelled']:
             raise ValidationError(f"Cannot reject an application with status '{application.get_status_display()}'.")
+
+        if application.status == 'approved':
+            from apps.logistics.models import PetDelivery
+            active_delivery = PetDelivery.objects.filter(
+                application=application,
+                status__in=['assigned', 'out_for_delivery']
+            ).first()
+            if active_delivery:
+                raise ValidationError("Cannot reject an approved application with an active delivery task. Please cancel the delivery task first.")
 
         application.status = 'rejected'
         if notes:

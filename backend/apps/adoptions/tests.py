@@ -6,9 +6,10 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from decimal import Decimal
 from django.urls import reverse
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APIClient
 from django.utils import timezone
 from apps.accounts.models import User, ShelterProfile, DeliveryProfile
 from apps.pets.models import Pet
@@ -594,6 +595,201 @@ class AdoptionPaginationStabilityTests(APITestCase):
             ).order_by('-submitted_at', '-id').values_list('public_id', flat=True)
         ]
         self.assertEqual(page1_ids + page2_ids, expected_ids)
+
+
+class ApplicationPetStatusConvergenceTests(APITestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+        # Shelter
+        self.shelter_user = User.objects.create_user(
+            username='conv_shelter', email='conv@shelter.org', password='password123', role='shelter'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.shelter_user, organization_name='Convergence Shelter', is_verified=True
+        )
+
+        # Adopters
+        self.adopter_1 = User.objects.create_user(
+            username='conv_adopter1', email='adopter1@conv.org', password='password123', role='customer'
+        )
+        self.adopter_2 = User.objects.create_user(
+            username='conv_adopter2', email='adopter2@conv.org', password='password123', role='customer'
+        )
+
+        # Driver
+        self.driver_user = User.objects.create_user(
+            username='conv_driver', email='driver@conv.org', password='password123', role='delivery'
+        )
+        self.driver = DeliveryProfile.objects.create(
+            user=self.driver_user, shelter=self.shelter, vehicle_number='KA-01-CV-9999', is_available=True
+        )
+
+        # Pet
+        self.pet = Pet.objects.create(
+            shelter=self.shelter, name='ConvergencePet', species='dog', breed='Indie', age_months=12, gender='male', status='available'
+        )
+
+    def test_approve_application_transitions_pet_to_pending(self):
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='1234567890', status='submitted'
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(f'/api/v1/shelter/applications/{app.public_id}/approve/', {'notes': 'Approved'})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        self.pet.refresh_from_db()
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'approved')
+        self.assertEqual(self.pet.status, 'pending')
+
+    def test_competing_applications_auto_rejected_on_approval(self):
+        app1 = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='1111111111', status='submitted'
+        )
+        app2 = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_2, living_situation='Apartment', contact_phone='2222222222', status='reviewing'
+        )
+
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(f'/api/v1/shelter/applications/{app1.public_id}/approve/', {'notes': 'Approve 1'})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        app1.refresh_from_db()
+        app2.refresh_from_db()
+        self.assertEqual(app1.status, 'approved')
+        self.assertEqual(app2.status, 'rejected')
+        self.assertIn('adopted by another applicant', app2.application_notes)
+
+    def test_reject_approved_application_restores_pet_to_available(self):
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='1234567890', status='submitted'
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        self.client.post(f'/api/v1/shelter/applications/{app.public_id}/approve/', {'notes': 'Approved'})
+
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'pending')
+
+        # Now shelter rejects the approved application
+        res = self.client.post(f'/api/v1/shelter/applications/{app.public_id}/reject/', {'notes': 'Adopter backed out'})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        app.refresh_from_db()
+        self.pet.refresh_from_db()
+        self.assertEqual(app.status, 'rejected')
+        self.assertEqual(self.pet.status, 'available')
+
+    def test_customer_cancel_approved_application_restores_pet_to_available(self):
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='1234567890', status='submitted'
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        self.client.post(f'/api/v1/shelter/applications/{app.public_id}/approve/', {'notes': 'Approved'})
+
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'pending')
+
+        # Adopter cancels approved application
+        self.client.force_authenticate(user=self.adopter_1)
+        cancel_url = reverse('customer-applications-cancel', kwargs={'public_id': app.public_id})
+        res = self.client.post(cancel_url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        app.refresh_from_db()
+        self.pet.refresh_from_db()
+        self.assertEqual(app.status, 'cancelled')
+        self.assertEqual(self.pet.status, 'available')
+
+    def test_reject_does_not_make_available_if_another_approved_exists(self):
+        app1 = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved'
+        )
+        app2 = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_2, living_situation='Apt', contact_phone='222', status='approved'
+        )
+        self.pet.status = 'pending'
+        self.pet.save(update_fields=['status'])
+
+        # Reject app1
+        app1.status = 'rejected'
+        app1.save()
+
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'pending')
+
+        # Reject app2
+        app2.status = 'rejected'
+        app2.save()
+
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'available')
+
+    def test_delivery_success_transitions_pet_to_adopted(self):
+        from apps.logistics.models import PetDelivery
+        from apps.logistics.services import issue_otp, verify_doorstep_service
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            total_amount=Decimal('0.00'), payment_method='unset'
+        )
+        self.pet.status = 'pending'
+        self.pet.save(update_fields=['status'])
+
+        delivery = PetDelivery.objects.create(
+            application=app, driver=self.driver, status='out_for_delivery'
+        )
+        raw_otp = issue_otp(delivery, 'doorstep')
+
+        res = verify_doorstep_service(delivery.id, raw_otp)
+        self.assertEqual(res.outcome.value, 'success')
+
+        self.pet.refresh_from_db()
+        app.refresh_from_db()
+        self.assertEqual(self.pet.status, 'adopted')
+        self.assertEqual(app.status, 'completed')
+
+    def test_driver_failed_delivery_leaves_pet_pending_and_app_approved(self):
+        from apps.logistics.models import PetDelivery
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved'
+        )
+        self.pet.status = 'pending'
+        self.pet.save(update_fields=['status'])
+
+        delivery = PetDelivery.objects.create(
+            application=app, driver=self.driver, status='assigned'
+        )
+
+        self.client.force_authenticate(user=self.driver_user)
+        res = self.client.patch(f'/api/v1/delivery/tasks/{delivery.public_id}/status/', {'status': 'failed'})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        self.pet.refresh_from_db()
+        app.refresh_from_db()
+        self.assertEqual(self.pet.status, 'pending')
+        self.assertEqual(app.status, 'approved')
+
+    def test_shelter_cancelled_delivery_leaves_pet_pending_and_app_approved(self):
+        from apps.logistics.models import PetDelivery
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='cod', total_amount=Decimal('100.00')
+        )
+        self.pet.status = 'pending'
+        self.pet.save(update_fields=['status'])
+
+        delivery = PetDelivery.objects.create(
+            application=app, driver=self.driver, status='assigned', cash_collected=Decimal('0.00')
+        )
+
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(f'/api/v1/shelter/deliveries/{delivery.public_id}/cancel/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        self.pet.refresh_from_db()
+        app.refresh_from_db()
+        self.assertEqual(self.pet.status, 'pending')
+        self.assertEqual(app.status, 'approved')
 
 
 

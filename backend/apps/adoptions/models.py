@@ -84,7 +84,26 @@ class AdoptionApplication(models.Model):
         elif self.customer_longitude is not None and self.destination_longitude is None:
             self.destination_longitude = self.customer_longitude
 
+        prev_status = None
+        if self.pk:
+            orig = AdoptionApplication.objects.filter(pk=self.pk).values('status').first()
+            if orig:
+                prev_status = orig['status']
+
         super().save(*args, **kwargs)
+
+        # Application code status convergence (independent of DB triggers)
+        if (prev_status != 'approved') and self.status == 'approved':
+            from apps.pets.models import Pet
+            Pet.objects.filter(id=self.pet_id, status='available').update(status='pending')
+        elif prev_status == 'approved' and self.status in ['rejected', 'cancelled']:
+            has_other = AdoptionApplication.objects.filter(
+                pet_id=self.pet_id,
+                status__in=['approved', 'completed']
+            ).exclude(id=self.id).exists()
+            if not has_other:
+                from apps.pets.models import Pet
+                Pet.objects.filter(id=self.pet_id, status='pending').update(status='available')
 
     def calculate_total(self, per_km_rate=10):
         shelter = self.pet.shelter
