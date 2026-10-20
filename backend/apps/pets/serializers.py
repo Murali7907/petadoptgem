@@ -40,6 +40,19 @@ class PetImageSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+def user_can_access_medical_documents(user, pet) -> bool:
+    if not user or not user.is_authenticated:
+        return False
+    if getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False) or getattr(user, 'role', '') == 'admin':
+        return True
+    if hasattr(user, 'shelter_profile') and user.shelter_profile and pet and getattr(pet, 'shelter_id', None) == user.shelter_profile.id:
+        return True
+    if pet:
+        from apps.adoptions.models import AdoptionApplication
+        return AdoptionApplication.objects.filter(applicant=user, pet=pet).exists()
+    return False
+
+
 class PetMedicalRecordSerializer(serializers.ModelSerializer):
     record_date = serializers.DateField(required=False)
     administered_date = serializers.DateField(required=False, write_only=True)
@@ -53,7 +66,24 @@ class PetMedicalRecordSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.URLField(allow_null=True))
     def get_document_url(self, obj):
-        return obj.document
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        if user_can_access_medical_documents(user, getattr(obj, 'pet', None)):
+            return obj.document
+        return None
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        can_access = user_can_access_medical_documents(user, getattr(instance, 'pet', None))
+        if not can_access:
+            data['document_url'] = None
+            data['description'] = instance.clinical_description
+        else:
+            data['document_url'] = instance.document
+            data['description'] = instance.clinical_description or instance.description
+        return data
 
     def validate_document(self, value):
         from .validators import validate_medical_document
@@ -152,6 +182,7 @@ class PetDetailSerializer(serializers.ModelSerializer):
     shelter = ShelterProfileSerializer(read_only=True)
     images = PetImageSerializer(many=True, read_only=True)
     medical_records = PetMedicalRecordSerializer(many=True, read_only=True)
+    medical_overview = serializers.SerializerMethodField()
     age_display = serializers.CharField(read_only=True)
     primary_image = serializers.SerializerMethodField()
 
@@ -176,9 +207,31 @@ class PetDetailSerializer(serializers.ModelSerializer):
             'status',
             'images',
             'medical_records',
+            'medical_overview',
             'created_at'
         ]
         read_only_fields = ['id', 'public_id', 'created_at']
+
+    @extend_schema_field(OpenApiTypes.OBJECT)
+    def get_medical_overview(self, obj):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        can_access = user_can_access_medical_documents(user, obj)
+
+        records = obj.medical_records.all()
+        return {
+            'is_vaccinated': obj.is_vaccinated,
+            'is_neutered': obj.is_neutered,
+            'medical_records': [
+                {
+                    'title': r.title,
+                    'description': r.clinical_description if not can_access else (r.clinical_description or r.description),
+                    'record_date': r.record_date,
+                    'vet_name': r.vet_name,
+                    'document_url': r.document if can_access else None,
+                } for r in records
+            ]
+        }
 
     @extend_schema_field(serializers.URLField(allow_null=True))
     def get_primary_image(self, obj):
@@ -313,6 +366,10 @@ class PublicPetDetailSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(OpenApiTypes.OBJECT)
     def get_medical_overview(self, obj):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        can_access = user_can_access_medical_documents(user, obj)
+
         records = obj.medical_records.all()
         return {
             'is_vaccinated': obj.is_vaccinated,
@@ -320,8 +377,10 @@ class PublicPetDetailSerializer(serializers.ModelSerializer):
             'medical_records': [
                 {
                     'title': r.title,
-                    'description': r.description,
-                    'record_date': r.record_date
+                    'description': r.clinical_description if not can_access else (r.clinical_description or r.description),
+                    'record_date': r.record_date,
+                    'vet_name': r.vet_name,
+                    'document_url': r.document if can_access else None,
                 } for r in records
             ]
         }

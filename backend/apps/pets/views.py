@@ -213,7 +213,7 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
         if request.method == 'GET':
             if not medical_record:
                 return Response([], status=status.HTTP_200_OK)
-            serializer = PetMedicalRecordSerializer(medical_record)
+            serializer = PetMedicalRecordSerializer(medical_record, context={'request': request})
             return Response(serializer.data)
 
         elif request.method in ['PUT', 'PATCH']:
@@ -234,13 +234,13 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
                     data['description'] = f"{data['description']}\nDocument: {medical_record.document}".strip()
 
             if not medical_record:
-                serializer = PetMedicalRecordSerializer(data=data)
+                serializer = PetMedicalRecordSerializer(data=data, context={'request': request})
                 serializer.is_valid(raise_exception=True)
                 serializer.save(pet=pet)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             else:
                 partial = (request.method == 'PATCH')
-                serializer = PetMedicalRecordSerializer(medical_record, data=data, partial=partial)
+                serializer = PetMedicalRecordSerializer(medical_record, data=data, partial=partial, context={'request': request})
                 serializer.is_valid(raise_exception=True)
                 serializer.save()
                 return Response(serializer.data)

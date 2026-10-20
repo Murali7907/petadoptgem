@@ -946,4 +946,152 @@ class UploadValidationAPITests(APITestCase):
             self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
 
 
+class PetMedicalRecordVisibilityHybridTests(APITestCase):
+    def setUp(self):
+        from apps.accounts.models import ShelterProfile
+        from apps.adoptions.models import AdoptionApplication
+
+        # 1. Owner shelter
+        self.owner_user = User.objects.create_user(
+            username='med_shelter_owner', email='owner@medhaven.org', password='password123', role='shelter'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.owner_user, organization_name='Med Haven Shelter', is_verified=True
+        )
+
+        # 2. Foreign shelter
+        self.foreign_user = User.objects.create_user(
+            username='foreign_shelter_user', email='foreign@shelter.org', password='password123', role='shelter'
+        )
+        self.foreign_shelter = ShelterProfile.objects.create(
+            user=self.foreign_user, organization_name='Foreign Shelter', is_verified=True
+        )
+
+        # 3. Applicant customer
+        self.applicant = User.objects.create_user(
+            username='med_applicant', email='applicant@example.com', password='password123', role='customer'
+        )
+
+        # 4. Other customer (not applicant for this pet)
+        self.other_customer = User.objects.create_user(
+            username='other_customer_med', email='other@example.com', password='password123', role='customer'
+        )
+
+        # 5. Admin
+        self.admin = User.objects.create_user(
+            username='med_admin', email='admin@medhaven.org', password='password123', role='admin', is_staff=True
+        )
+
+        # 6. Pet & Medical Record
+        self.pet = Pet.objects.create(
+            shelter=self.shelter, name='MedPet', species='dog', breed='Retriever', age_months=18, gender='male', status='available'
+        )
+        self.doc_secret_url = 'https://storage.googleapis.com/kindheart-docs/medical/report_confidential_123.pdf'
+        self.record = PetMedicalRecord.objects.create(
+            pet=self.pet,
+            title='Rabies Vaccination & Health Certificate',
+            description=f'Routine vaccination administered.\nDocument: {self.doc_secret_url}',
+            vet_name='Dr. Sharma',
+            record_date='2026-05-15'
+        )
+
+        # 7. Application for applicant
+        self.application = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.applicant, living_situation='House', contact_phone='9876543210', status='submitted'
+        )
+
+    def test_anonymous_user_sees_metadata_but_null_document_url(self):
+        self.client.logout()
+        url = f'/api/v1/pets/{self.pet.public_id}/medical-records/'
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        records = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+
+        # Metadata visible
+        self.assertEqual(rec['title'], 'Rabies Vaccination & Health Certificate')
+        self.assertEqual(rec['vet_name'], 'Dr. Sharma')
+        self.assertEqual(rec['record_date'], '2026-05-15')
+
+        # Document link masked
+        self.assertIsNone(rec['document_url'])
+        self.assertNotIn('Document:', rec['description'])
+        self.assertNotIn('https://', rec['description'])
+
+    def test_applicant_gets_document_url(self):
+        self.client.force_authenticate(user=self.applicant)
+        url = f'/api/v1/pets/{self.pet.public_id}/medical-records/'
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        records = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+
+        self.assertEqual(rec['document_url'], self.doc_secret_url)
+
+    def test_other_customer_gets_null_document_url(self):
+        self.client.force_authenticate(user=self.other_customer)
+        url = f'/api/v1/pets/{self.pet.public_id}/medical-records/'
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        records = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        rec = records[0]
+
+        self.assertIsNone(rec['document_url'])
+        self.assertNotIn(self.doc_secret_url, rec['description'])
+
+    def test_owner_shelter_gets_document_url(self):
+        self.client.force_authenticate(user=self.owner_user)
+        url = f'/api/v1/pets/{self.pet.public_id}/medical-records/'
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        records = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        rec = records[0]
+
+        self.assertEqual(rec['document_url'], self.doc_secret_url)
+
+    def test_admin_gets_document_url(self):
+        self.client.force_authenticate(user=self.admin)
+        url = f'/api/v1/pets/{self.pet.public_id}/medical-records/'
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        records = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        rec = records[0]
+
+        self.assertEqual(rec['document_url'], self.doc_secret_url)
+
+    def test_no_link_leaks_through_public_pet_detail(self):
+        # 1. Anonymous request to public pet detail
+        self.client.logout()
+        url = f'/api/v1/pets/{self.pet.public_id}/'
+        res_anon = self.client.get(url)
+        self.assertEqual(res_anon.status_code, status.HTTP_200_OK)
+
+        overview = res_anon.data.get('medical_overview', {})
+        self.assertIn('medical_records', overview)
+        med_list = overview['medical_records']
+        self.assertEqual(len(med_list), 1)
+        self.assertIsNone(med_list[0]['document_url'])
+        self.assertNotIn('Document:', med_list[0]['description'])
+        self.assertNotIn('https://', med_list[0]['description'])
+        self.assertNotIn(self.doc_secret_url, res_anon.content.decode())
+
+        # 2. Unrelated customer request to public pet detail
+        self.client.force_authenticate(user=self.other_customer)
+        res_cust = self.client.get(url)
+        self.assertEqual(res_cust.status_code, status.HTTP_200_OK)
+        med_list_cust = res_cust.data['medical_overview']['medical_records']
+        self.assertIsNone(med_list_cust[0]['document_url'])
+        self.assertNotIn(self.doc_secret_url, res_cust.content.decode())
+
+        # 3. Applicant request to public pet detail -> gets link
+        self.client.force_authenticate(user=self.applicant)
+        res_app = self.client.get(url)
+        self.assertEqual(res_app.status_code, status.HTTP_200_OK)
+        med_list_app = res_app.data['medical_overview']['medical_records']
+        self.assertEqual(med_list_app[0]['document_url'], self.doc_secret_url)
+
+
+
 
