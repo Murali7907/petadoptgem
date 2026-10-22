@@ -1093,6 +1093,25 @@ class ApplicationPetStatusConvergenceTests(APITestCase):
         app.refresh_from_db()
         self.assertEqual(app.status, 'approved')
 
+    def test_exact_non_internal_triggers_set(self):
+        """
+        Assert that the database has ONLY the approved non-internal trigger(s),
+        ensuring trigger drift (such as legacy trg_update_application_timestamp or trg_sync_pet_status)
+        cannot return.
+        """
+        from django.db import connection
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT t.tgname
+                FROM pg_trigger t
+                JOIN pg_class c ON t.tgrelid = c.oid
+                JOIN pg_namespace n ON c.relnamespace = n.oid
+                WHERE n.nspname = 'public' AND NOT t.tgisinternal
+            """)
+            triggers = {row[0] for row in cursor.fetchall()}
+        self.assertEqual(triggers, {'trg_check_review_eligibility'})
+
+
 
 
 
