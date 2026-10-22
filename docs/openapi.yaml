@@ -1,0 +1,5623 @@
+openapi: 3.0.3
+info:
+  title: KindHeart Pet Adoption & Logistics API
+  version: 1.0.0
+  description: Public Pet Discovery, Shelter Pet Management, Adoption Workflow, Real-Time
+    Fleet Delivery & Tracking, and Razorpay Payments.
+paths:
+  /api/v1/applications/:
+    get:
+      operationId: applications_list
+      description: |-
+        ViewSet for Customer users to view their application history, submit new applications,
+        and cancel pending applications.
+      parameters:
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: search
+        required: false
+        in: query
+        description: A search term.
+        schema:
+          type: string
+      tags:
+      - applications
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedCustomerApplicationList'
+          description: ''
+    post:
+      operationId: applications_create
+      description: |-
+        ViewSet for Customer users to view their application history, submit new applications,
+        and cancel pending applications.
+      tags:
+      - applications
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplicationCreateRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ApplicationCreateRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ApplicationCreateRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationCreate'
+          description: ''
+  /api/v1/applications/{public_id}/:
+    get:
+      operationId: applications_retrieve
+      description: |-
+        ViewSet for Customer users to view their application history, submit new applications,
+        and cancel pending applications.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - applications
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerApplication'
+          description: ''
+    put:
+      operationId: applications_update
+      description: |-
+        ViewSet for Customer users to view their application history, submit new applications,
+        and cancel pending applications.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - applications
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomerApplicationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CustomerApplicationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CustomerApplicationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerApplication'
+          description: ''
+    patch:
+      operationId: applications_partial_update
+      description: |-
+        ViewSet for Customer users to view their application history, submit new applications,
+        and cancel pending applications.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - applications
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedCustomerApplicationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedCustomerApplicationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedCustomerApplicationRequest'
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerApplication'
+          description: ''
+  /api/v1/applications/{public_id}/cancel/:
+    post:
+      operationId: applications_cancel_create
+      description: |-
+        ViewSet for Customer users to view their application history, submit new applications,
+        and cancel pending applications.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - applications
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomerApplicationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CustomerApplicationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CustomerApplicationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerApplication'
+          description: ''
+  /api/v1/applications/{public_id}/review/:
+    post:
+      operationId: applications_review_create
+      description: |-
+        POST /api/v1/adoptions/applications/<uuid:public_id>/review/
+        Allows customer applicant to submit a dual review once delivery is completed.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - applications
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdoptionReviewCreateRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AdoptionReviewCreateRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AdoptionReviewCreateRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdoptionReviewCreate'
+          description: ''
+  /api/v1/auth/admin/dashboard/stats/:
+    get:
+      operationId: auth_admin_dashboard_stats_retrieve
+      description: Returns aggregate metrics across users, pet catalog, active delivery
+        fleet, revenue, and satisfaction ratings.
+      summary: Platform Admin Dashboard Statistics
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminPlatformStats'
+          description: ''
+  /api/v1/auth/admin/shelters/:
+    get:
+      operationId: auth_admin_shelters_list
+      description: Admin ViewSet for oversight, verification, and suspension of shelter
+        profiles.
+      summary: List all shelters for admin oversight
+      parameters:
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: search
+        required: false
+        in: query
+        description: A search term.
+        schema:
+          type: string
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAdminShelterDetailList'
+          description: ''
+    post:
+      operationId: auth_admin_shelters_create
+      description: Admin ViewSet for oversight, verification, and suspension of shelter
+        profiles.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminShelterDetailRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AdminShelterDetailRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AdminShelterDetailRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminShelterDetail'
+          description: ''
+  /api/v1/auth/admin/shelters/{public_id}/:
+    get:
+      operationId: auth_admin_shelters_retrieve
+      description: Admin ViewSet for oversight, verification, and suspension of shelter
+        profiles.
+      summary: Retrieve full shelter detail including verification and inventory
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminShelterDetail'
+          description: ''
+    put:
+      operationId: auth_admin_shelters_update
+      description: Admin ViewSet for oversight, verification, and suspension of shelter
+        profiles.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminShelterDetailRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AdminShelterDetailRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AdminShelterDetailRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminShelterDetail'
+          description: ''
+    patch:
+      operationId: auth_admin_shelters_partial_update
+      description: Admin ViewSet for oversight, verification, and suspension of shelter
+        profiles.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedAdminShelterDetailRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedAdminShelterDetailRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedAdminShelterDetailRequest'
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminShelterDetail'
+          description: ''
+    delete:
+      operationId: auth_admin_shelters_destroy
+      description: Admin ViewSet for oversight, verification, and suspension of shelter
+        profiles.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/auth/admin/shelters/{public_id}/suspend/:
+    post:
+      operationId: auth_admin_shelters_suspend_create
+      description: Admin ViewSet for oversight, verification, and suspension of shelter
+        profiles.
+      summary: Suspend a shelter profile
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminShelterDetailRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AdminShelterDetailRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AdminShelterDetailRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminShelterDetail'
+          description: ''
+  /api/v1/auth/admin/shelters/{public_id}/verify/:
+    post:
+      operationId: auth_admin_shelters_verify_create
+      description: Admin ViewSet for oversight, verification, and suspension of shelter
+        profiles.
+      summary: Approve and verify a shelter
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminShelterDetailRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AdminShelterDetailRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AdminShelterDetailRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminShelterDetail'
+          description: ''
+  /api/v1/auth/drivers/create/:
+    post:
+      operationId: auth_drivers_create_create
+      description: |-
+        Dedicated Fleets: Delivery partners belong strictly to a single shelter.
+        Drivers cannot self-register; they are created by their shelter.
+        POST /api/auth/drivers/create/
+      summary: Create a new delivery driver for shelter fleet
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DriverCreateRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/DriverCreateRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/DriverCreateRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+          description: ''
+  /api/v1/auth/login/:
+    post:
+      operationId: auth_login_create
+      description: |-
+        Login endpoint returning access and refresh JWT tokens with custom embedded role claims.
+        Throttled per IP via auth_login scope.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomTokenObtainPairRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CustomTokenObtainPairRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CustomTokenObtainPairRequest'
+        required: true
+      security:
+      - jwt_auth: []
+      responses:
+        '200':
+          description: No response body
+  /api/v1/auth/logout/:
+    post:
+      operationId: auth_logout_create
+      description: Blacklists the provided refresh token. Logging out twice is harmless.
+      summary: Logout and blacklist refresh token
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      - {}
+      responses:
+        '200':
+          description: Successfully logged out
+        '400':
+          description: Missing or invalid token
+  /api/v1/auth/me/:
+    get:
+      operationId: auth_me_retrieve
+      description: Endpoint returning authenticated user profile and identity.
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+          description: ''
+  /api/v1/auth/notifications/:
+    get:
+      operationId: auth_notifications_list
+      description: List all notifications for the authenticated user, optionally filtered
+        by ?unread=true.
+      summary: List user notifications
+      parameters:
+      - in: query
+        name: unread
+        schema:
+          type: boolean
+        description: Filter unread notifications only
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Notification'
+          description: ''
+  /api/v1/auth/notifications/{public_id}/read/:
+    post:
+      operationId: auth_notifications_read_create
+      description: Mark a specific notification as read by public_id.
+      summary: Mark notification as read
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+          description: ''
+  /api/v1/auth/notifications/read-all/:
+    post:
+      operationId: auth_notifications_read_all_create
+      description: Mark all notifications for the authenticated user as read.
+      summary: Mark all notifications as read
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/v1/auth/register/:
+    post:
+      operationId: auth_register_create
+      description: |-
+        User registration endpoint open to all applicants.
+        Throttled per IP via auth_register scope.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRegistrationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/UserRegistrationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/UserRegistrationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserRegistration'
+          description: ''
+  /api/v1/auth/token/refresh/:
+    post:
+      operationId: auth_token_refresh_create
+      description: |-
+        Token refresh endpoint generating new access token from refresh token.
+        Throttled per IP via auth_refresh scope.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRefreshRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenRefreshRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenRefreshRequest'
+        required: true
+      security:
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenRefresh'
+          description: ''
+  /api/v1/auth/token/verify/:
+    post:
+      operationId: auth_token_verify_create
+      description: |-
+        Takes a token and indicates if it is valid.  This view provides no
+        information about a token's fitness for a particular use.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenVerifyRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenVerifyRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenVerifyRequest'
+        required: true
+      security:
+      - jwt_auth: []
+      responses:
+        '200':
+          description: No response body
+  /api/v1/customer/favorites/:
+    get:
+      operationId: customer_favorites_list
+      description: Retrieve all pets saved to favorites by the authenticated customer.
+      summary: List customer favorite pets
+      tags:
+      - customer
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PetSummary'
+          description: ''
+  /api/v1/customer/favorites/{pet_public_id}/:
+    post:
+      operationId: customer_favorites_create
+      description: Toggle favorite status or explicitly add pet to customer favorites.
+      summary: Toggle or add pet to favorites
+      parameters:
+      - in: path
+        name: pet_public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - customer
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+        '201':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+    delete:
+      operationId: customer_favorites_destroy
+      description: Remove a pet from the customer's favorites by public_id.
+      summary: Remove pet from favorites
+      parameters:
+      - in: path
+        name: pet_public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - customer
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/v1/delivery/reviews/:
+    get:
+      operationId: delivery_reviews_retrieve
+      description: |-
+        GET /api/v1/delivery/reviews/
+        Lists all reviews for the authenticated driver, including average rating.
+      tags:
+      - delivery
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdoptionReviewDetail'
+          description: ''
+  /api/v1/delivery/tasks/{public_id}/collect-cash/:
+    post:
+      operationId: delivery_tasks_collect_cash_create
+      description: |-
+        Endpoints for delivery drivers and tracking.
+        - GET  /api/v1/delivery/tasks/active/ or GET /api/deliveries/driver-active/
+        - POST /api/v1/delivery/tasks/<id>/pickup/
+        - POST /api/v1/delivery/tasks/<id>/verify-doorstep/ or POST /api/deliveries/<id>/verify-otp/
+        - POST /api/v1/delivery/tasks/<id>/ping/ or POST /api/deliveries/<id>/ping/
+        - GET  /api/v1/delivery/tasks/<id>/tracking/ or GET /api/deliveries/<id>/track/
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - delivery
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollectCashRequestRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CollectCashRequestRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CollectCashRequestRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollectCashResponse'
+          description: ''
+        '400':
+          description: Bad request (e.g. wrong amount, total is 0, not COD)
+        '409':
+          description: Conflict (e.g. not out_for_delivery)
+  /api/v1/delivery/tasks/{public_id}/pickup/:
+    post:
+      operationId: delivery_tasks_pickup_create
+      description: |-
+        Endpoints for delivery drivers and tracking.
+        - GET  /api/v1/delivery/tasks/active/ or GET /api/deliveries/driver-active/
+        - POST /api/v1/delivery/tasks/<id>/pickup/
+        - POST /api/v1/delivery/tasks/<id>/verify-doorstep/ or POST /api/deliveries/<id>/verify-otp/
+        - POST /api/v1/delivery/tasks/<id>/ping/ or POST /api/deliveries/<id>/ping/
+        - GET  /api/v1/delivery/tasks/<id>/tracking/ or GET /api/deliveries/<id>/track/
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - delivery
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OTPVerificationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/OTPVerificationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/OTPVerificationRequest'
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryPickupResponse'
+          description: ''
+        '409':
+          description: Payment required or conflict
+  /api/v1/delivery/tasks/{public_id}/ping/:
+    post:
+      operationId: delivery_tasks_ping_create
+      description: |-
+        Endpoints for delivery drivers and tracking.
+        - GET  /api/v1/delivery/tasks/active/ or GET /api/deliveries/driver-active/
+        - POST /api/v1/delivery/tasks/<id>/pickup/
+        - POST /api/v1/delivery/tasks/<id>/verify-doorstep/ or POST /api/deliveries/<id>/verify-otp/
+        - POST /api/v1/delivery/tasks/<id>/ping/ or POST /api/deliveries/<id>/ping/
+        - GET  /api/v1/delivery/tasks/<id>/tracking/ or GET /api/deliveries/<id>/track/
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - delivery
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocationPingRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/LocationPingRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/LocationPingRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryPingResponse'
+          description: ''
+  /api/v1/delivery/tasks/{public_id}/status/:
+    post:
+      operationId: delivery_tasks_status_create
+      description: |-
+        Endpoints for delivery drivers and tracking.
+        - GET  /api/v1/delivery/tasks/active/ or GET /api/deliveries/driver-active/
+        - POST /api/v1/delivery/tasks/<id>/pickup/
+        - POST /api/v1/delivery/tasks/<id>/verify-doorstep/ or POST /api/deliveries/<id>/verify-otp/
+        - POST /api/v1/delivery/tasks/<id>/ping/ or POST /api/deliveries/<id>/ping/
+        - GET  /api/v1/delivery/tasks/<id>/tracking/ or GET /api/deliveries/<id>/track/
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - delivery
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeliveryStatusUpdateRequestRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/DeliveryStatusUpdateRequestRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/DeliveryStatusUpdateRequestRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryDriverTask'
+          description: ''
+    patch:
+      operationId: delivery_tasks_status_partial_update
+      description: |-
+        Endpoints for delivery drivers and tracking.
+        - GET  /api/v1/delivery/tasks/active/ or GET /api/deliveries/driver-active/
+        - POST /api/v1/delivery/tasks/<id>/pickup/
+        - POST /api/v1/delivery/tasks/<id>/verify-doorstep/ or POST /api/deliveries/<id>/verify-otp/
+        - POST /api/v1/delivery/tasks/<id>/ping/ or POST /api/deliveries/<id>/ping/
+        - GET  /api/v1/delivery/tasks/<id>/tracking/ or GET /api/deliveries/<id>/track/
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - delivery
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedDeliveryStatusUpdateRequestRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedDeliveryStatusUpdateRequestRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedDeliveryStatusUpdateRequestRequest'
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryDriverTask'
+          description: ''
+  /api/v1/delivery/tasks/{public_id}/track/:
+    get:
+      operationId: delivery_tasks_track_retrieve
+      description: |-
+        Endpoints for delivery drivers and tracking.
+        - GET  /api/v1/delivery/tasks/active/ or GET /api/deliveries/driver-active/
+        - POST /api/v1/delivery/tasks/<id>/pickup/
+        - POST /api/v1/delivery/tasks/<id>/verify-doorstep/ or POST /api/deliveries/<id>/verify-otp/
+        - POST /api/v1/delivery/tasks/<id>/ping/ or POST /api/deliveries/<id>/ping/
+        - GET  /api/v1/delivery/tasks/<id>/tracking/ or GET /api/deliveries/<id>/track/
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - delivery
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryTrackingResponse'
+          description: ''
+  /api/v1/delivery/tasks/{public_id}/tracking/:
+    get:
+      operationId: delivery_tasks_tracking_retrieve
+      description: |-
+        Endpoints for delivery drivers and tracking.
+        - GET  /api/v1/delivery/tasks/active/ or GET /api/deliveries/driver-active/
+        - POST /api/v1/delivery/tasks/<id>/pickup/
+        - POST /api/v1/delivery/tasks/<id>/verify-doorstep/ or POST /api/deliveries/<id>/verify-otp/
+        - POST /api/v1/delivery/tasks/<id>/ping/ or POST /api/deliveries/<id>/ping/
+        - GET  /api/v1/delivery/tasks/<id>/tracking/ or GET /api/deliveries/<id>/track/
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - delivery
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryTrackingResponse'
+          description: ''
+  /api/v1/delivery/tasks/{public_id}/verify-doorstep/:
+    post:
+      operationId: delivery_tasks_verify_doorstep_create
+      description: |-
+        Endpoints for delivery drivers and tracking.
+        - GET  /api/v1/delivery/tasks/active/ or GET /api/deliveries/driver-active/
+        - POST /api/v1/delivery/tasks/<id>/pickup/
+        - POST /api/v1/delivery/tasks/<id>/verify-doorstep/ or POST /api/deliveries/<id>/verify-otp/
+        - POST /api/v1/delivery/tasks/<id>/ping/ or POST /api/deliveries/<id>/ping/
+        - GET  /api/v1/delivery/tasks/<id>/tracking/ or GET /api/deliveries/<id>/track/
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - delivery
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OTPVerificationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/OTPVerificationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/OTPVerificationRequest'
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryDoorstepResponse'
+          description: ''
+        '409':
+          description: Cash not collected or wrong state
+  /api/v1/delivery/tasks/{public_id}/verify-otp/:
+    post:
+      operationId: delivery_tasks_verify_otp_create
+      description: |-
+        Endpoints for delivery drivers and tracking.
+        - GET  /api/v1/delivery/tasks/active/ or GET /api/deliveries/driver-active/
+        - POST /api/v1/delivery/tasks/<id>/pickup/
+        - POST /api/v1/delivery/tasks/<id>/verify-doorstep/ or POST /api/deliveries/<id>/verify-otp/
+        - POST /api/v1/delivery/tasks/<id>/ping/ or POST /api/deliveries/<id>/ping/
+        - GET  /api/v1/delivery/tasks/<id>/tracking/ or GET /api/deliveries/<id>/track/
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - delivery
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OTPVerificationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/OTPVerificationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/OTPVerificationRequest'
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryDoorstepResponse'
+          description: ''
+  /api/v1/delivery/tasks/active/:
+    get:
+      operationId: delivery_tasks_active_retrieve
+      description: |-
+        Endpoints for delivery drivers and tracking.
+        - GET  /api/v1/delivery/tasks/active/ or GET /api/deliveries/driver-active/
+        - POST /api/v1/delivery/tasks/<id>/pickup/
+        - POST /api/v1/delivery/tasks/<id>/verify-doorstep/ or POST /api/deliveries/<id>/verify-otp/
+        - POST /api/v1/delivery/tasks/<id>/ping/ or POST /api/deliveries/<id>/ping/
+        - GET  /api/v1/delivery/tasks/<id>/tracking/ or GET /api/deliveries/<id>/track/
+      tags:
+      - delivery
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryDriverTask'
+          description: ''
+  /api/v1/delivery/tasks/driver-active/:
+    get:
+      operationId: delivery_tasks_driver_active_retrieve
+      description: |-
+        Endpoints for delivery drivers and tracking.
+        - GET  /api/v1/delivery/tasks/active/ or GET /api/deliveries/driver-active/
+        - POST /api/v1/delivery/tasks/<id>/pickup/
+        - POST /api/v1/delivery/tasks/<id>/verify-doorstep/ or POST /api/deliveries/<id>/verify-otp/
+        - POST /api/v1/delivery/tasks/<id>/ping/ or POST /api/deliveries/<id>/ping/
+        - GET  /api/v1/delivery/tasks/<id>/tracking/ or GET /api/deliveries/<id>/track/
+      tags:
+      - delivery
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryDriverTask'
+          description: ''
+  /api/v1/payments/create-order/:
+    post:
+      operationId: payments_create_order_create
+      description: |-
+        Razorpay payment processing endpoints:
+        - POST /api/v1/payments/create-order/
+        - POST /api/v1/payments/verify/
+        - POST /api/v1/payments/webhook/
+      summary: Create Razorpay payment order for adoption delivery (applicant only)
+      tags:
+      - payments
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentOrderCreateRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PaymentOrderCreateRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PaymentOrderCreateRequest'
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentLedger'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/v1/payments/verify/:
+    post:
+      operationId: payments_verify_create
+      description: |-
+        Razorpay payment processing endpoints:
+        - POST /api/v1/payments/create-order/
+        - POST /api/v1/payments/verify/
+        - POST /api/v1/payments/webhook/
+      summary: Verify Razorpay payment signature and mark captured (applicant only)
+      tags:
+      - payments
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentVerifyRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PaymentVerifyRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PaymentVerifyRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentLedger'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+        '404':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/v1/payments/webhook/:
+    post:
+      operationId: payments_webhook_create
+      description: |-
+        Razorpay payment processing endpoints:
+        - POST /api/v1/payments/create-order/
+        - POST /api/v1/payments/verify/
+        - POST /api/v1/payments/webhook/
+      summary: Razorpay webhook listener (signature verified over raw body, public
+        auth)
+      tags:
+      - payments
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentOrderCreateRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PaymentOrderCreateRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PaymentOrderCreateRequest'
+      security:
+      - jwt_auth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/v1/pets/:
+    get:
+      operationId: pets_list
+      description: Public ViewSet for viewing available pets.
+      parameters:
+      - in: query
+        name: age
+        schema:
+          type: integer
+      - in: query
+        name: breed
+        schema:
+          type: string
+      - in: query
+        name: city
+        schema:
+          type: string
+      - in: query
+        name: gender
+        schema:
+          type: string
+      - in: query
+        name: is_vaccinated
+        schema:
+          type: boolean
+      - in: query
+        name: max_age
+        schema:
+          type: integer
+      - in: query
+        name: min_age
+        schema:
+          type: integer
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: search
+        required: false
+        in: query
+        description: A search term.
+        schema:
+          type: string
+      - in: query
+        name: shelter
+        schema:
+          type: string
+      - in: query
+        name: shelter_id
+        schema:
+          type: number
+      - in: query
+        name: size
+        schema:
+          type: string
+      - in: query
+        name: species
+        schema:
+          type: string
+      - in: query
+        name: status
+        schema:
+          type: string
+      - in: query
+        name: vaccinated
+        schema:
+          type: boolean
+      tags:
+      - pets
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedPetListList'
+          description: ''
+    post:
+      operationId: pets_create
+      description: Public ViewSet for viewing available pets.
+      tags:
+      - pets
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PetWriteRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PetWriteRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PetWriteRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetWrite'
+          description: ''
+  /api/v1/pets/{pet_public_id}/images/:
+    post:
+      operationId: pets_images_create
+      description: |-
+        Upload and add an image or multiple images to a pet gallery.
+        POST /api/pets/<id>/images/
+      parameters:
+      - in: path
+        name: pet_public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - pets
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PetImageRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PetImageRequest'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PetImageRequest'
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetImage'
+          description: ''
+  /api/v1/pets/{pet_public_id}/medical-records/:
+    get:
+      operationId: pets_medical_records_list
+      description: |-
+        List and create medical records for a pet.
+        POST /api/pets/<id>/medical/
+      parameters:
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - in: path
+        name: pet_public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      - name: search
+        required: false
+        in: query
+        description: A search term.
+        schema:
+          type: string
+      tags:
+      - pets
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedPetMedicalRecordList'
+          description: ''
+    post:
+      operationId: pets_medical_records_create
+      description: |-
+        List and create medical records for a pet.
+        POST /api/pets/<id>/medical/
+      parameters:
+      - in: path
+        name: pet_public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - pets
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PetMedicalRecordRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PetMedicalRecordRequest'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PetMedicalRecordRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetMedicalRecord'
+          description: ''
+  /api/v1/pets/{public_id}/:
+    get:
+      operationId: pets_retrieve
+      description: Public ViewSet for viewing available pets.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - pets
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetDetail'
+          description: ''
+    put:
+      operationId: pets_update
+      description: Public ViewSet for viewing available pets.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - pets
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PetWriteRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PetWriteRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PetWriteRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetWrite'
+          description: ''
+    patch:
+      operationId: pets_partial_update
+      description: Public ViewSet for viewing available pets.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - pets
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedPetWriteRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedPetWriteRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedPetWriteRequest'
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetWrite'
+          description: ''
+    delete:
+      operationId: pets_destroy
+      description: Public ViewSet for viewing available pets.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - pets
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/reviews/:
+    post:
+      operationId: reviews_create
+      description: |-
+        Submit dual rating review for shelter care and delivery transit.
+        POST /api/reviews/
+      tags:
+      - reviews
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewCreateRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ReviewCreateRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ReviewCreateRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewCreate'
+          description: ''
+  /api/v1/shelter/applications/:
+    get:
+      operationId: shelter_applications_list
+      description: |-
+        ViewSet for Shelter partners to review, approve, or reject adoption applications
+        submitted for their listed pets.
+      parameters:
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: search
+        required: false
+        in: query
+        description: A search term.
+        schema:
+          type: string
+      tags:
+      - shelter
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedShelterApplicationList'
+          description: ''
+  /api/v1/shelter/applications/{public_id}/:
+    get:
+      operationId: shelter_applications_retrieve
+      description: |-
+        ViewSet for Shelter partners to review, approve, or reject adoption applications
+        submitted for their listed pets.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShelterApplication'
+          description: ''
+  /api/v1/shelter/applications/{public_id}/approve/:
+    post:
+      operationId: shelter_applications_approve_create
+      description: |-
+        ViewSet for Shelter partners to review, approve, or reject adoption applications
+        submitted for their listed pets.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShelterApplicationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ShelterApplicationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ShelterApplicationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShelterApplication'
+          description: ''
+  /api/v1/shelter/applications/{public_id}/reject/:
+    post:
+      operationId: shelter_applications_reject_create
+      description: |-
+        ViewSet for Shelter partners to review, approve, or reject adoption applications
+        submitted for their listed pets.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShelterApplicationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ShelterApplicationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ShelterApplicationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShelterApplication'
+          description: ''
+  /api/v1/shelter/applications/{public_id}/review/:
+    post:
+      operationId: shelter_applications_review_create
+      description: |-
+        ViewSet for Shelter partners to review, approve, or reject adoption applications
+        submitted for their listed pets.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShelterApplicationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ShelterApplicationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ShelterApplicationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShelterApplication'
+          description: ''
+  /api/v1/shelter/deliveries/:
+    get:
+      operationId: shelter_deliveries_list
+      description: |-
+        Endpoints for shelter admins to assign and manage deliveries.
+        - POST /api/v1/shelter/deliveries/assign/
+        - POST /api/v1/shelter/deliveries/<id>/reissue-otp/
+        - GET  /api/v1/shelter/deliveries/drivers/
+        - GET  /api/v1/shelter/deliveries/
+      parameters:
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: search
+        required: false
+        in: query
+        description: A search term.
+        schema:
+          type: string
+      tags:
+      - shelter
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedShelterDeliveryList'
+          description: ''
+  /api/v1/shelter/deliveries/{public_id}/cancel/:
+    post:
+      operationId: shelter_deliveries_cancel_create
+      description: Verified shelter or platform administrator cancels an assigned
+        or out_for_delivery task when no cash has been collected.
+      summary: Cancel delivery task
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryCancelResponse'
+          description: ''
+        '400':
+          description: Invalid delivery status for cancellation
+        '403':
+          description: Unauthorized or foreign shelter
+        '409':
+          description: Cash already collected or online payment captured (refund required)
+  /api/v1/shelter/deliveries/{public_id}/reissue-otp/:
+    post:
+      operationId: shelter_deliveries_reissue_otp_create
+      description: |-
+        Endpoints for shelter admins to assign and manage deliveries.
+        - POST /api/v1/shelter/deliveries/assign/
+        - POST /api/v1/shelter/deliveries/<id>/reissue-otp/
+        - GET  /api/v1/shelter/deliveries/drivers/
+        - GET  /api/v1/shelter/deliveries/
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeliveryReissueOTPRequestRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/DeliveryReissueOTPRequestRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/DeliveryReissueOTPRequestRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryReissueOTPResponse'
+          description: ''
+  /api/v1/shelter/deliveries/assign/:
+    post:
+      operationId: shelter_deliveries_assign_create
+      description: |-
+        Endpoints for shelter admins to assign and manage deliveries.
+        - POST /api/v1/shelter/deliveries/assign/
+        - POST /api/v1/shelter/deliveries/<id>/reissue-otp/
+        - GET  /api/v1/shelter/deliveries/drivers/
+        - GET  /api/v1/shelter/deliveries/
+      tags:
+      - shelter
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeliveryAssignRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/DeliveryAssignRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/DeliveryAssignRequest'
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryAssignResponse'
+          description: ''
+  /api/v1/shelter/deliveries/drivers/:
+    get:
+      operationId: shelter_deliveries_drivers_list
+      description: |-
+        Endpoints for shelter admins to assign and manage deliveries.
+        - POST /api/v1/shelter/deliveries/assign/
+        - POST /api/v1/shelter/deliveries/<id>/reissue-otp/
+        - GET  /api/v1/shelter/deliveries/drivers/
+        - GET  /api/v1/shelter/deliveries/
+      parameters:
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: search
+        required: false
+        in: query
+        description: A search term.
+        schema:
+          type: string
+      tags:
+      - shelter
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDriverListList'
+          description: ''
+  /api/v1/shelter/pets/:
+    get:
+      operationId: shelter_pets_list
+      description: |-
+        Dedicated multi-tenant ViewSet for Shelter users to manage their own pets,
+        multi-image galleries, and medical history records.
+      parameters:
+      - in: query
+        name: age
+        schema:
+          type: integer
+      - in: query
+        name: breed
+        schema:
+          type: string
+      - in: query
+        name: city
+        schema:
+          type: string
+      - in: query
+        name: gender
+        schema:
+          type: string
+      - in: query
+        name: is_vaccinated
+        schema:
+          type: boolean
+      - in: query
+        name: max_age
+        schema:
+          type: integer
+      - in: query
+        name: min_age
+        schema:
+          type: integer
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: search
+        required: false
+        in: query
+        description: A search term.
+        schema:
+          type: string
+      - in: query
+        name: shelter
+        schema:
+          type: string
+      - in: query
+        name: shelter_id
+        schema:
+          type: number
+      - in: query
+        name: size
+        schema:
+          type: string
+      - in: query
+        name: species
+        schema:
+          type: string
+      - in: query
+        name: status
+        schema:
+          type: string
+      - in: query
+        name: vaccinated
+        schema:
+          type: boolean
+      tags:
+      - shelter
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedPetListList'
+          description: ''
+    post:
+      operationId: shelter_pets_create
+      description: |-
+        Dedicated multi-tenant ViewSet for Shelter users to manage their own pets,
+        multi-image galleries, and medical history records.
+      tags:
+      - shelter
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PetWriteRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PetWriteRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PetWriteRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetWrite'
+          description: ''
+  /api/v1/shelter/pets/{public_id}/:
+    get:
+      operationId: shelter_pets_retrieve
+      description: |-
+        Dedicated multi-tenant ViewSet for Shelter users to manage their own pets,
+        multi-image galleries, and medical history records.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetDetail'
+          description: ''
+    put:
+      operationId: shelter_pets_update
+      description: |-
+        Dedicated multi-tenant ViewSet for Shelter users to manage their own pets,
+        multi-image galleries, and medical history records.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PetWriteRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PetWriteRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PetWriteRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetWrite'
+          description: ''
+    patch:
+      operationId: shelter_pets_partial_update
+      description: |-
+        Dedicated multi-tenant ViewSet for Shelter users to manage their own pets,
+        multi-image galleries, and medical history records.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedPetWriteRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedPetWriteRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedPetWriteRequest'
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetWrite'
+          description: ''
+    delete:
+      operationId: shelter_pets_destroy
+      description: |-
+        Dedicated multi-tenant ViewSet for Shelter users to manage their own pets,
+        multi-image galleries, and medical history records.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/shelter/pets/{public_id}/images/:
+    get:
+      operationId: shelter_pets_images_retrieve
+      description: |-
+        Dedicated multi-tenant ViewSet for Shelter users to manage their own pets,
+        multi-image galleries, and medical history records.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetDetail'
+          description: ''
+    post:
+      operationId: shelter_pets_images_create
+      description: |-
+        Dedicated multi-tenant ViewSet for Shelter users to manage their own pets,
+        multi-image galleries, and medical history records.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PetDetailRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PetDetailRequest'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PetDetailRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetDetail'
+          description: ''
+  /api/v1/shelter/pets/{public_id}/images/{image_id}/:
+    delete:
+      operationId: shelter_pets_images_destroy
+      description: |-
+        Dedicated multi-tenant ViewSet for Shelter users to manage their own pets,
+        multi-image galleries, and medical history records.
+      parameters:
+      - in: path
+        name: image_id
+        schema:
+          type: string
+          pattern: ^[^/]+$
+        required: true
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/shelter/pets/{public_id}/medical/:
+    get:
+      operationId: shelter_pets_medical_retrieve
+      description: |-
+        Dedicated multi-tenant ViewSet for Shelter users to manage their own pets,
+        multi-image galleries, and medical history records.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetDetail'
+          description: ''
+    put:
+      operationId: shelter_pets_medical_update
+      description: |-
+        Dedicated multi-tenant ViewSet for Shelter users to manage their own pets,
+        multi-image galleries, and medical history records.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PetDetailRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PetDetailRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PetDetailRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetDetail'
+          description: ''
+    patch:
+      operationId: shelter_pets_medical_partial_update
+      description: |-
+        Dedicated multi-tenant ViewSet for Shelter users to manage their own pets,
+        multi-image galleries, and medical history records.
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedPetDetailRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedPetDetailRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedPetDetailRequest'
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PetDetail'
+          description: ''
+  /api/v1/shelter/reviews/:
+    get:
+      operationId: shelter_reviews_retrieve
+      description: |-
+        GET /api/v1/shelter/reviews/
+        Lists all reviews for the authenticated shelter, including average rating.
+      tags:
+      - shelter
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdoptionReviewDetail'
+          description: ''
+components:
+  schemas:
+    AdminPetStats:
+      type: object
+      properties:
+        total:
+          type: integer
+        available:
+          type: integer
+        adopted:
+          type: integer
+        in_transit:
+          type: integer
+        pending:
+          type: integer
+      required:
+      - adopted
+      - available
+      - in_transit
+      - pending
+      - total
+    AdminPlatformStats:
+      type: object
+      properties:
+        total_users:
+          $ref: '#/components/schemas/AdminUserStats'
+        total_pets:
+          $ref: '#/components/schemas/AdminPetStats'
+        active_deliveries:
+          type: integer
+        total_revenue_inr:
+          type: number
+          format: double
+        average_shelter_rating:
+          type: number
+          format: double
+        average_driver_rating:
+          type: number
+          format: double
+      required:
+      - active_deliveries
+      - average_driver_rating
+      - average_shelter_rating
+      - total_pets
+      - total_revenue_inr
+      - total_users
+    AdminShelterDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        user_id:
+          type: integer
+          readOnly: true
+        user_public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        user_username:
+          type: string
+          description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
+            only.
+          readOnly: true
+        user_email:
+          type: string
+          format: email
+          title: Email address
+          readOnly: true
+        user_phone:
+          type: string
+          readOnly: true
+        organization_name:
+          type: string
+          maxLength: 150
+        license_no:
+          type: string
+          maxLength: 50
+        pickup_address:
+          type: string
+        city:
+          type: string
+          maxLength: 100
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        is_active:
+          type: boolean
+        is_verified:
+          type: boolean
+        verification_status:
+          type: string
+          readOnly: true
+        pet_inventory_count:
+          type: integer
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - id
+      - organization_name
+      - pet_inventory_count
+      - pickup_address
+      - public_id
+      - user_email
+      - user_id
+      - user_phone
+      - user_public_id
+      - user_username
+      - verification_status
+    AdminShelterDetailRequest:
+      type: object
+      properties:
+        organization_name:
+          type: string
+          minLength: 1
+          maxLength: 150
+        license_no:
+          type: string
+          maxLength: 50
+        pickup_address:
+          type: string
+          minLength: 1
+        city:
+          type: string
+          maxLength: 100
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        is_active:
+          type: boolean
+        is_verified:
+          type: boolean
+      required:
+      - organization_name
+      - pickup_address
+    AdminUserStats:
+      type: object
+      properties:
+        total:
+          type: integer
+        admin:
+          type: integer
+        shelter:
+          type: integer
+        delivery:
+          type: integer
+        customer:
+          type: integer
+      required:
+      - admin
+      - customer
+      - delivery
+      - shelter
+      - total
+    AdoptionPetSummary:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          maxLength: 100
+        species:
+          $ref: '#/components/schemas/SpeciesEnum'
+        breed:
+          type: string
+          maxLength: 100
+        adoption_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          description: Medical care fee (e.g. ₹100 dog, ₹200 cat)
+        status:
+          $ref: '#/components/schemas/PetStatus'
+        primary_image:
+          type: string
+          format: uri
+          nullable: true
+          readOnly: true
+      required:
+      - name
+      - primary_image
+      - public_id
+      - species
+    AdoptionPetSummaryRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        species:
+          $ref: '#/components/schemas/SpeciesEnum'
+        breed:
+          type: string
+          maxLength: 100
+        adoption_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          description: Medical care fee (e.g. ₹100 dog, ₹200 cat)
+        status:
+          $ref: '#/components/schemas/PetStatus'
+      required:
+      - name
+      - species
+    AdoptionReviewCreate:
+      type: object
+      properties:
+        shelter_rating:
+          type: integer
+          maximum: 5
+          minimum: 1
+        shelter_review:
+          type: string
+          default: ''
+        driver_rating:
+          type: integer
+          maximum: 5
+          minimum: 1
+        driver_review:
+          type: string
+          default: ''
+      required:
+      - driver_rating
+      - shelter_rating
+    AdoptionReviewCreateRequest:
+      type: object
+      properties:
+        shelter_rating:
+          type: integer
+          maximum: 5
+          minimum: 1
+        shelter_review:
+          type: string
+          default: ''
+        driver_rating:
+          type: integer
+          maximum: 5
+          minimum: 1
+        driver_review:
+          type: string
+          default: ''
+      required:
+      - driver_rating
+      - shelter_rating
+    AdoptionReviewDetail:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        application_public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        reviewer_name:
+          type: string
+          readOnly: true
+        shelter_rating:
+          type: integer
+          readOnly: true
+        shelter_review:
+          type: string
+          readOnly: true
+        driver_rating:
+          type: integer
+          readOnly: true
+        driver_review:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - application_public_id
+      - created_at
+      - driver_rating
+      - driver_review
+      - public_id
+      - reviewer_name
+      - shelter_rating
+      - shelter_review
+    ApplicantSummary:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        username:
+          type: string
+          description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
+            only.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        email:
+          title: Email address
+          oneOf:
+          - type: string
+            format: email
+            maxLength: 254
+          - type: string
+            maxLength: 0
+        phone:
+          type: string
+          maxLength: 20
+        first_name:
+          type: string
+          maxLength: 150
+        last_name:
+          type: string
+          maxLength: 150
+      required:
+      - id
+      - public_id
+      - username
+    ApplicantSummaryRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          minLength: 1
+          description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
+            only.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        email:
+          title: Email address
+          oneOf:
+          - type: string
+            format: email
+            maxLength: 254
+          - type: string
+            maxLength: 0
+        phone:
+          type: string
+          maxLength: 20
+        first_name:
+          type: string
+          maxLength: 150
+        last_name:
+          type: string
+          maxLength: 150
+      required:
+      - username
+    ApplicationCreate:
+      type: object
+      properties:
+        living_situation:
+          type: string
+          maxLength: 255
+        has_other_pets:
+          type: boolean
+          default: false
+        other_pets_description:
+          type: string
+          default: ''
+        id_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            default: ''
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            default: ''
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_type:
+          type: string
+          default: own_house
+          maxLength: 50
+        has_fenced_yard:
+          type: boolean
+          default: false
+        dropoff_address:
+          type: string
+          default: ''
+        delivery_address:
+          type: string
+          default: ''
+        delivery_city:
+          type: string
+          default: ''
+          maxLength: 100
+        delivery_pincode:
+          type: string
+          default: ''
+          maxLength: 10
+        destination_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        destination_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        customer_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        customer_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        contact_phone:
+          type: string
+          maxLength: 20
+        application_notes:
+          type: string
+          default: ''
+      required:
+      - contact_phone
+      - living_situation
+    ApplicationCreateRequest:
+      type: object
+      properties:
+        pet_public_id:
+          type: string
+          format: uuid
+          writeOnly: true
+        pet_id:
+          type: string
+          writeOnly: true
+          minLength: 1
+        living_situation:
+          type: string
+          minLength: 1
+          maxLength: 255
+        has_other_pets:
+          type: boolean
+          default: false
+        other_pets_description:
+          type: string
+          default: ''
+        id_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            default: ''
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            default: ''
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_type:
+          type: string
+          default: own_house
+          maxLength: 50
+        has_fenced_yard:
+          type: boolean
+          default: false
+        dropoff_address:
+          type: string
+          default: ''
+        delivery_address:
+          type: string
+          default: ''
+        delivery_city:
+          type: string
+          default: ''
+          maxLength: 100
+        delivery_pincode:
+          type: string
+          default: ''
+          maxLength: 10
+        destination_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        destination_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        customer_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        customer_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        contact_phone:
+          type: string
+          minLength: 1
+          maxLength: 20
+        application_notes:
+          type: string
+          default: ''
+      required:
+      - contact_phone
+      - living_situation
+    ApplicationStatus:
+      enum:
+      - submitted
+      - reviewing
+      - approved
+      - rejected
+      - cancelled
+      - completed
+      type: string
+      description: |-
+        * `submitted` - Submitted
+        * `reviewing` - Reviewing
+        * `approved` - Approved
+        * `rejected` - Rejected
+        * `cancelled` - Cancelled
+        * `completed` - Completed
+    CollectCashRequestRequest:
+      type: object
+      properties:
+        amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+      required:
+      - amount
+    CollectCashResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        cash_collected:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        remaining_amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        payment_status:
+          type: string
+        payment_id:
+          type: string
+          format: uuid
+      required:
+      - cash_collected
+      - message
+      - payment_status
+      - remaining_amount
+    CustomTokenObtainPairRequest:
+      type: object
+      description: Custom JWT serializer that embeds user_id, public_id, email, role,
+        shelter_id, and delivery_id into the JWT payload.
+      properties:
+        username:
+          type: string
+          writeOnly: true
+          minLength: 1
+        password:
+          type: string
+          writeOnly: true
+          minLength: 1
+      required:
+      - password
+      - username
+    CustomerApplication:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/ApplicationStatus'
+          readOnly: true
+        living_situation:
+          type: string
+          maxLength: 255
+        has_other_pets:
+          type: boolean
+        other_pets_description:
+          type: string
+        id_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_type:
+          type: string
+          maxLength: 50
+        has_fenced_yard:
+          type: boolean
+        dropoff_address:
+          type: string
+        delivery_address:
+          type: string
+        delivery_city:
+          type: string
+          maxLength: 100
+        delivery_pincode:
+          type: string
+          maxLength: 10
+        destination_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        destination_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        contact_phone:
+          type: string
+          maxLength: 20
+        customer_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        customer_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        pet_care_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        base_delivery_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        distance_km:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+        distance_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        total_amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        application_notes:
+          type: string
+        pet:
+          allOf:
+          - $ref: '#/components/schemas/AdoptionPetSummary'
+          readOnly: true
+        submitted_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - contact_phone
+      - id
+      - living_situation
+      - pet
+      - public_id
+      - status
+      - submitted_at
+      - updated_at
+    CustomerApplicationRequest:
+      type: object
+      properties:
+        living_situation:
+          type: string
+          minLength: 1
+          maxLength: 255
+        has_other_pets:
+          type: boolean
+        other_pets_description:
+          type: string
+        id_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_type:
+          type: string
+          maxLength: 50
+        has_fenced_yard:
+          type: boolean
+        dropoff_address:
+          type: string
+        delivery_address:
+          type: string
+        delivery_city:
+          type: string
+          maxLength: 100
+        delivery_pincode:
+          type: string
+          maxLength: 10
+        destination_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        destination_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        contact_phone:
+          type: string
+          minLength: 1
+          maxLength: 20
+        customer_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        customer_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        pet_care_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        base_delivery_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        distance_km:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+        distance_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        total_amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        application_notes:
+          type: string
+      required:
+      - contact_phone
+      - living_situation
+    DeliveryAssignRequest:
+      type: object
+      properties:
+        application_public_id:
+          type: string
+          format: uuid
+        application_id:
+          type: string
+          minLength: 1
+        application_ref:
+          type: string
+          minLength: 1
+        driver_public_id:
+          type: string
+          format: uuid
+        driver_id:
+          type: string
+          minLength: 1
+        driver_ref:
+          type: string
+          minLength: 1
+        payment_method:
+          type: string
+          minLength: 1
+          default: unset
+    DeliveryAssignResponse:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        application_public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        driver_public_id:
+          type: string
+          format: uuid
+          readOnly: true
+          nullable: true
+        driver_name:
+          type: string
+          nullable: true
+          readOnly: true
+        customer_name:
+          type: string
+          nullable: true
+          readOnly: true
+        pet_name:
+          type: string
+          nullable: true
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/DeliveryStatus'
+          readOnly: true
+        pickup_otp_attempts:
+          type: integer
+          readOnly: true
+        doorstep_otp_attempts:
+          type: integer
+          readOnly: true
+        expires_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        doorstep_otp_expires_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        doorstep_otp_sent_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        dispatched_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        delivered_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        current_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          readOnly: true
+          nullable: true
+        current_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        pickup_otp:
+          type: string
+          description: Plaintext 6-digit pickup OTP returned once upon assignment
+            to shelter.
+      required:
+      - application_public_id
+      - created_at
+      - current_latitude
+      - current_longitude
+      - customer_name
+      - delivered_at
+      - dispatched_at
+      - doorstep_otp_attempts
+      - doorstep_otp_expires_at
+      - doorstep_otp_sent_at
+      - driver_name
+      - driver_public_id
+      - expires_at
+      - pet_name
+      - pickup_otp_attempts
+      - public_id
+      - status
+    DeliveryCancelResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+        delivery_id:
+          type: string
+        status:
+          type: string
+        idempotent:
+          type: boolean
+      required:
+      - delivery_id
+      - detail
+      - status
+    DeliveryDoorstepResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        delivery:
+          $ref: '#/components/schemas/DeliveryDriverTask'
+      required:
+      - delivery
+      - message
+    DeliveryDriverTask:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/DeliveryStatus'
+          readOnly: true
+        destination_address:
+          type: string
+          readOnly: true
+        delivery_address:
+          type: string
+          readOnly: true
+        delivery_city:
+          type: string
+          readOnly: true
+        delivery_pincode:
+          type: string
+          readOnly: true
+        destination_latitude:
+          type: number
+          format: double
+          nullable: true
+          readOnly: true
+        destination_longitude:
+          type: number
+          format: double
+          nullable: true
+          readOnly: true
+        customer_phone:
+          type: string
+          readOnly: true
+        customer_name:
+          type: string
+          readOnly: true
+        pet_summary:
+          allOf:
+          - $ref: '#/components/schemas/DriverTaskPetSummary'
+          readOnly: true
+        dispatched_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        current_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          readOnly: true
+          nullable: true
+        current_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          readOnly: true
+          nullable: true
+        last_location_update:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - current_latitude
+      - current_longitude
+      - customer_name
+      - customer_phone
+      - delivery_address
+      - delivery_city
+      - delivery_pincode
+      - destination_address
+      - destination_latitude
+      - destination_longitude
+      - dispatched_at
+      - expires_at
+      - last_location_update
+      - pet_summary
+      - public_id
+      - status
+    DeliveryLocationCurrentLocation:
+      type: object
+      properties:
+        latitude:
+          type: string
+        longitude:
+          type: string
+        updated_at:
+          type: string
+      required:
+      - latitude
+      - longitude
+      - updated_at
+    DeliveryPickupResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        delivery:
+          $ref: '#/components/schemas/DeliveryDriverTask'
+      required:
+      - delivery
+      - message
+    DeliveryPingResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        ping:
+          $ref: '#/components/schemas/LocationPing'
+        current_location:
+          $ref: '#/components/schemas/DeliveryLocationCurrentLocation'
+      required:
+      - current_location
+      - message
+      - ping
+    DeliveryProfile:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        shelter:
+          type: integer
+        shelter_name:
+          type: string
+          readOnly: true
+        vehicle_type:
+          $ref: '#/components/schemas/VehicleTypeEnum'
+        vehicle_number:
+          type: string
+          maxLength: 30
+        is_available:
+          type: boolean
+        current_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        current_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - public_id
+      - shelter
+      - shelter_name
+      - vehicle_number
+    DeliveryReissueOTPRequestRequest:
+      type: object
+      properties:
+        purpose:
+          $ref: '#/components/schemas/PurposeEnum'
+      required:
+      - purpose
+    DeliveryReissueOTPResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        detail:
+          type: string
+        purpose:
+          type: string
+        pickup_otp:
+          type: string
+        doorstep_otp:
+          type: string
+        email_dispatched:
+          type: boolean
+        expires_at:
+          type: string
+          format: date-time
+      required:
+      - expires_at
+      - purpose
+    DeliveryStatus:
+      enum:
+      - assigned
+      - out_for_delivery
+      - delivered
+      - failed
+      type: string
+      description: |-
+        * `assigned` - Assigned
+        * `out_for_delivery` - Out for Delivery
+        * `delivered` - Delivered
+        * `failed` - Failed
+    DeliveryStatusUpdateRequestRequest:
+      type: object
+      properties:
+        status:
+          $ref: '#/components/schemas/DeliveryStatusUpdateRequestStatusEnum'
+      required:
+      - status
+    DeliveryStatusUpdateRequestStatusEnum:
+      enum:
+      - failed
+      type: string
+      description: '* `failed` - failed'
+    DeliveryTrackingCoordinates:
+      type: object
+      properties:
+        latitude:
+          type: string
+          nullable: true
+        longitude:
+          type: string
+          nullable: true
+        last_updated:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+      - last_updated
+      - latitude
+      - longitude
+    DeliveryTrackingResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        delivery:
+          type: object
+          additionalProperties: {}
+        current_coordinates:
+          $ref: '#/components/schemas/DeliveryTrackingCoordinates'
+        breadcrumbs:
+          type: array
+          items:
+            $ref: '#/components/schemas/LocationPing'
+      required:
+      - breadcrumbs
+      - current_coordinates
+      - delivery
+      - status
+    DriverCreateRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 150
+        email:
+          type: string
+          format: email
+          minLength: 1
+        password:
+          type: string
+          writeOnly: true
+          minLength: 6
+        first_name:
+          type: string
+          minLength: 1
+          default: ''
+          maxLength: 150
+        last_name:
+          type: string
+          minLength: 1
+          default: ''
+          maxLength: 150
+        phone:
+          type: string
+          minLength: 1
+          default: ''
+          maxLength: 20
+        address:
+          type: string
+          minLength: 1
+          default: ''
+        vehicle_type:
+          allOf:
+          - $ref: '#/components/schemas/VehicleTypeEnum'
+          default: car
+        vehicle_number:
+          type: string
+          minLength: 1
+          maxLength: 30
+      required:
+      - email
+      - password
+      - username
+      - vehicle_number
+    DriverList:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        user_public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          readOnly: true
+        phone:
+          type: string
+          readOnly: true
+        vehicle_type:
+          allOf:
+          - $ref: '#/components/schemas/VehicleTypeEnum'
+          readOnly: true
+        vehicle_number:
+          type: string
+          readOnly: true
+        is_available:
+          type: boolean
+          readOnly: true
+        current_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          readOnly: true
+          nullable: true
+        current_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          readOnly: true
+          nullable: true
+      required:
+      - current_latitude
+      - current_longitude
+      - is_available
+      - name
+      - phone
+      - public_id
+      - user_public_id
+      - vehicle_number
+      - vehicle_type
+    DriverTaskPetSummary:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          description: Public UUID of the pet
+        name:
+          type: string
+          description: Pet name
+        species:
+          type: string
+          description: Pet species (e.g. dog, cat)
+        breed:
+          type: string
+          description: Pet breed
+        age_months:
+          type: integer
+          description: Pet age in months
+      required:
+      - age_months
+      - breed
+      - name
+      - public_id
+      - species
+    GenderEnum:
+      enum:
+      - male
+      - female
+      type: string
+      description: |-
+        * `male` - Male
+        * `female` - Female
+    LocationPing:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+        pinged_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - latitude
+      - longitude
+      - pinged_at
+      - public_id
+    LocationPingRequest:
+      type: object
+      properties:
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+      required:
+      - latitude
+      - longitude
+    LogoutRequest:
+      type: object
+      properties:
+        refresh:
+          type: string
+          minLength: 1
+          description: The refresh JWT token to blacklist.
+      required:
+      - refresh
+    MedicalOverview:
+      type: object
+      properties:
+        is_vaccinated:
+          type: boolean
+          description: Whether the pet is fully vaccinated
+        is_neutered:
+          type: boolean
+          description: Whether the pet is spayed or neutered
+        medical_records:
+          type: array
+          items:
+            $ref: '#/components/schemas/MedicalOverviewRecord'
+          description: List of medical records
+      required:
+      - is_neutered
+      - is_vaccinated
+      - medical_records
+    MedicalOverviewRecord:
+      type: object
+      properties:
+        title:
+          type: string
+          description: Title or procedure name of the medical record
+        description:
+          type: string
+          nullable: true
+          description: Clinical description or notes
+        record_date:
+          type: string
+          format: date
+          description: Date the record or treatment was administered
+        vet_name:
+          type: string
+          nullable: true
+          description: Administering veterinarian or clinic name
+        document_url:
+          type: string
+          nullable: true
+          description: Direct document link (null for anonymous users or non-applicants)
+      required:
+      - record_date
+      - title
+    Notification:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        title:
+          type: string
+          maxLength: 150
+        message:
+          type: string
+        notification_type:
+          type: string
+          maxLength: 50
+        is_read:
+          type: boolean
+        action_url:
+          type: string
+          maxLength: 255
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - message
+      - public_id
+      - title
+    OTPVerificationRequest:
+      type: object
+      properties:
+        otp:
+          type: string
+          minLength: 6
+          maxLength: 6
+        secret_otp:
+          type: string
+          minLength: 6
+          maxLength: 6
+        code:
+          type: string
+          minLength: 6
+          maxLength: 6
+    PaginatedAdminShelterDetailList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminShelterDetail'
+    PaginatedCustomerApplicationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/CustomerApplication'
+    PaginatedDriverListList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/DriverList'
+    PaginatedPetListList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/PetList'
+    PaginatedPetMedicalRecordList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/PetMedicalRecord'
+    PaginatedShelterApplicationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShelterApplication'
+    PaginatedShelterDeliveryList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShelterDelivery'
+    PatchedAdminShelterDetailRequest:
+      type: object
+      properties:
+        organization_name:
+          type: string
+          minLength: 1
+          maxLength: 150
+        license_no:
+          type: string
+          maxLength: 50
+        pickup_address:
+          type: string
+          minLength: 1
+        city:
+          type: string
+          maxLength: 100
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        is_active:
+          type: boolean
+        is_verified:
+          type: boolean
+    PatchedCustomerApplicationRequest:
+      type: object
+      properties:
+        living_situation:
+          type: string
+          minLength: 1
+          maxLength: 255
+        has_other_pets:
+          type: boolean
+        other_pets_description:
+          type: string
+        id_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_type:
+          type: string
+          maxLength: 50
+        has_fenced_yard:
+          type: boolean
+        dropoff_address:
+          type: string
+        delivery_address:
+          type: string
+        delivery_city:
+          type: string
+          maxLength: 100
+        delivery_pincode:
+          type: string
+          maxLength: 10
+        destination_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        destination_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        contact_phone:
+          type: string
+          minLength: 1
+          maxLength: 20
+        customer_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        customer_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        pet_care_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        base_delivery_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        distance_km:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+        distance_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        total_amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        application_notes:
+          type: string
+    PatchedDeliveryStatusUpdateRequestRequest:
+      type: object
+      properties:
+        status:
+          $ref: '#/components/schemas/DeliveryStatusUpdateRequestStatusEnum'
+    PatchedPetDetailRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        species:
+          $ref: '#/components/schemas/SpeciesEnum'
+        breed:
+          type: string
+          maxLength: 100
+        age_months:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        gender:
+          $ref: '#/components/schemas/GenderEnum'
+        description:
+          type: string
+        adoption_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          description: Medical care fee (e.g. ₹100 dog, ₹200 cat)
+        image:
+          type: string
+          format: binary
+          nullable: true
+        is_vaccinated:
+          type: boolean
+        is_neutered:
+          type: boolean
+        status:
+          $ref: '#/components/schemas/PetStatus'
+    PatchedPetWriteRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        species:
+          $ref: '#/components/schemas/SpeciesEnum'
+        breed:
+          type: string
+          maxLength: 100
+        age_months:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        gender:
+          $ref: '#/components/schemas/GenderEnum'
+        description:
+          type: string
+        adoption_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          description: Medical care fee (e.g. ₹100 dog, ₹200 cat)
+        image:
+          type: string
+          format: binary
+          nullable: true
+        is_vaccinated:
+          type: boolean
+        is_neutered:
+          type: boolean
+        status:
+          $ref: '#/components/schemas/PetStatus'
+    PaymentLedger:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        delivery_public_id:
+          type: string
+          format: uuid
+          readOnly: true
+          nullable: true
+        application_public_id:
+          type: string
+          format: uuid
+          readOnly: true
+          nullable: true
+        status:
+          type: string
+          readOnly: true
+        amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          readOnly: true
+        amount_in_paise:
+          type: integer
+          readOnly: true
+        currency:
+          type: string
+          readOnly: true
+        payment_method:
+          type: string
+          readOnly: true
+        razorpay_order_id:
+          type: string
+          readOnly: true
+        razorpay_payment_id:
+          type: string
+          readOnly: true
+        razorpay_signature:
+          type: string
+          readOnly: true
+        transaction_id:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - amount
+      - amount_in_paise
+      - application_public_id
+      - created_at
+      - currency
+      - delivery_public_id
+      - payment_method
+      - public_id
+      - razorpay_order_id
+      - razorpay_payment_id
+      - razorpay_signature
+      - status
+      - transaction_id
+      - updated_at
+    PaymentOrderCreateRequest:
+      type: object
+      properties:
+        delivery_public_id:
+          type: string
+          format: uuid
+        delivery_id:
+          type: string
+          format: uuid
+        amount_in_paise:
+          type: integer
+          minimum: 1
+        amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,8}(?:\.\d{0,2})?$
+    PaymentVerifyRequest:
+      type: object
+      properties:
+        razorpay_order_id:
+          type: string
+          minLength: 1
+        razorpay_payment_id:
+          type: string
+          minLength: 1
+        razorpay_signature:
+          type: string
+          minLength: 1
+      required:
+      - razorpay_order_id
+      - razorpay_payment_id
+      - razorpay_signature
+    PetDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        shelter:
+          allOf:
+          - $ref: '#/components/schemas/ShelterProfile'
+          readOnly: true
+        name:
+          type: string
+          maxLength: 100
+        species:
+          $ref: '#/components/schemas/SpeciesEnum'
+        breed:
+          type: string
+          maxLength: 100
+        age_months:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        age_display:
+          type: string
+          readOnly: true
+        gender:
+          $ref: '#/components/schemas/GenderEnum'
+        description:
+          type: string
+        adoption_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          description: Medical care fee (e.g. ₹100 dog, ₹200 cat)
+        image:
+          type: string
+          format: uri
+          nullable: true
+        primary_image:
+          type: string
+          format: uri
+          nullable: true
+          readOnly: true
+        is_vaccinated:
+          type: boolean
+        is_neutered:
+          type: boolean
+        status:
+          $ref: '#/components/schemas/PetStatus'
+        images:
+          type: array
+          items:
+            $ref: '#/components/schemas/PetImage'
+          readOnly: true
+        medical_records:
+          type: array
+          items:
+            $ref: '#/components/schemas/PetMedicalRecord'
+          readOnly: true
+        medical_overview:
+          allOf:
+          - $ref: '#/components/schemas/MedicalOverview'
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - age_display
+      - age_months
+      - created_at
+      - gender
+      - id
+      - images
+      - medical_overview
+      - medical_records
+      - name
+      - primary_image
+      - public_id
+      - shelter
+      - species
+    PetDetailRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        species:
+          $ref: '#/components/schemas/SpeciesEnum'
+        breed:
+          type: string
+          maxLength: 100
+        age_months:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        gender:
+          $ref: '#/components/schemas/GenderEnum'
+        description:
+          type: string
+        adoption_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          description: Medical care fee (e.g. ₹100 dog, ₹200 cat)
+        image:
+          type: string
+          format: binary
+          nullable: true
+        is_vaccinated:
+          type: boolean
+        is_neutered:
+          type: boolean
+        status:
+          $ref: '#/components/schemas/PetStatus'
+      required:
+      - age_months
+      - gender
+      - name
+      - species
+    PetImage:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        image_url:
+          type: string
+          maxLength: 255
+        caption:
+          type: string
+          maxLength: 255
+        is_primary:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - id
+      - public_id
+    PetImageRequest:
+      type: object
+      properties:
+        image:
+          type: string
+          format: binary
+          writeOnly: true
+        image_url:
+          type: string
+          minLength: 1
+          maxLength: 255
+        caption:
+          type: string
+          maxLength: 255
+        is_primary:
+          type: boolean
+    PetList:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        shelter:
+          type: integer
+        shelter_name:
+          type: string
+          readOnly: true
+        name:
+          type: string
+          maxLength: 100
+        species:
+          $ref: '#/components/schemas/SpeciesEnum'
+        breed:
+          type: string
+          maxLength: 100
+        age_months:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        age_display:
+          type: string
+          readOnly: true
+        gender:
+          $ref: '#/components/schemas/GenderEnum'
+        description:
+          type: string
+        adoption_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          description: Medical care fee (e.g. ₹100 dog, ₹200 cat)
+        image:
+          type: string
+          format: uri
+          nullable: true
+        primary_image:
+          type: string
+          format: uri
+          nullable: true
+          readOnly: true
+        is_vaccinated:
+          type: boolean
+        is_neutered:
+          type: boolean
+        status:
+          $ref: '#/components/schemas/PetStatus'
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - age_display
+      - age_months
+      - created_at
+      - gender
+      - id
+      - name
+      - primary_image
+      - public_id
+      - shelter
+      - shelter_name
+      - species
+    PetMedicalRecord:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        title:
+          type: string
+          maxLength: 200
+        description:
+          type: string
+        vet_name:
+          type: string
+          maxLength: 150
+        record_date:
+          type: string
+          format: date
+        document_url:
+          type: string
+          format: uri
+          nullable: true
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - document_url
+      - id
+      - public_id
+      - title
+    PetMedicalRecordRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+        vet_name:
+          type: string
+          maxLength: 150
+        record_date:
+          type: string
+          format: date
+        administered_date:
+          type: string
+          format: date
+          writeOnly: true
+        document:
+          type: string
+          format: binary
+          writeOnly: true
+      required:
+      - title
+    PetStatus:
+      enum:
+      - available
+      - pending
+      - adopted
+      type: string
+      description: |-
+        * `available` - Available
+        * `pending` - Pending Adoption
+        * `adopted` - Adopted
+    PetSummary:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          readOnly: true
+        species:
+          allOf:
+          - $ref: '#/components/schemas/SpeciesEnum'
+          readOnly: true
+        breed:
+          type: string
+          readOnly: true
+        age_months:
+          type: integer
+          readOnly: true
+        age_display:
+          type: string
+          readOnly: true
+        gender:
+          allOf:
+          - $ref: '#/components/schemas/GenderEnum'
+          readOnly: true
+        size:
+          type: string
+          readOnly: true
+        description:
+          type: string
+          readOnly: true
+        adoption_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          readOnly: true
+          description: Medical care fee (e.g. ₹100 dog, ₹200 cat)
+        status:
+          allOf:
+          - $ref: '#/components/schemas/PetStatus'
+          readOnly: true
+        primary_image:
+          type: string
+          format: uri
+          nullable: true
+          readOnly: true
+        shelter_name:
+          type: string
+          readOnly: true
+        is_vaccinated:
+          type: boolean
+          readOnly: true
+        is_neutered:
+          type: boolean
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - adoption_fee
+      - age_display
+      - age_months
+      - breed
+      - created_at
+      - description
+      - gender
+      - is_neutered
+      - is_vaccinated
+      - name
+      - primary_image
+      - public_id
+      - shelter_name
+      - size
+      - species
+      - status
+    PetWrite:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          maxLength: 100
+        species:
+          $ref: '#/components/schemas/SpeciesEnum'
+        breed:
+          type: string
+          maxLength: 100
+        age_months:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        gender:
+          $ref: '#/components/schemas/GenderEnum'
+        description:
+          type: string
+        adoption_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          description: Medical care fee (e.g. ₹100 dog, ₹200 cat)
+        image:
+          type: string
+          format: uri
+          nullable: true
+        is_vaccinated:
+          type: boolean
+        is_neutered:
+          type: boolean
+        status:
+          $ref: '#/components/schemas/PetStatus'
+      required:
+      - age_months
+      - gender
+      - id
+      - name
+      - public_id
+      - species
+    PetWriteRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        species:
+          $ref: '#/components/schemas/SpeciesEnum'
+        breed:
+          type: string
+          maxLength: 100
+        age_months:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        gender:
+          $ref: '#/components/schemas/GenderEnum'
+        description:
+          type: string
+        adoption_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          description: Medical care fee (e.g. ₹100 dog, ₹200 cat)
+        image:
+          type: string
+          format: binary
+          nullable: true
+        is_vaccinated:
+          type: boolean
+        is_neutered:
+          type: boolean
+        status:
+          $ref: '#/components/schemas/PetStatus'
+      required:
+      - age_months
+      - gender
+      - name
+      - species
+    PurposeEnum:
+      enum:
+      - pickup
+      - doorstep
+      type: string
+      description: |-
+        * `pickup` - pickup
+        * `doorstep` - doorstep
+    ReviewCreate:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        shelter_rating:
+          type: integer
+          maximum: 5
+          minimum: 1
+          default: 5
+        shelter_review:
+          type: string
+          default: ''
+        driver_rating:
+          type: integer
+          maximum: 5
+          minimum: 1
+          default: 5
+        driver_review:
+          type: string
+          default: ''
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - id
+      - public_id
+    ReviewCreateRequest:
+      type: object
+      properties:
+        application_id:
+          type: string
+          writeOnly: true
+          minLength: 1
+        shelter_rating:
+          type: integer
+          maximum: 5
+          minimum: 1
+          default: 5
+        shelter_review:
+          type: string
+          default: ''
+        driver_rating:
+          type: integer
+          maximum: 5
+          minimum: 1
+          default: 5
+        driver_review:
+          type: string
+          default: ''
+      required:
+      - application_id
+    RoleEnum:
+      enum:
+      - admin
+      - shelter
+      - delivery
+      - customer
+      type: string
+      description: |-
+        * `admin` - Admin
+        * `shelter` - Shelter
+        * `delivery` - Delivery
+        * `customer` - Customer
+    ShelterApplication:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/ApplicationStatus'
+          readOnly: true
+        living_situation:
+          type: string
+          maxLength: 255
+        has_other_pets:
+          type: boolean
+        other_pets_description:
+          type: string
+        id_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_type:
+          type: string
+          maxLength: 50
+        has_fenced_yard:
+          type: boolean
+        dropoff_address:
+          type: string
+        delivery_address:
+          type: string
+        delivery_city:
+          type: string
+          maxLength: 100
+        delivery_pincode:
+          type: string
+          maxLength: 10
+        destination_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        destination_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        contact_phone:
+          type: string
+          maxLength: 20
+        customer_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        customer_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        pet_care_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        base_delivery_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        distance_km:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+        distance_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        total_amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        application_notes:
+          type: string
+        pet:
+          allOf:
+          - $ref: '#/components/schemas/AdoptionPetSummary'
+          readOnly: true
+        applicant:
+          allOf:
+          - $ref: '#/components/schemas/ApplicantSummary'
+          readOnly: true
+        submitted_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - applicant
+      - contact_phone
+      - id
+      - living_situation
+      - pet
+      - public_id
+      - status
+      - submitted_at
+      - updated_at
+    ShelterApplicationRequest:
+      type: object
+      properties:
+        living_situation:
+          type: string
+          minLength: 1
+          maxLength: 255
+        has_other_pets:
+          type: boolean
+        other_pets_description:
+          type: string
+        id_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_proof_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 500
+          - type: string
+            maxLength: 0
+        residence_type:
+          type: string
+          maxLength: 50
+        has_fenced_yard:
+          type: boolean
+        dropoff_address:
+          type: string
+        delivery_address:
+          type: string
+        delivery_city:
+          type: string
+          maxLength: 100
+        delivery_pincode:
+          type: string
+          maxLength: 10
+        destination_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        destination_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        contact_phone:
+          type: string
+          minLength: 1
+          maxLength: 20
+        customer_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        customer_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        pet_care_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        base_delivery_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        distance_km:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,4}(?:\.\d{0,2})?$
+        distance_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        total_amount:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        application_notes:
+          type: string
+      required:
+      - contact_phone
+      - living_situation
+    ShelterDelivery:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        application_public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        driver_public_id:
+          type: string
+          format: uuid
+          readOnly: true
+          nullable: true
+        driver_name:
+          type: string
+          nullable: true
+          readOnly: true
+        customer_name:
+          type: string
+          nullable: true
+          readOnly: true
+        pet_name:
+          type: string
+          nullable: true
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/DeliveryStatus'
+          readOnly: true
+        pickup_otp_attempts:
+          type: integer
+          readOnly: true
+        doorstep_otp_attempts:
+          type: integer
+          readOnly: true
+        expires_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        doorstep_otp_expires_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        doorstep_otp_sent_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        dispatched_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        delivered_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        current_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          readOnly: true
+          nullable: true
+        current_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - application_public_id
+      - created_at
+      - current_latitude
+      - current_longitude
+      - customer_name
+      - delivered_at
+      - dispatched_at
+      - doorstep_otp_attempts
+      - doorstep_otp_expires_at
+      - doorstep_otp_sent_at
+      - driver_name
+      - driver_public_id
+      - expires_at
+      - pet_name
+      - pickup_otp_attempts
+      - public_id
+      - status
+    ShelterProfile:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        organization_name:
+          type: string
+          maxLength: 150
+        license_no:
+          type: string
+          maxLength: 50
+        pickup_address:
+          type: string
+        city:
+          type: string
+          maxLength: 100
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        is_active:
+          type: boolean
+        is_verified:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - organization_name
+      - pickup_address
+      - public_id
+    ShelterProfileRequest:
+      type: object
+      properties:
+        organization_name:
+          type: string
+          minLength: 1
+          maxLength: 150
+        license_no:
+          type: string
+          maxLength: 50
+        pickup_address:
+          type: string
+          minLength: 1
+        city:
+          type: string
+          maxLength: 100
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        is_active:
+          type: boolean
+        is_verified:
+          type: boolean
+      required:
+      - organization_name
+      - pickup_address
+    SpeciesEnum:
+      enum:
+      - dog
+      - cat
+      - other
+      type: string
+      description: |-
+        * `dog` - Dog
+        * `cat` - Cat
+        * `other` - Other
+    TokenRefresh:
+      type: object
+      properties:
+        access:
+          type: string
+          readOnly: true
+        refresh:
+          type: string
+      required:
+      - access
+      - refresh
+    TokenRefreshRequest:
+      type: object
+      properties:
+        refresh:
+          type: string
+          minLength: 1
+      required:
+      - refresh
+    TokenVerifyRequest:
+      type: object
+      properties:
+        token:
+          type: string
+          writeOnly: true
+          minLength: 1
+      required:
+      - token
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        username:
+          type: string
+          description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
+            only.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        email:
+          title: Email address
+          oneOf:
+          - type: string
+            format: email
+            maxLength: 254
+          - type: string
+            maxLength: 0
+        role:
+          $ref: '#/components/schemas/RoleEnum'
+        first_name:
+          type: string
+          maxLength: 150
+        last_name:
+          type: string
+          maxLength: 150
+        phone:
+          type: string
+          maxLength: 20
+        address:
+          type: string
+        is_staff:
+          type: boolean
+          readOnly: true
+          title: Staff status
+          description: Designates whether the user can log into this admin site.
+        date_joined:
+          type: string
+          format: date-time
+          readOnly: true
+        shelter_profile:
+          allOf:
+          - $ref: '#/components/schemas/ShelterProfile'
+          readOnly: true
+        delivery_profile:
+          allOf:
+          - $ref: '#/components/schemas/DeliveryProfile'
+          readOnly: true
+      required:
+      - date_joined
+      - delivery_profile
+      - id
+      - is_staff
+      - public_id
+      - shelter_profile
+      - username
+    UserRegistration:
+      type: object
+      properties:
+        username:
+          type: string
+          description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
+            only.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        email:
+          type: string
+          format: email
+        first_name:
+          type: string
+          maxLength: 150
+        last_name:
+          type: string
+          maxLength: 150
+        role:
+          $ref: '#/components/schemas/RoleEnum'
+        phone:
+          type: string
+          maxLength: 20
+        address:
+          type: string
+      required:
+      - email
+      - username
+    UserRegistrationRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          minLength: 1
+          description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
+            only.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        email:
+          type: string
+          format: email
+          minLength: 1
+        password:
+          type: string
+          writeOnly: true
+          minLength: 6
+        first_name:
+          type: string
+          maxLength: 150
+        last_name:
+          type: string
+          maxLength: 150
+        role:
+          $ref: '#/components/schemas/RoleEnum'
+        phone:
+          type: string
+          maxLength: 20
+        address:
+          type: string
+        organization_name:
+          type: string
+          writeOnly: true
+        license_no:
+          type: string
+          writeOnly: true
+        pickup_address:
+          type: string
+          writeOnly: true
+        city:
+          type: string
+          writeOnly: true
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          writeOnly: true
+          nullable: true
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          writeOnly: true
+          nullable: true
+      required:
+      - email
+      - password
+      - username
+    VehicleTypeEnum:
+      enum:
+      - two_wheeler
+      - car
+      - van
+      type: string
+      description: |-
+        * `two_wheeler` - Two Wheeler
+        * `car` - Car
+        * `van` - Van
+  securitySchemes:
+    jwtAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
