@@ -838,13 +838,84 @@ Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medic
 - Script and verify route consistency between `docs/backend_handoff.md`, `docs/api_contract_logistics.md`, and generated `docs/openapi.yaml`.
 - Regenerate `docs/openapi.yaml` with 0 warnings and 0 errors.
 
-### 12.6 Task 5: Location Privacy & Milestone 8 Scope (Report Only)
-- Document all public response surfaces exposing shelter contact phone, pickup address, latitude, and longitude; analyze privacy risk and present options in `SPEC.md`.
-- Detail Milestone 8 scope: Razorpay refund flow (refund API calls, `PaymentStatus.REFUNDED`, webhook events), COD cash reconciliation endpoint writing `is_cash_settled_with_shelter`, and operational resolution for paid applications stuck in `'approved'`.
+### 12.6 Task 5: Location Privacy Audit & Options (Report Only)
+
+#### 1. Public Response Surfaces Exposing Shelter Coordinates & Contact
+- **`GET /api/v1/pets/{public_id}/` (Public Pet Detail)**:
+  - Serializer: `PublicPetDetailSerializer` via `get_shelter` (`PublicPetShelterSerializer`).
+  - Access: Completely unauthenticated (`AllowAny`).
+  - Fields Exposed:
+    - `pickup_address`: Full physical street address of the shelter.
+    - `city`: Locality name.
+    - `latitude`: Exact 6-decimal-place GPS latitude (~0.1m precision).
+    - `longitude`: Exact 6-decimal-place GPS longitude (~0.1m precision).
+    - `phone`: Direct personal phone number of the shelter operator (retrieved from `obj.shelter.user.phone`).
+- **`GET /api/v1/pets/` (Public Pet List)**:
+  - Serializer: `PublicPetListSerializer` via `get_shelter_city`.
+  - Access: Completely unauthenticated (`AllowAny`).
+  - Fields Exposed:
+    - `shelter_city`: Contains `getattr(obj.shelter, 'city', '') or obj.shelter.pickup_address`.
+    - Leakage: If `city` is omitted on a shelter record, the code silently falls back to exposing the raw physical street address `pickup_address` to anonymous list queries.
+- **`GET /api/v1/auth/admin/shelters/` & `GET /api/v1/auth/admin/shelters/{public_id}/`**:
+  - Exposes address, phone, license, and coordinates exclusively to authenticated platform administrators (`IsAdminRole`). Legitimate administrative oversight surface.
+- **`GET /api/v1/auth/me/`**:
+  - Exposes full profile only to the owning shelter operator.
+
+#### 2. Threat Modeling & Privacy Risk Analysis
+1. **Physical Safety & Unauthorized Pet Abandonment**: Unverified public exposure of exact street addresses and high-resolution GPS coordinates creates serious risks for foster homes and residential rescue volunteers, including pet dumping at private residences, unscheduled drop-ins, and physical harassment.
+2. **Automated Scraping & Contact Harvesting**: Public pet discovery pages can be trivially scraped without authentication to extract phone numbers and physical coordinates of rescue personnel.
+3. **Over-Privileged Discovery**: Potential adopters browsing pets need to know approximate distance or general locality (e.g., "Bangalore, Indiranagar"), but have no legitimate need for exact doorstep coordinates or personal phone numbers prior to application approval.
+
+#### 3. Recommended Architectural Mitigation Options
+- **Option A (Recommended — Tiered Disclosure Based on Application State)**:
+  - For unauthenticated and general visitors: `PublicPetDetailSerializer` returns only `organization_name`, `city`, and generalized postal code / area. Precise `latitude`, `longitude`, `pickup_address`, and `phone` are masked (`null`).
+  - For approved adopters: Full pickup address, coordinates, and contact phone are dynamically unmasked once an adoption application for that pet is transitioned to `'approved'`.
+- **Option B (Coordinate Fuzzing & Public Contact Proxy)**:
+  - Retain approximate distance sorting by rounding coordinates to 2 decimal places (~1.1 km accuracy) or adding random Gaussian jitter before computing distance.
+  - Shelter personal phone numbers are replaced by an organization inquiry email or support alias.
+- **Option C (Shelter Opt-in Facility Visibility Flag)**:
+  - Add `is_physical_facility_public = models.BooleanField(default=False)` on `ShelterProfile`.
+  - Commercial shelters with public visiting hours can opt in to publish their facility location, while home fosters keep exact locations private.
+
+---
+
+## 13. Milestone 8 — Operational Refunds, COD Reconciliation, Application Exit Paths & Privacy Hardening
+
+> **Status**: `PROPOSED / PLANNED`
+
+### 13.1 Feature Scope
+
+#### 1. Razorpay Refund Service & Webhook Ingestion
+- **Automated Refund Service**: Implement `apps.logistics.payment_services.refund_payment(...)` integrating with `razorpay_client.payment.refund(payment_id, amount_in_paise)`.
+- **State Model**: Extend `PaymentStatus` with `PaymentStatus.REFUNDED = 'refunded'` and `PaymentStatus.PARTIALLY_REFUNDED = 'partially_refunded'`. Add `refund_id`, `refunded_at`, and `amount_refunded` columns to `Payment`.
+- **Webhook Handlers**: Handle `refund.processed`, `refund.failed`, and `refund.speed_changed` Razorpay webhook events with idempotency and signature validation.
+- **Endpoint**: `POST /api/v1/shelter/applications/{public_id}/refund/` (restricted to verified shelter or platform admin).
+
+#### 2. Cash on Delivery (COD) Driver Settlement Endpoint
+- **Reconciliation Endpoint**: `POST /api/v1/shelter/deliveries/{public_id}/settle-cash/` (or admin equivalent).
+- **Invariants**:
+  - Requires `is_verified=True` shelter managing the pet or platform admin.
+  - Delivery must be in `delivered` status with `payment_method == 'cod'` and `cash_collected > 0`.
+- **Side Effects**:
+  - Flips `PetDelivery.is_cash_settled_with_shelter = True`.
+  - Sets `cash_settled_at = timezone.now()`.
+  - Dispatches confirmation notifications to both driver and shelter.
+
+#### 3. Operational Cancellation & Exit Path for Stuck Paid Applications
+- **Problem**: Under Milestone 7's Central Refund Guard, an application with a captured online payment or collected cash is blocked from cancellation or rejection. If a customer or shelter legitimately must abort an approved adoption, staff has no automated mechanism to exit this state.
+- **Solution**: Structured `Cancel with Refund` operational workflow:
+  - Invokes `refund_payment(...)` against Razorpay.
+  - Upon confirmed refund capture, safely transitions application: `approved` -> `cancelled` (or `rejected`).
+  - Automatically resets pet status: `pending` -> `available`, unlocking the pet for other adopters.
+
+#### 4. Location & Contact Privacy Enforcement
+- Implement Option A (Tiered Disclosure): Mask `pickup_address`, `latitude`, `longitude`, and `phone` in `PublicPetDetailSerializer` for unauthenticated or unauthorized users, exposing them only to applicants with an approved application.
+- Fix `PublicPetListSerializer.get_shelter_city` to never fall back to raw street address when `city` is blank.
 
 ---
 
 *Last updated: 2026-10-22*
+
 
 
 
