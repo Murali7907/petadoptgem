@@ -59,35 +59,35 @@ When throttled, the server returns HTTP `429 Too Many Requests` with a `Retry-Af
 | `/api/v1/applications/<uuid:public_id>/cancel/` | `POST` | `customer` | Blocked (409) if online payment captured or delivery cash collected. |
 | `/api/v1/payments/create-order/` | `POST` | `customer` | Initiates Razorpay checkout for approved online adoption task. |
 | `/api/v1/payments/verify/` | `POST` | `customer` | Verifies cryptographic HMAC-SHA256 Razorpay payment signature. |
-| `/api/v1/customer/deliveries/<uuid:public_id>/track/` | `GET` | `customer` | Live delivery status, driver info, and driver coordinates. |
+| `/api/v1/delivery/tasks/<uuid:public_id>/track/` | `GET` | `customer` | Live delivery status, driver info, and driver coordinates (alias: `/api/v1/customer/deliveries/<uuid:public_id>/track/`). |
 | `/api/v1/applications/<uuid:public_id>/review/` | `POST` | `customer` | Submit rating & review once delivery status is `delivered`. |
-| `/api/v1/shelter/profile/` | `GET`, `PUT`, `PATCH` | `shelter` | Manage shelter organization profile. |
+| `/api/v1/auth/me/` | `GET`, `PUT`, `PATCH` | Authenticated | Manage user/shelter profile (legacy alias: `/api/v1/shelter/profile/`). |
 | `/api/v1/shelter/pets/` | `GET`, `POST` | `shelter` | `POST` requires `is_verified=True`. |
 | `/api/v1/shelter/pets/<uuid:public_id>/` | `GET`, `PUT`, `PATCH`, `DELETE` | `shelter` | Writes require `is_verified=True` and ownership. |
-| `/api/v1/pets/<uuid:public_id>/images/` | `POST` | `shelter` | Upload pet photos (max 10MB, JPEG/PNG/WebP, validated by Pillow). Requires `is_verified=True`. |
-| `/api/v1/pets/<uuid:public_id>/medical-records/` | `POST` | `shelter` | Upload medical records & PDF/image certificates (max 15MB, `%PDF-` signature check). Requires `is_verified=True`. |
+| `/api/v1/shelter/pets/<uuid:public_id>/images/` | `POST` | `shelter` | Upload pet photos (max 10MB, JPEG/PNG/WebP, validated by Pillow). Requires `is_verified=True`. |
+| `/api/v1/shelter/pets/<uuid:public_id>/medical/` | `POST` | `shelter` | Upload medical records & PDF/image certificates (max 15MB, `%PDF-` signature check). Requires `is_verified=True`. |
 | `/api/v1/shelter/applications/` | `GET` | `shelter` | Filter applications for shelter pets. |
 | `/api/v1/shelter/applications/<uuid:public_id>/` | `GET` | `shelter` | View application, proof documents, and notes. |
 | `/api/v1/shelter/applications/<uuid:public_id>/review/` | `POST` | `shelter` | Move application to `reviewing`. Requires `is_verified=True`. |
 | `/api/v1/shelter/applications/<uuid:public_id>/approve/` | `POST` | `shelter` | Approve application; sets pet to `pending`, auto-rejects competitors. Requires `is_verified=True`. |
 | `/api/v1/shelter/applications/<uuid:public_id>/reject/` | `POST` | `shelter` | Reject application. Blocked (409) if online payment captured or delivery cash collected. Requires `is_verified=True`. |
-| `/api/v1/shelter/deliveries/available-drivers/` | `GET` | `shelter` | Lists available active delivery drivers. |
+| `/api/v1/shelter/deliveries/drivers/` | `GET` | `shelter` | Lists available active delivery drivers (alias: `/api/v1/shelter/deliveries/available-drivers/`). |
 | `/api/v1/shelter/deliveries/assign/` | `POST` | `shelter` | Assigns driver; creates delivery task; generates pickup OTP. Requires `is_verified=True`. |
 | `/api/v1/shelter/deliveries/<uuid:public_id>/cancel/` | `POST` | `shelter` | Cancels delivery. Blocked (409) if online payment captured or delivery cash collected. Requires `is_verified=True`. |
+| `/api/v1/shelter/deliveries/<uuid:public_id>/reissue-otp/` | `POST` | `shelter` | Reissues pickup or doorstep OTP after expiry or lockout. Requires `is_verified=True`. |
 | `/api/v1/shelter/reviews/` | `GET` | `shelter` | View customer ratings and feedback. |
-| `/api/v1/delivery/profile/` | `GET`, `PATCH` | `delivery` | Driver profile management (toggle `is_available`). |
-| `/api/v1/delivery/tasks/` | `GET` | `delivery` | List assigned and active delivery tasks. |
-| `/api/v1/delivery/tasks/<uuid:public_id>/` | `GET` | `delivery` | Task details including addresses and customer contact. |
+| `/api/v1/delivery/tasks/driver-active/` | `GET` | `delivery` | Active delivery task assigned to driver (legacy alias: `/api/v1/deliveries/driver-active/`). |
+| `/api/v1/delivery/tasks/<uuid:public_id>/track/` | `GET` | `delivery`, `customer` | Task details including addresses and customer contact. |
 | `/api/v1/delivery/tasks/<uuid:public_id>/pickup/` | `POST` | `delivery` | Verifies pickup OTP; validates payment guard; transitions to `out_for_delivery`. |
 | `/api/v1/delivery/tasks/<uuid:public_id>/collect-cash/` | `POST` | `delivery` | Driver records cash collected from customer for COD. |
 | `/api/v1/delivery/tasks/<uuid:public_id>/verify-doorstep/` | `POST` | `delivery` | Verifies doorstep OTP; validates cash guard; transitions to `delivered`. |
 | `/api/v1/delivery/tasks/<uuid:public_id>/status/` | `PATCH` | `delivery` | Driver reports delivery failure or status updates. |
-| `/api/v1/delivery/tasks/<uuid:public_id>/location/` | `POST` | `delivery` | Updates driver's live GPS coordinates. |
+| `/api/v1/delivery/tasks/<uuid:public_id>/ping/` | `POST` | `delivery` | Updates driver's live GPS coordinates (alias: `/location/`). |
 | `/api/v1/delivery/reviews/` | `GET` | `delivery` | View driver rating and customer feedback. |
-| `/api/v1/admin/stats/` | `GET` | `admin` | Aggregated platform metrics and KPIs. |
-| `/api/v1/admin/shelters/` | `GET` | `admin` | List shelters with verification filter. |
-| `/api/v1/admin/shelters/<uuid:public_id>/verify/` | `POST` | `admin` | Set `is_verified = True/False`. |
-| `/api/v1/admin/drivers/` | `POST` | `admin` | Provision new delivery drivers. |
+| `/api/v1/auth/admin/dashboard/stats/` | `GET` | `admin` | Aggregated platform metrics and KPIs. |
+| `/api/v1/auth/admin/shelters/` | `GET` | `admin` | List shelters with verification filter. |
+| `/api/v1/auth/admin/shelters/<uuid:public_id>/verify/` | `POST` | `admin` | Set `is_verified = True/False`. |
+| `/api/v1/auth/drivers/create/` | `POST` | `admin` | Provision new delivery drivers. |
 
 ---
 
@@ -219,7 +219,7 @@ The KindHeart logistics lifecycle is strictly guarded by two cryptographically h
    - On successful payment, call `POST /api/v1/payments/verify/` with `{"razorpay_order_id": "...", "razorpay_payment_id": "...", "razorpay_signature": "..."}`.
 5. **Track Delivery & Receive Pet**:
    - Adopter receives email notification when a driver is assigned.
-   - Track driver GPS coordinates in real-time via `GET /api/v1/customer/deliveries/<uuid:public_id>/track/`.
+   - Track driver GPS coordinates in real-time via `GET /api/v1/delivery/tasks/<uuid:public_id>/track/` (alias: `/api/v1/customer/deliveries/<uuid:public_id>/track/`).
    - When the driver picks up the pet from the shelter, the adopter receives an email containing the 6-digit **Doorstep OTP**.
    - Upon arrival, give the Doorstep OTP (and cash if COD) to the driver.
 6. **Submit Review**:
@@ -230,18 +230,18 @@ The KindHeart logistics lifecycle is strictly guarded by two cryptographically h
 ### 5.2 Shelter Staff Happy Path
 1. **Profile Setup & Verification**:
    - Register account with `role: "shelter"`. Admin approves shelter (`is_verified = True`).
-   - Update address and coordinates: `PATCH /api/v1/shelter/profile/`.
+   - Update address and coordinates: `PATCH /api/v1/auth/me/` (alias: `/api/v1/shelter/profile/`).
 2. **Pet Listing Management**:
    - Create pet: `POST /api/v1/shelter/pets/` with `{"name": "Buddy", "species": "dog", ...}`.
-   - Upload pet photos: `POST /api/v1/pets/<public_id>/images/` (multipart file upload).
-   - Upload vaccination / medical certs: `POST /api/v1/pets/<public_id>/medical-records/` (multipart PDF/image upload).
+   - Upload pet photos: `POST /api/v1/shelter/pets/<public_id>/images/` (multipart file upload).
+   - Upload vaccination / medical certs: `POST /api/v1/shelter/pets/<public_id>/medical/` (multipart PDF/image upload).
 3. **Application Review & Decision**:
    - Check incoming applications: `GET /api/v1/shelter/applications/?status=submitted`.
    - Mark under review: `POST /api/v1/shelter/applications/<id>/review/`.
    - Approve application: `POST /api/v1/shelter/applications/<id>/approve/`.
      - *System Side-Effects*: Pet status moves to `'pending'`; all competing applications for this pet are automatically rejected.
 4. **Driver Assignment & Pet Handover**:
-   - Find active drivers: `GET /api/v1/shelter/deliveries/available-drivers/`.
+   - Find active drivers: `GET /api/v1/shelter/deliveries/drivers/` (alias: `/api/v1/shelter/deliveries/available-drivers/`).
    - Assign driver: `POST /api/v1/shelter/deliveries/assign/` with `{"application_public_id": "...", "driver_public_id": "...", "payment_method": "online"}`.
    - Note the 6-digit **Pickup OTP** from the response.
    - When the driver arrives at the shelter, provide the Pickup OTP after handing over the pet.
@@ -250,16 +250,16 @@ The KindHeart logistics lifecycle is strictly guarded by two cryptographically h
 
 ### 5.3 Delivery Driver Happy Path
 1. **Go On-Duty**:
-   - Set status to available: `PATCH /api/v1/delivery/profile/` with `{"is_available": true}`.
+   - Set status to available: `PATCH /api/v1/auth/me/` with `{"is_available": true}`.
 2. **Receive Delivery Task**:
-   - Fetch assigned tasks: `GET /api/v1/delivery/tasks/`.
-   - Inspect pickup shelter address and customer dropoff address: `GET /api/v1/delivery/tasks/<id>/`.
+   - Fetch assigned active task: `GET /api/v1/delivery/tasks/driver-active/`.
+   - Inspect pickup shelter address and customer dropoff address: `GET /api/v1/delivery/tasks/<id>/track/`.
 3. **Pickup from Shelter**:
    - Arrive at shelter facility. Obtain 6-digit Pickup OTP from shelter staff.
    - Call `POST /api/v1/delivery/tasks/<id>/pickup/` with `{"otp": "123456"}`.
    - Task transitions to `out_for_delivery`.
 4. **Transit & GPS Updates**:
-   - Periodically stream vehicle coordinates: `POST /api/v1/delivery/tasks/<id>/location/` with `{"latitude": 12.9716, "longitude": 77.5946}`.
+   - Periodically stream vehicle coordinates: `POST /api/v1/delivery/tasks/<id>/ping/` (alias: `/location/`) with `{"latitude": 12.9716, "longitude": 77.5946}`.
 5. **Doorstep Delivery & Handover**:
    - Arrive at customer address.
    - *If COD*: Collect cash payment and call `POST /api/v1/delivery/tasks/<id>/collect-cash/` with `{"amount_collected": "..."}`.

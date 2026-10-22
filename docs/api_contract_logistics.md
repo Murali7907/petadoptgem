@@ -56,7 +56,7 @@ This document specifies the canonical and legacy API contracts for the pet deliv
 ---
 
 ### 2. Get Active Driver Task
-- **URL**: `GET /api/v1/deliveries/driver-active/` (Legacy alias: `GET /api/deliveries/driver-active/`)
+- **URL**: `GET /api/v1/delivery/tasks/driver-active/` (Legacy aliases: `GET /api/v1/deliveries/driver-active/`, `GET /api/deliveries/driver-active/`)
 - **Authentication**: Required (`Bearer <access_token>`)
 - **Permissions**: Delivery Driver Profile required
 - **Responses**:
@@ -87,7 +87,7 @@ This document specifies the canonical and legacy API contracts for the pet deliv
 ---
 
 ### 3. Verify Pickup OTP at Shelter
-- **URL**: `POST /api/v1/deliveries/{id}/pickup/` (Legacy alias: `POST /api/deliveries/{id}/pickup/`)
+- **URL**: `POST /api/v1/delivery/tasks/{id}/pickup/` (Legacy aliases: `POST /api/v1/deliveries/{id}/pickup/`, `POST /api/deliveries/{id}/pickup/`)
 - **Authentication**: Required (`Bearer <access_token>`)
 - **Permissions**: Delivery Driver assigned to this specific delivery
 - **Rate Limit**: 10 requests / minute
@@ -126,7 +126,7 @@ This document specifies the canonical and legacy API contracts for the pet deliv
 ---
 
 ### 4. Verify Doorstep OTP with Adopter
-- **URL**: `POST /api/v1/deliveries/{id}/verify-doorstep/` (Legacy alias: `POST /api/v1/deliveries/{id}/verify-otp/`, `POST /api/deliveries/{id}/verify-otp/`)
+- **URL**: `POST /api/v1/delivery/tasks/{id}/verify-doorstep/` (Legacy aliases: `POST /api/v1/delivery/tasks/{id}/verify-otp/`, `POST /api/v1/deliveries/{id}/verify-doorstep/`, `POST /api/deliveries/{id}/verify-doorstep/`, `POST /api/deliveries/{id}/verify-otp/`)
 - **Authentication**: Required (`Bearer <access_token>`)
 - **Permissions**: Delivery Driver assigned to this specific delivery
 - **Rate Limit**: 10 requests / minute
@@ -238,7 +238,7 @@ This document specifies the canonical and legacy API contracts for the pet deliv
 ---
 
 ### 6. Driver Manual Status Update
-- **URL**: `POST /api/v1/deliveries/{id}/status/` (Legacy alias: `POST /api/deliveries/{id}/status/`)
+- **URL**: `PATCH /api/v1/delivery/tasks/{id}/status/` (Legacy aliases: `POST /api/v1/deliveries/{id}/status/`, `POST /api/deliveries/{id}/status/`)
 - **Authentication**: Required (`Bearer <access_token>`)
 - **Permissions**: Assigned Driver
 - **Request Body**:

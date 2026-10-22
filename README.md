@@ -38,7 +38,7 @@ A modern, full-stack pet adoption management platform backend built with Django 
 
 ## Tech Stack
 
-- **Backend Framework**: Django 5.x, Django REST Framework
+- **Backend Framework**: Django 6.1.2 (pinned in requirements.lock.txt), Django REST Framework
 - **Database**: PostgreSQL 18 with PostGIS extensions
 - **API Documentation**: drf-spectacular (OpenAPI 3.0 / Swagger UI)
 - **Payment Processing**: Razorpay Python SDK
