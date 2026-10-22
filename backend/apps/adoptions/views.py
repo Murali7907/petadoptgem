@@ -28,6 +28,7 @@ from .serializers import (
 from apps.pets.models import Pet
 from apps.pets.permissions import IsShelterOwner
 from apps.accounts.permissions import IsVerifiedShelter
+from apps.adoptions.services import assert_application_refund_safe
 
 class CustomerApplicationViewSet(mixins.ListModelMixin, 
                                 mixins.RetrieveModelMixin, 
@@ -68,19 +69,9 @@ class CustomerApplicationViewSet(mixins.ListModelMixin,
             raise ValidationError(f"Cannot cancel application with status '{application.get_status_display()}'.")
 
         if application.status == 'approved':
-            from apps.logistics.models import Payment, PaymentStatus, PetDelivery
+            assert_application_refund_safe(application)
+            from apps.logistics.models import PetDelivery
             deliv = PetDelivery.objects.filter(application=application).first()
-            has_cash = deliv and deliv.cash_collected and deliv.cash_collected > Decimal('0.00')
-            has_online_payment = Payment.objects.filter(
-                application=application,
-                status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid']
-            ).exclude(payment_method='cod').exists()
-
-            if has_online_payment or has_cash:
-                return Response({
-                    "code": "refund_required",
-                    "detail": "Cannot cancel application: online payment has already been captured or cash collected. A refund must be processed before cancellation."
-                }, status=status.HTTP_409_CONFLICT)
 
             if deliv and deliv.status in ['out_for_delivery', 'delivered']:
                 raise ValidationError("Cannot cancel application while delivery is in progress or completed.")
@@ -137,6 +128,9 @@ class ShelterApplicationViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['post'], url_path='review')
     def review(self, request, public_id=None):
         application = self.get_object()
+
+        if application.status == 'approved':
+            assert_application_refund_safe(application)
 
         if application.status != 'submitted':
             raise ValidationError(f"Only applications with status 'submitted' can be moved to reviewing (current status: '{application.get_status_display()}').")
@@ -202,20 +196,8 @@ class ShelterApplicationViewSet(viewsets.ReadOnlyModelViewSet):
             raise ValidationError(f"Cannot reject an application with status '{application.get_status_display()}'.")
 
         if application.status == 'approved':
-            from apps.logistics.models import Payment, PaymentStatus, PetDelivery
-            deliv = PetDelivery.objects.filter(application=application).first()
-            has_cash = deliv and deliv.cash_collected and deliv.cash_collected > Decimal('0.00')
-            has_online_payment = Payment.objects.filter(
-                application=application,
-                status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid']
-            ).exclude(payment_method='cod').exists()
-
-            if has_online_payment or has_cash:
-                return Response({
-                    "code": "refund_required",
-                    "detail": "Cannot reject application: online payment has already been captured or cash collected. A refund must be processed before rejection."
-                }, status=status.HTTP_409_CONFLICT)
-
+            assert_application_refund_safe(application)
+            from apps.logistics.models import PetDelivery
             active_delivery = PetDelivery.objects.filter(
                 application=application,
                 status__in=['assigned', 'out_for_delivery']
@@ -443,6 +425,9 @@ class AdoptionStatusUpdateView(APIView):
         if new_status not in ['approved', 'rejected', 'reviewing']:
             raise ValidationError({"status": "Status must be 'approved', 'rejected', or 'reviewing'."})
 
+        if application.status == 'approved' and new_status != 'approved':
+            assert_application_refund_safe(application)
+
         if new_status == 'approved':
             with transaction.atomic():
                 pet = Pet.objects.select_for_update().get(id=application.pet_id)
@@ -468,20 +453,7 @@ class AdoptionStatusUpdateView(APIView):
                     comp.save()
 
         elif new_status == 'rejected':
-            if application.status == 'approved':
-                from apps.logistics.models import Payment, PaymentStatus, PetDelivery
-                deliv = PetDelivery.objects.filter(application=application).first()
-                has_cash = deliv and deliv.cash_collected and deliv.cash_collected > Decimal('0.00')
-                has_online_payment = Payment.objects.filter(
-                    application=application,
-                    status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid']
-                ).exclude(payment_method='cod').exists()
 
-                if has_online_payment or has_cash:
-                    return Response({
-                        "code": "refund_required",
-                        "detail": "Cannot reject application: online payment has already been captured or cash collected. A refund must be processed before rejection."
-                    }, status=status.HTTP_409_CONFLICT)
 
             application.status = 'rejected'
             if notes:

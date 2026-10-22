@@ -937,6 +937,137 @@ class ApplicationPetStatusConvergenceTests(APITestCase):
         cod_app2.refresh_from_db()
         self.assertEqual(cod_app2.status, 'rejected')
 
+    def test_canonical_review_blocked_on_approved_app_with_captured_online_payment(self):
+        from apps.logistics.models import Payment, PaymentStatus
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='online', total_amount=Decimal('100.00')
+        )
+        Payment.objects.create(
+            application=app, status=PaymentStatus.CAPTURED, payment_method='razorpay',
+            amount=Decimal('100.00'), razorpay_payment_id='pay_review_guard_1'
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(f'/api/v1/shelter/applications/{app.public_id}/review/')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'refund_required')
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'approved')
+
+    def test_canonical_review_blocked_on_approved_app_with_cash_collected(self):
+        from apps.logistics.models import PetDelivery
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='cod', total_amount=Decimal('100.00')
+        )
+        PetDelivery.objects.create(
+            application=app, driver=self.driver, status='assigned', cash_collected=Decimal('100.00')
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(f'/api/v1/shelter/applications/{app.public_id}/review/')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'refund_required')
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'approved')
+
+    def test_legacy_patch_cannot_review_approved_app_with_captured_online_payment(self):
+        from apps.logistics.models import Payment, PaymentStatus
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='online', total_amount=Decimal('100.00')
+        )
+        Payment.objects.create(
+            application=app, status=PaymentStatus.CAPTURED, payment_method='razorpay',
+            amount=Decimal('100.00'), razorpay_payment_id='pay_legacy_review_1'
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        for url in [f'/api/v1/adoptions/{app.public_id}/status/', f'/api/adoptions/{app.public_id}/status/']:
+            res = self.client.patch(url, {'status': 'reviewing', 'notes': 'Back to review'})
+            self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+            self.assertEqual(res.data.get('code'), 'refund_required')
+            app.refresh_from_db()
+            self.assertEqual(app.status, 'approved')
+
+    def test_legacy_patch_cannot_review_approved_app_with_cash_collected(self):
+        from apps.logistics.models import PetDelivery
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='cod', total_amount=Decimal('100.00')
+        )
+        PetDelivery.objects.create(
+            application=app, driver=self.driver, status='assigned', cash_collected=Decimal('100.00')
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        for url in [f'/api/v1/adoptions/{app.public_id}/status/', f'/api/adoptions/{app.public_id}/status/']:
+            res = self.client.patch(url, {'status': 'reviewing', 'notes': 'Back to review'})
+            self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+            self.assertEqual(res.data.get('code'), 'refund_required')
+            app.refresh_from_db()
+            self.assertEqual(app.status, 'approved')
+
+    def test_legacy_patch_allows_reviewing_when_unpaid(self):
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='online', total_amount=Decimal('100.00')
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.patch(f'/api/v1/adoptions/{app.public_id}/status/', {'status': 'reviewing', 'notes': 'Back to review'})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'reviewing')
+
+    def test_django_admin_refund_guard(self):
+        from django.contrib.admin.sites import AdminSite
+        from apps.adoptions.admin import AdoptionApplicationAdmin, AdoptionApplicationAdminForm
+        from apps.logistics.models import Payment, PaymentStatus, PetDelivery
+        from django.test import RequestFactory
+
+        admin_instance = AdoptionApplicationAdmin(AdoptionApplication, AdminSite())
+        request = RequestFactory().get('/admin/')
+
+        # 1. Unpaid app: status not read-only
+        unpaid_app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='online', total_amount=Decimal('100.00')
+        )
+        ro_unpaid = admin_instance.get_readonly_fields(request, unpaid_app)
+        self.assertNotIn('status', ro_unpaid)
+
+        # 2. Paid online app: status is read-only in admin
+        Payment.objects.create(
+            application=unpaid_app, status=PaymentStatus.CAPTURED, payment_method='razorpay',
+            amount=Decimal('100.00'), razorpay_payment_id='pay_admin_test_1'
+        )
+        ro_paid = admin_instance.get_readonly_fields(request, unpaid_app)
+        self.assertIn('status', ro_paid)
+
+        # 3. Form clean blocks changing status away from approved when paid
+        form_data = {
+            'pet': self.pet.id,
+            'applicant': self.adopter_1.id,
+            'living_situation': 'House',
+            'contact_phone': '111',
+            'status': 'cancelled',
+            'payment_method': 'online',
+            'payment_status': 'paid',
+            'total_amount': '100.00'
+        }
+        form = AdoptionApplicationAdminForm(data=form_data, instance=unpaid_app)
+        self.assertFalse(form.is_valid())
+        self.assertIn('status', form.errors)
+
+        # 4. Cash collected app: status is read-only
+        cod_app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='cod', total_amount=Decimal('100.00')
+        )
+        PetDelivery.objects.create(
+            application=cod_app, driver=self.driver, status='assigned', cash_collected=Decimal('100.00')
+        )
+        ro_cash = admin_instance.get_readonly_fields(request, cod_app)
+        self.assertIn('status', ro_cash)
+
+
 
 
 
