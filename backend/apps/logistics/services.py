@@ -330,7 +330,8 @@ def verify_pickup_service(delivery_id: int | str, submitted_otp: str) -> OTPVeri
             return OTPVerificationResult(
                 outcome=OTPVerificationOutcome.WRONG_STATE,
                 delivery=delivery,
-                detail=f"Cannot verify pickup for delivery in '{delivery.status}' state."
+                detail=f"Cannot verify pickup for delivery in '{delivery.status}' state.",
+                code="invalid_state"
             )
 
         max_attempts = getattr(settings, 'OTP_MAX_ATTEMPTS', 3)
@@ -352,7 +353,8 @@ def verify_pickup_service(delivery_id: int | str, submitted_otp: str) -> OTPVeri
                 outcome=OTPVerificationOutcome.LOCKED,
                 attempts_remaining=0,
                 delivery=delivery,
-                detail="Maximum OTP verification attempts exceeded. Please contact the shelter to reissue an OTP."
+                detail="Maximum OTP verification attempts exceeded. Please contact the shelter to reissue an OTP.",
+                code="otp_locked"
             )
 
         now = timezone.now()
@@ -361,7 +363,8 @@ def verify_pickup_service(delivery_id: int | str, submitted_otp: str) -> OTPVeri
                 outcome=OTPVerificationOutcome.EXPIRED,
                 attempts_remaining=max(0, max_attempts - delivery.pickup_otp_attempts),
                 delivery=delivery,
-                detail="OTP has expired. Please contact the shelter to reissue an OTP."
+                detail="OTP has expired. Please contact the shelter to reissue an OTP.",
+                code="otp_expired"
             )
 
         # Hash-only verification (no plaintext fallback)
@@ -377,7 +380,8 @@ def verify_pickup_service(delivery_id: int | str, submitted_otp: str) -> OTPVeri
                 outcome=OTPVerificationOutcome.INVALID,
                 attempts_remaining=attempts_remaining,
                 delivery=delivery,
-                detail="Invalid pickup OTP."
+                detail="Invalid pickup OTP.",
+                code="otp_invalid"
             )
 
         delivery.status = 'out_for_delivery'
@@ -467,7 +471,8 @@ def verify_doorstep_service(delivery_id: int | str, submitted_otp: str) -> OTPVe
             return OTPVerificationResult(
                 outcome=OTPVerificationOutcome.WRONG_STATE,
                 delivery=delivery,
-                detail=f"Cannot verify doorstep OTP for delivery in '{delivery.status}' state."
+                detail=f"Cannot verify doorstep OTP for delivery in '{delivery.status}' state.",
+                code="invalid_state"
             )
 
         max_attempts = getattr(settings, 'OTP_MAX_ATTEMPTS', 3)
@@ -488,7 +493,8 @@ def verify_doorstep_service(delivery_id: int | str, submitted_otp: str) -> OTPVe
                 outcome=OTPVerificationOutcome.LOCKED,
                 attempts_remaining=0,
                 delivery=delivery,
-                detail="Maximum OTP verification attempts exceeded. Please contact the shelter to reissue an OTP."
+                detail="Maximum OTP verification attempts exceeded. Please contact the shelter to reissue an OTP.",
+                code="otp_locked"
             )
 
         now = timezone.now()
@@ -497,7 +503,8 @@ def verify_doorstep_service(delivery_id: int | str, submitted_otp: str) -> OTPVe
                 outcome=OTPVerificationOutcome.EXPIRED,
                 attempts_remaining=max(0, max_attempts - delivery.doorstep_otp_attempts),
                 delivery=delivery,
-                detail="OTP has expired. Please contact the shelter to reissue an OTP."
+                detail="OTP has expired. Please contact the shelter to reissue an OTP.",
+                code="otp_expired"
             )
 
         # Hash-only verification (no plaintext fallback)
@@ -513,7 +520,8 @@ def verify_doorstep_service(delivery_id: int | str, submitted_otp: str) -> OTPVe
                 outcome=OTPVerificationOutcome.INVALID,
                 attempts_remaining=attempts_remaining,
                 delivery=delivery,
-                detail="Invalid doorstep OTP."
+                detail="Invalid doorstep OTP.",
+                code="otp_invalid"
             )
 
         delivery.status = 'delivered'
@@ -658,16 +666,23 @@ def reissue_delivery_otp(delivery: PetDelivery, purpose: str) -> dict:
     For doorstep, sends plaintext OTP via email to adopter and updates doorstep_otp_sent_at.
     """
     if purpose not in ['pickup', 'doorstep']:
-        raise ValidationError("Purpose must be 'pickup' or 'doorstep'.")
+        raise ValidationError({
+            "code": "validation_error",
+            "detail": "Purpose must be 'pickup' or 'doorstep'."
+        })
 
     from rest_framework.exceptions import APIException
     class Conflict(APIException):
         status_code = 409
         default_detail = "Action not valid for current delivery state."
+        default_code = "invalid_state"
 
     if purpose == 'pickup':
         if delivery.status != 'assigned':
-            raise Conflict(detail=f"Cannot reissue pickup OTP for delivery in '{delivery.status}' status.")
+            raise Conflict(detail={
+                "code": "invalid_state",
+                "detail": f"Cannot reissue pickup OTP for delivery in '{delivery.status}' status."
+            })
 
         raw_pickup_otp = issue_otp(delivery, 'pickup')
         return {
@@ -679,7 +694,10 @@ def reissue_delivery_otp(delivery: PetDelivery, purpose: str) -> dict:
 
     elif purpose == 'doorstep':
         if delivery.status != 'out_for_delivery':
-            raise Conflict(detail=f"Cannot reissue doorstep OTP for delivery in '{delivery.status}' status.")
+            raise Conflict(detail={
+                "code": "invalid_state",
+                "detail": f"Cannot reissue doorstep OTP for delivery in '{delivery.status}' status."
+            })
 
         raw_doorstep_otp = issue_otp(delivery, 'doorstep')
         email_sent = False
@@ -771,6 +789,7 @@ def cancel_delivery_by_shelter(delivery: PetDelivery, user) -> dict:
 
     if delivery.status not in ['assigned', 'out_for_delivery']:
         raise ValidationError({
+            "code": "validation_error",
             "detail": f"Cannot cancel delivery in '{delivery.status}' status. Only assigned or out_for_delivery deliveries can be cancelled."
         })
 
@@ -804,6 +823,7 @@ def cancel_delivery_by_shelter(delivery: PetDelivery, user) -> dict:
 
         if locked_delivery.status not in ['assigned', 'out_for_delivery']:
             raise ValidationError({
+                "code": "validation_error",
                 "detail": f"Cannot cancel delivery in '{locked_delivery.status}' status. Only assigned or out_for_delivery deliveries can be cancelled."
             })
 

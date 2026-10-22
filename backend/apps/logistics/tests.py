@@ -2875,6 +2875,214 @@ class ShelterCancelDeliveryAPITests(APITestCase):
         self.assertEqual(set(cust_pet_summary.keys()), set(CustomerTrackingPetSummarySerializer().fields.keys()))
 
 
+class StableErrorCodesTestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.shelter_user = User.objects.create_user(
+            username='err_shelter', email='err_shelter@test.org', password='password123', role='shelter'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user, organization_name='Error Shelter', is_verified=True
+        )
+        self.driver_user = User.objects.create_user(
+            username='err_driver', email='err_driver@test.org', password='password123', role='delivery'
+        )
+        self.driver = DeliveryProfile.objects.create(
+            user=self.driver_user, shelter=self.shelter_profile, is_available=True, vehicle_number='KA-05-ERR-1111'
+        )
+        self.customer = User.objects.create_user(
+            username='err_cust', email='err_cust@test.org', password='password123', role='customer'
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter_profile, name='ErrPet', species='dog', breed='Lab', age_months=12, status='available'
+        )
+        self.app = AdoptionApplication.objects.create(
+            applicant=self.customer,
+            pet=self.pet,
+            status='approved',
+            total_amount=Decimal('200.00'),
+            payment_method='cod',
+            payment_status='pending',
+            contact_phone='9999999999'
+        )
+        self.delivery = assign_delivery_task(self.app, self.driver, payment_method='cod')
+
+    def test_pickup_stable_error_codes(self):
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{self.delivery.public_id}/pickup/'
+
+        # 1. Missing OTP -> 400 validation_error
+        res = self.client.post(url, {})
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'validation_error')
+
+        # 2. Malformed OTP -> 400 validation_error
+        res = self.client.post(url, {'otp': '123'})
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'validation_error')
+
+        # 3. Invalid OTP -> 400 otp_invalid with attempts_remaining
+        res = self.client.post(url, {'otp': '000000'})
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'otp_invalid')
+        self.assertEqual(res.data.get('attempts_remaining'), 2)
+
+        # 4. Lockout -> 423 otp_locked
+        self.client.post(url, {'otp': '000001'})
+        self.client.post(url, {'otp': '000002'})
+        res_lock = self.client.post(url, {'otp': '000003'})
+        self.assertEqual(res_lock.status_code, 423)
+        self.assertEqual(res_lock.data.get('code'), 'otp_locked')
+
+        # 5. Expired OTP -> 410 otp_expired
+        reissue_delivery_otp(self.delivery, 'pickup')
+        self.delivery.refresh_from_db()
+        self.delivery.expires_at = timezone.now() - timedelta(minutes=1)
+        self.delivery.save(update_fields=['expires_at'])
+        res_exp = self.client.post(url, {'otp': '123456'})
+        self.assertEqual(res_exp.status_code, status.HTTP_410_GONE)
+        self.assertEqual(res_exp.data.get('code'), 'otp_expired')
+
+        # 6. Wrong state -> 409 invalid_state
+        self.delivery.status = 'out_for_delivery'
+        self.delivery.save(update_fields=['status'])
+        res_state = self.client.post(url, {'otp': '123456'})
+        self.assertEqual(res_state.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res_state.data.get('code'), 'invalid_state')
+
+    def test_doorstep_and_verify_otp_stable_error_codes(self):
+        for endpoint in ['verify-doorstep', 'verify-otp']:
+            iter_driver_user = User.objects.create_user(
+                username=f'drv_{endpoint}', email=f'drv_{endpoint}@test.org', password='password123', role='delivery'
+            )
+            iter_driver = DeliveryProfile.objects.create(
+                user=iter_driver_user, shelter=self.shelter_profile, is_available=True, vehicle_number=f'KA-05-D-{endpoint[:4]}'
+            )
+            deliv = assign_delivery_task(
+                AdoptionApplication.objects.create(
+                    applicant=self.customer, pet=self.pet, status='approved', total_amount=Decimal('100.00'),
+                    payment_method='cod', payment_status='paid', contact_phone='888'
+                ),
+                iter_driver,
+                payment_method='cod'
+            )
+            deliv.status = 'out_for_delivery'
+            deliv.cash_collected = Decimal('100.00')
+            deliv.save(update_fields=['status', 'cash_collected'])
+            issue_otp(deliv, 'doorstep')
+
+            self.client.force_authenticate(user=iter_driver_user)
+            url = f'/api/v1/delivery/tasks/{deliv.public_id}/{endpoint}/'
+
+            # 1. Missing OTP -> 400 validation_error
+            res = self.client.post(url, {})
+            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(res.data.get('code'), 'validation_error')
+
+            # 2. Malformed OTP -> 400 validation_error
+            res = self.client.post(url, {'otp': 'abc'})
+            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(res.data.get('code'), 'validation_error')
+
+            # 3. Invalid OTP -> 400 otp_invalid with attempts_remaining
+            res = self.client.post(url, {'otp': '000000'})
+            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(res.data.get('code'), 'otp_invalid')
+            self.assertEqual(res.data.get('attempts_remaining'), 2)
+
+            # 4. Lockout -> 423 otp_locked
+            self.client.post(url, {'otp': '000001'})
+            self.client.post(url, {'otp': '000002'})
+            res_lock = self.client.post(url, {'otp': '000003'})
+            self.assertEqual(res_lock.status_code, 423)
+            self.assertEqual(res_lock.data.get('code'), 'otp_locked')
+
+            # 5. Expired OTP -> 410 otp_expired
+            reissue_delivery_otp(deliv, 'doorstep')
+            deliv.refresh_from_db()
+            deliv.doorstep_otp_expires_at = timezone.now() - timedelta(minutes=1)
+            deliv.save(update_fields=['doorstep_otp_expires_at'])
+            res_exp = self.client.post(url, {'otp': '123456'})
+            self.assertEqual(res_exp.status_code, status.HTTP_410_GONE)
+            self.assertEqual(res_exp.data.get('code'), 'otp_expired')
+
+            # 6. Wrong state -> 409 invalid_state
+            deliv.status = 'assigned'
+            deliv.save(update_fields=['status'])
+            res_state = self.client.post(url, {'otp': '123456'})
+            self.assertEqual(res_state.status_code, status.HTTP_409_CONFLICT)
+            self.assertEqual(res_state.data.get('code'), 'invalid_state')
+
+    def test_collect_cash_stable_error_codes(self):
+        self.delivery.status = 'out_for_delivery'
+        self.delivery.save(update_fields=['status'])
+        self.client.force_authenticate(user=self.driver_user)
+        url = f'/api/v1/delivery/tasks/{self.delivery.public_id}/collect-cash/'
+
+        # 1. Missing amount -> 400 validation_error
+        res = self.client.post(url, {})
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'validation_error')
+
+        # 2. Negative amount -> 400 validation_error
+        res = self.client.post(url, {'amount': '-50.00'})
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'validation_error')
+
+        # 3. Non-numeric amount -> 400 validation_error
+        res = self.client.post(url, {'amount': 'invalid'})
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'validation_error')
+
+        # 4. Wrong amount -> 400 validation_error
+        res = self.client.post(url, {'amount': '150.00'})
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'validation_error')
+
+        # 5. Wrong state (assigned) -> 409 invalid_state
+        self.delivery.status = 'assigned'
+        self.delivery.save(update_fields=['status'])
+        res_state = self.client.post(url, {'amount': '200.00'})
+        self.assertEqual(res_state.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res_state.data.get('code'), 'invalid_state')
+
+    def test_reissue_otp_stable_error_codes(self):
+        self.client.force_authenticate(user=self.shelter_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reissue-otp/'
+
+        # 1. Malformed / missing purpose -> 400 validation_error
+        res = self.client.post(url, {'purpose': 'invalid'})
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'validation_error')
+
+        # 2. Wrong state for doorstep reissue -> 409 invalid_state
+        res = self.client.post(url, {'purpose': 'doorstep'})
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'invalid_state')
+
+    def test_cancel_delivery_stable_error_codes(self):
+        self.client.force_authenticate(user=self.shelter_user)
+        url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel/'
+
+        # 1. Invalid status (delivered) -> 400 validation_error
+        self.delivery.status = 'delivered'
+        self.delivery.delivered_at = timezone.now()
+        self.delivery.save(update_fields=['status', 'delivered_at'])
+        res = self.client.post(url)
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'validation_error')
+
+        # 2. Cash collected -> 409 cash_collected
+        self.delivery.status = 'out_for_delivery'
+        self.delivery.cash_collected = Decimal('200.00')
+        self.delivery.save(update_fields=['status', 'cash_collected'])
+        res_cash = self.client.post(url)
+        self.assertEqual(res_cash.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res_cash.data.get('code'), 'cash_collected')
+
+
+
+
 
 
 

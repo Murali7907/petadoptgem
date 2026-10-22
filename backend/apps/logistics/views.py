@@ -47,7 +47,9 @@ from .serializers import (
     PaymentLedgerSerializer,
     CollectCashRequestSerializer,
     CollectCashResponseSerializer,
-    DeliveryCancelResponseSerializer
+    DeliveryCancelResponseSerializer,
+    ErrorResponseSerializer,
+    OTPInvalidErrorResponseSerializer
 )
 from .otp import check_otp, issue_otp
 from .services import (
@@ -199,7 +201,14 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
             data['pickup_otp'] = delivery.raw_pickup_otp
         return Response(data, status=status.HTTP_201_CREATED)
 
-    @extend_schema(request=DeliveryReissueOTPRequestSerializer, responses={200: DeliveryReissueOTPResponseSerializer})
+    @extend_schema(
+        request=DeliveryReissueOTPRequestSerializer,
+        responses={
+            200: DeliveryReissueOTPResponseSerializer,
+            400: ErrorResponseSerializer,
+            409: ErrorResponseSerializer,
+        }
+    )
     @action(detail=True, methods=['post'], url_path='reissue-otp')
     def reissue_otp(self, request, *args, **kwargs):
         delivery = self.get_object()
@@ -211,23 +220,25 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
 
         purpose = request.data.get('purpose')
         if not purpose or purpose not in ['pickup', 'doorstep']:
-            return Response({"detail": "Purpose must be 'pickup' or 'doorstep'."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"code": "validation_error", "detail": "Purpose must be 'pickup' or 'doorstep'."}, status=status.HTTP_400_BAD_REQUEST)
 
         from rest_framework.exceptions import APIException
         try:
             result = reissue_delivery_otp(delivery, purpose)
             return Response(result, status=status.HTTP_200_OK)
         except APIException as e:
-            return Response({"detail": e.detail}, status=e.status_code)
+            if isinstance(e.detail, dict):
+                return Response(e.detail, status=e.status_code)
+            return Response({"code": "invalid_state", "detail": str(e.detail)}, status=e.status_code)
 
     @extend_schema(
         summary="Cancel delivery task",
         description="Verified shelter or platform administrator cancels an assigned or out_for_delivery task when no cash has been collected.",
         responses={
             200: DeliveryCancelResponseSerializer,
-            400: OpenApiResponse(description="Invalid delivery status for cancellation"),
+            400: ErrorResponseSerializer,
             403: OpenApiResponse(description="Unauthorized or foreign shelter"),
-            409: OpenApiResponse(description="Cash already collected or online payment captured (refund required)")
+            409: ErrorResponseSerializer,
         }
     )
     @action(detail=True, methods=['post'], url_path='cancel')
@@ -244,12 +255,16 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
             return Response(result, status=status.HTTP_200_OK)
         except ConflictError as e:
             if isinstance(e.detail, dict):
+                if "code" not in e.detail:
+                    e.detail["code"] = "invalid_state"
                 return Response(e.detail, status=status.HTTP_409_CONFLICT)
-            return Response({"detail": str(e.detail)}, status=status.HTTP_409_CONFLICT)
+            return Response({"code": "invalid_state", "detail": str(e.detail)}, status=status.HTTP_409_CONFLICT)
         except ValidationError as e:
             if isinstance(e.detail, dict):
+                if "code" not in e.detail:
+                    e.detail["code"] = "validation_error"
                 return Response(e.detail, status=status.HTTP_400_BAD_REQUEST)
-            return Response({"detail": str(e.detail)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"code": "validation_error", "detail": str(e.detail)}, status=status.HTTP_400_BAD_REQUEST)
 
     @extend_schema(responses={200: DriverListSerializer(many=True)})
     @action(detail=False, methods=['get'], url_path='drivers')
@@ -335,7 +350,10 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         request=OTPVerificationSerializer,
         responses={
             200: DeliveryPickupResponseSerializer,
-            409: OpenApiResponse(description="Payment required or conflict"),
+            400: OTPInvalidErrorResponseSerializer,
+            409: ErrorResponseSerializer,
+            410: ErrorResponseSerializer,
+            423: ErrorResponseSerializer,
         }
     )
     @action(detail=True, methods=['post'], url_path='pickup',
@@ -350,24 +368,25 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
         raw_otp = request.data.get('otp') or request.data.get('code') or request.data.get('secret_otp')
         if not raw_otp:
-            return Response({"detail": "OTP is required."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"code": "validation_error", "detail": "OTP is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         val = str(raw_otp).strip()
         if not re.match(r'^\d{6}$', val):
-            return Response({"detail": "OTP must be a 6-digit numeric string."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"code": "validation_error", "detail": "OTP must be a 6-digit numeric string."}, status=status.HTTP_400_BAD_REQUEST)
 
         result = verify_pickup_service(delivery_obj.id, val)
 
         if result.outcome == OTPVerificationOutcome.WRONG_STATE:
-            return Response({"detail": result.detail}, status=status.HTTP_409_CONFLICT)
+            return Response({"code": "invalid_state", "detail": result.detail}, status=status.HTTP_409_CONFLICT)
         elif result.outcome in (OTPVerificationOutcome.PAYMENT_REQUIRED, OTPVerificationOutcome.PAYMENT_METHOD_REQUIRED):
             return Response({"code": result.code, "detail": result.detail}, status=status.HTTP_409_CONFLICT)
         elif result.outcome == OTPVerificationOutcome.LOCKED:
-            return Response({"detail": result.detail}, status=423)
+            return Response({"code": "otp_locked", "detail": result.detail}, status=423)
         elif result.outcome == OTPVerificationOutcome.EXPIRED:
-            return Response({"detail": result.detail}, status=status.HTTP_410_GONE)
+            return Response({"code": "otp_expired", "detail": result.detail}, status=status.HTTP_410_GONE)
         elif result.outcome == OTPVerificationOutcome.INVALID:
             return Response({
+                "code": "otp_invalid",
                 "detail": result.detail,
                 "attempts_remaining": result.attempts_remaining
             }, status=status.HTTP_400_BAD_REQUEST)
@@ -378,7 +397,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
                 "delivery": updated_serializer.data
             }, status=status.HTTP_200_OK)
 
-        return Response({"detail": result.detail or "Verification failed."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"code": "validation_error", "detail": result.detail or "Verification failed."}, status=status.HTTP_400_BAD_REQUEST)
 
     @extend_schema(request=DeliveryStatusUpdateRequestSerializer, responses={200: DeliveryDriverTaskSerializer})
     @action(detail=True, methods=['patch', 'post'], url_path='status', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
@@ -421,8 +440,8 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
         request=CollectCashRequestSerializer,
         responses={
             200: CollectCashResponseSerializer,
-            400: OpenApiResponse(description="Bad request (e.g. wrong amount, total is 0, not COD)"),
-            409: OpenApiResponse(description="Conflict (e.g. not out_for_delivery)"),
+            400: ErrorResponseSerializer,
+            409: ErrorResponseSerializer,
         }
     )
     @action(detail=True, methods=['post'], url_path='collect-cash', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
@@ -431,15 +450,15 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
         raw_amount = request.data.get('amount')
         if raw_amount is None or str(raw_amount).strip() == '':
-            return Response({"detail": "Amount is required."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"code": "validation_error", "detail": "Amount is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             amount = Decimal(str(raw_amount).strip())
         except (ValueError, TypeError, ArithmeticError):
-            return Response({"detail": "A valid decimal amount is required."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"code": "validation_error", "detail": "A valid decimal amount is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         if amount <= Decimal('0.00'):
-            return Response({"detail": "Amount must be greater than zero."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"code": "validation_error", "detail": "Amount must be greater than zero."}, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
             delivery = PetDelivery.objects.select_for_update().get(id=delivery_obj.id)
@@ -447,17 +466,20 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
             if delivery.status != 'out_for_delivery':
                 return Response({
+                    "code": "invalid_state",
                     "detail": f"Cannot collect cash for delivery in '{delivery.status}' state. Must be 'out_for_delivery'."
                 }, status=status.HTTP_409_CONFLICT)
 
             if application.payment_method != 'cod':
                 return Response({
+                    "code": "validation_error",
                     "detail": f"Cannot collect cash for non-COD payment method '{application.payment_method}'."
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             total_amount = application.total_amount or Decimal('0.00')
             if total_amount <= Decimal('0.00'):
                 return Response({
+                    "code": "validation_error",
                     "detail": "Total amount must be greater than zero for COD collection."
                 }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -475,6 +497,7 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
             remaining_balance = total_amount - current_collected
             if amount != remaining_balance:
                 return Response({
+                    "code": "validation_error",
                     "detail": f"Submitted amount ({amount}) must equal remaining balance ({remaining_balance}).",
                     "remaining_amount": str(remaining_balance)
                 }, status=status.HTTP_400_BAD_REQUEST)
@@ -506,7 +529,16 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
                 "payment_id": str(payment.public_id)
             }, status=status.HTTP_200_OK)
 
-    @extend_schema(request=OTPVerificationSerializer, responses={200: DeliveryDoorstepResponseSerializer, 409: OpenApiResponse(description="Cash not collected or wrong state")})
+    @extend_schema(
+        request=OTPVerificationSerializer,
+        responses={
+            200: DeliveryDoorstepResponseSerializer,
+            400: OTPInvalidErrorResponseSerializer,
+            409: ErrorResponseSerializer,
+            410: ErrorResponseSerializer,
+            423: ErrorResponseSerializer,
+        }
+    )
     @action(detail=True, methods=['post'], url_path='verify-doorstep',
             permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
     def verify_doorstep(self, request, *args, **kwargs):
@@ -519,11 +551,11 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
 
         raw_otp = request.data.get('otp') or request.data.get('code') or request.data.get('secret_otp')
         if not raw_otp:
-            return Response({"detail": "OTP is required."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"code": "validation_error", "detail": "OTP is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         val = str(raw_otp).strip()
         if not re.match(r'^\d{6}$', val):
-            return Response({"detail": "OTP must be a 6-digit numeric string."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"code": "validation_error", "detail": "OTP must be a 6-digit numeric string."}, status=status.HTTP_400_BAD_REQUEST)
 
         result = verify_doorstep_service(delivery_obj.id, val)
 
@@ -534,15 +566,16 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
                 "delivery": updated_serializer.data
             }, status=status.HTTP_200_OK)
         elif result.outcome == OTPVerificationOutcome.WRONG_STATE:
-            return Response({"detail": result.detail}, status=status.HTTP_409_CONFLICT)
+            return Response({"code": "invalid_state", "detail": result.detail}, status=status.HTTP_409_CONFLICT)
         elif result.outcome == OTPVerificationOutcome.CASH_NOT_COLLECTED:
             return Response({"code": result.code, "detail": result.detail}, status=status.HTTP_409_CONFLICT)
         elif result.outcome == OTPVerificationOutcome.LOCKED:
-            return Response({"detail": result.detail}, status=423)
+            return Response({"code": "otp_locked", "detail": result.detail}, status=423)
         elif result.outcome == OTPVerificationOutcome.EXPIRED:
-            return Response({"detail": result.detail}, status=status.HTTP_410_GONE)
+            return Response({"code": "otp_expired", "detail": result.detail}, status=status.HTTP_410_GONE)
         elif result.outcome == OTPVerificationOutcome.INVALID:
             return Response({
+                "code": "otp_invalid",
                 "detail": result.detail,
                 "attempts_remaining": result.attempts_remaining
             }, status=status.HTTP_400_BAD_REQUEST)
@@ -553,13 +586,23 @@ class DriverDeliveryViewSet(viewsets.GenericViewSet):
                 "delivery": updated_serializer.data
             }, status=status.HTTP_200_OK)
 
-        return Response({"detail": result.detail or "Verification failed."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"code": "validation_error", "detail": result.detail or "Verification failed."}, status=status.HTTP_400_BAD_REQUEST)
 
-    @extend_schema(request=OTPVerificationSerializer, responses={200: DeliveryDoorstepResponseSerializer})
+    @extend_schema(
+        request=OTPVerificationSerializer,
+        responses={
+            200: DeliveryDoorstepResponseSerializer,
+            400: OTPInvalidErrorResponseSerializer,
+            409: ErrorResponseSerializer,
+            410: ErrorResponseSerializer,
+            423: ErrorResponseSerializer,
+        }
+    )
     @action(detail=True, methods=['post'], url_path='verify-otp',
             permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])
     def verify_otp(self, request, *args, **kwargs):
         return self.verify_doorstep(request, *args, **kwargs)
+
 
     @extend_schema(request=LocationPingSerializer, responses={201: DeliveryPingResponseSerializer})
     @action(detail=True, methods=['post'], url_path='ping', permission_classes=[IsAuthenticated, IsAssignedDeliveryDriver])

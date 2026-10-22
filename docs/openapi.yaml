@@ -900,9 +900,17 @@ paths:
                 $ref: '#/components/schemas/CollectCashResponse'
           description: ''
         '400':
-          description: Bad request (e.g. wrong amount, total is 0, not COD)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
         '409':
-          description: Conflict (e.g. not out_for_delivery)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
   /api/v1/delivery/tasks/{public_id}/pickup/:
     post:
       operationId: delivery_tasks_pickup_create
@@ -943,8 +951,30 @@ paths:
               schema:
                 $ref: '#/components/schemas/DeliveryPickupResponse'
           description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OTPInvalidErrorResponse'
+          description: ''
         '409':
-          description: Payment required or conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
+        '423':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
   /api/v1/delivery/tasks/{public_id}/ping/:
     post:
       operationId: delivery_tasks_ping_create
@@ -1164,8 +1194,30 @@ paths:
               schema:
                 $ref: '#/components/schemas/DeliveryDoorstepResponse'
           description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OTPInvalidErrorResponse'
+          description: ''
         '409':
-          description: Cash not collected or wrong state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
+        '423':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
   /api/v1/delivery/tasks/{public_id}/verify-otp/:
     post:
       operationId: delivery_tasks_verify_otp_create
@@ -1205,6 +1257,30 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DeliveryDoorstepResponse'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OTPInvalidErrorResponse'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
+        '410':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
+        '423':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
           description: ''
   /api/v1/delivery/tasks/active/:
     get:
@@ -2000,11 +2076,19 @@ paths:
                 $ref: '#/components/schemas/DeliveryCancelResponse'
           description: ''
         '400':
-          description: Invalid delivery status for cancellation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
         '403':
           description: Unauthorized or foreign shelter
         '409':
-          description: Cash already collected or online payment captured (refund required)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
   /api/v1/shelter/deliveries/{public_id}/reissue-otp/:
     post:
       operationId: shelter_deliveries_reissue_otp_create
@@ -2044,6 +2128,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DeliveryReissueOTPResponse'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
           description: ''
   /api/v1/shelter/deliveries/assign/:
     post:
@@ -3890,6 +3986,17 @@ components:
       - name
       - public_id
       - species
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: string
+          description: Machine-readable stable error code
+        detail:
+          type: string
+          description: Human-readable error description
+      required:
+      - detail
     GenderEnum:
       enum:
       - male
@@ -4017,6 +4124,22 @@ components:
       - message
       - public_id
       - title
+    OTPInvalidErrorResponse:
+      type: object
+      properties:
+        code:
+          type: string
+          default: otp_invalid
+          description: Machine-readable error code
+        detail:
+          type: string
+          description: Human-readable error description
+        attempts_remaining:
+          type: integer
+          description: Remaining failed attempts before lockout
+      required:
+      - attempts_remaining
+      - detail
     OTPVerificationRequest:
       type: object
       properties:

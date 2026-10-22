@@ -454,4 +454,16 @@ class DeliveryCancelResponseSerializer(serializers.Serializer):
     idempotent = serializers.BooleanField(required=False)
 
 
+class ErrorResponseSerializer(serializers.Serializer):
+    code = serializers.CharField(required=False, help_text="Machine-readable stable error code")
+    detail = serializers.CharField(help_text="Human-readable error description")
+
+
+class OTPInvalidErrorResponseSerializer(serializers.Serializer):
+    code = serializers.CharField(default="otp_invalid", help_text="Machine-readable error code")
+    detail = serializers.CharField(help_text="Human-readable error description")
+    attempts_remaining = serializers.IntegerField(help_text="Remaining failed attempts before lockout")
+
+
+
 

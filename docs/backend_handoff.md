@@ -102,19 +102,31 @@ All high-impact errors return structured JSON payloads with a standard `"code"` 
 }
 ```
 
+For invalid OTP attempts, the payload includes remaining attempts:
+```json
+{
+  "code": "otp_invalid",
+  "detail": "Invalid OTP. 2 attempt(s) remaining.",
+  "attempts_remaining": 2
+}
+```
+
 | HTTP Status | Error Code (`"code"`) | Occurring Endpoints | Meaning & Client Remediation |
 |---|---|---|---|
 | `400 Bad Request` | `invalid_token` | `/api/v1/auth/logout/` | The refresh token provided in the logout request is malformed, corrupted, or has an invalid signature. Prompt user to clear local storage. |
 | `400 Bad Request` | `adopter_email_missing` | `/api/v1/shelter/deliveries/assign/` | Delivery task cannot be assigned because the applicant account has no email address. The shelter cannot dispatch the delivery until the customer adds an email address to receive the doorstep OTP. |
+| `400 Bad Request` | `validation_error` | Delivery action endpoints (`pickup/`, `verify-doorstep/`, `collect-cash/`, `reissue-otp/`, `cancel/`, legacy `verify-otp/`) | Request body is missing required parameters or payload data failed validation (e.g., OTP is not 6 digits, missing required field, non-positive cash amount). |
+| `400 Bad Request` | `otp_invalid` | `/api/v1/delivery/tasks/<id>/pickup/`<br>`/api/v1/delivery/tasks/<id>/verify-doorstep/`<br>`/api/v1/delivery/tasks/<id>/verify-otp/` | Submitted OTP is incorrect. Includes `attempts_remaining` integer count. Decrements allowed attempts counter. |
 | `403 Forbidden` | `shelter_not_verified` | All shelter write endpoints | The shelter profile has `is_verified = False`. The platform administrator must verify the shelter license/profile in the admin dashboard before pets or deliveries can be managed. |
+| `409 Conflict` | `invalid_state` | Delivery action endpoints (`pickup/`, `verify-doorstep/`, `collect-cash/`, `reissue-otp/`, `cancel/`, legacy `verify-otp/`) | Delivery task is not in the required status for the requested transition (e.g., attempting pickup on an unassigned or already delivered task, or cancelling an already completed delivery). |
 | `409 Conflict` | `payment_required` | `/api/v1/delivery/tasks/<id>/pickup/` | Pickup OTP verification was rejected because the application payment method is `'online'`, but no captured Razorpay payment exists. Driver must wait until the customer completes checkout. |
 | `409 Conflict` | `payment_method_required` | `/api/v1/delivery/tasks/<id>/pickup/` | Pickup OTP verification was rejected because the application payment method is `'unset'` and `total_amount > 0`. Shelter or adopter must designate payment method before pet leaves the facility. |
 | `409 Conflict` | `cash_not_collected` | `/api/v1/delivery/tasks/<id>/verify-doorstep/` | Doorstep OTP verification was rejected because the delivery is Cash on Delivery (COD) and the driver has not yet called `collect-cash` with `cash_collected >= total_amount`. Driver must collect cash first. |
 | `409 Conflict` | `cash_already_collected` | `/api/v1/delivery/tasks/<id>/collect-cash/` | Driver attempted to record cash collection on a delivery where cash has already been logged. |
 | `409 Conflict` | `cash_collected` | `/api/v1/shelter/deliveries/<id>/cancel/` | Shelter attempted to cancel a delivery task after the driver physically collected cash from the customer. The shelter must reconcile cash with the driver directly. |
 | `409 Conflict` | `refund_required` | - `/api/v1/applications/<id>/cancel/`<br>- `/api/v1/shelter/applications/<id>/reject/`<br>- `/api/v1/shelter/deliveries/<id>/cancel/`<br>- `/api/v1/adoptions/<id>/status/` | An online Razorpay payment has already been captured (`PaymentStatus.CAPTURED`), or delivery cash has been collected. The application or delivery cannot be cancelled/rejected until shelter staff arranges a refund with the customer. |
-| `423 Locked` | *(outcome code)* | `/api/v1/delivery/tasks/<id>/pickup/`<br>`/api/v1/delivery/tasks/<id>/verify-doorstep/` | Maximum failed OTP attempts exceeded (3 attempts). The OTP is permanently locked. Contact shelter staff to reissue an OTP. |
-| `410 Gone` | *(outcome code)* | `/api/v1/delivery/tasks/<id>/pickup/`<br>`/api/v1/delivery/tasks/<id>/verify-doorstep/` | The OTP has expired (standard 24-hour TTL). Contact shelter staff to reissue. |
+| `410 Gone` | `otp_expired` | `/api/v1/delivery/tasks/<id>/pickup/`<br>`/api/v1/delivery/tasks/<id>/verify-doorstep/`<br>`/api/v1/delivery/tasks/<id>/verify-otp/` | The OTP has expired (standard 24-hour TTL). Contact shelter staff to reissue an OTP via `reissue-otp/`. |
+| `423 Locked` | `otp_locked` | `/api/v1/delivery/tasks/<id>/pickup/`<br>`/api/v1/delivery/tasks/<id>/verify-doorstep/`<br>`/api/v1/delivery/tasks/<id>/verify-otp/` | Maximum failed OTP attempts exceeded (3 attempts). The OTP is permanently locked. Contact shelter staff to reissue an OTP via `reissue-otp/`. |
 
 ---
 
