@@ -42,6 +42,7 @@ venv.bak/
 # Databases
 *.sqlite3
 db.sqlite3
+*.dump
 
 # Django media and static files
 media/
