@@ -879,38 +879,50 @@ Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medic
 
 ---
 
-## 13. Milestone 8 — Operational Refunds, COD Reconciliation, Application Exit Paths & Privacy Hardening
+## 13. Milestone 8a — Guard Coverage Audit, Trigger Drift Elimination & Tiered Location Privacy
+
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Milestone 8a approved and finalized.
+
+### 13.1 Task 1: Guard Coverage (Audit & Hardening)
+- Resolve and audit URLs for application submission (`apply`), detail, and status updates across canonical `/api/v1/` and legacy `/api/` paths using the Django URL resolver. Trace where `AdoptionStatusUpdateView`, `AdoptionApplicationDetailView`, and `CustomerApplicationApplyView` reside or in which commit they were refactored.
+- Catalog all call sites of `assert_application_refund_safe`.
+- Produce a comprehensive matrix of EVERY code path in the system that modifies `AdoptionApplication.status` (views, services, admin, seed commands, signals, queryset `.update()`) with guarded status (`Yes`/`No`).
+- Guard any unshielded mutation paths with `assert_application_refund_safe` and add unit/integration tests verifying refusal with HTTP 409 `refund_required`.
+
+### 13.2 Task 2: PostgreSQL Trigger Drift Elimination
+- Inspect PostgreSQL non-internal triggers in dev database: print table, `pg_get_triggerdef`, and trigger function definitions.
+- Verify whether `trg_update_application_timestamp` was ever created by a Django migration and inspect if it only maintains `updated_at`.
+- Check whether any code path uses queryset `.update()` on `adoption_applications` where `updated_at` must be explicitly provided.
+- Create a reversible Django migration that drops `trg_update_application_timestamp` and its underlying function with `IF EXISTS` (backward operation documented as no-op).
+- Add a test querying `pg_trigger` in the test database asserting that only the approved set of non-internal triggers (`{'trg_check_review_eligibility'}`) exists, preventing schema drift regression.
+- Note: Do NOT apply migration to dev DB directly (user will execute).
+
+### 13.3 Task 3: Tiered Location Privacy (Tiered Disclosure)
+- Public pet discovery endpoints (`GET /api/v1/pets/` and `GET /api/v1/pets/{public_id}/`):
+  - Expose only `organization_name`, `city`, and `distance_km`.
+  - Strip `pickup_address`, `latitude`, `longitude`, and `phone` from public serializers.
+  - Eliminate the fallback that returns `pickup_address` when `city` is empty (return empty string or `"location not provided"`).
+  - Server-side `distance_km` calculation remains fully functional from database coordinates.
+- Tiered Disclosure Authorization:
+  - Expose full shelter pickup details (`pickup_address`, coordinates, contact phone) ONLY to:
+    1. Authenticated staff/user of the owning shelter.
+    2. Platform administrators (`role='admin'`).
+    3. Adopter with an `approved` or `completed` application for that pet (aligned with medical document access permissions).
+- Update inline serializers, `drf-spectacular` schema definitions, documentation (`docs/backend_handoff.md`, `docs/openapi.yaml`), and test matrix across anonymous users, other customers, approved adopters, pending applicants, shelter owners, and admins.
+- Ensure `manage.py spectacular --validate --fail-on-warn` exits 0 with 0 errors and 0 warnings.
+
+---
+
+## 14. Milestone 8b — Operational Refunds, COD Reconciliation & Application Exit Paths
 
 > **Status**: `PROPOSED / PLANNED`
 
-### 13.1 Feature Scope
-
-#### 1. Razorpay Refund Service & Webhook Ingestion
-- **Automated Refund Service**: Implement `apps.logistics.payment_services.refund_payment(...)` integrating with `razorpay_client.payment.refund(payment_id, amount_in_paise)`.
-- **State Model**: Extend `PaymentStatus` with `PaymentStatus.REFUNDED = 'refunded'` and `PaymentStatus.PARTIALLY_REFUNDED = 'partially_refunded'`. Add `refund_id`, `refunded_at`, and `amount_refunded` columns to `Payment`.
-- **Webhook Handlers**: Handle `refund.processed`, `refund.failed`, and `refund.speed_changed` Razorpay webhook events with idempotency and signature validation.
-- **Endpoint**: `POST /api/v1/shelter/applications/{public_id}/refund/` (restricted to verified shelter or platform admin).
-
-#### 2. Cash on Delivery (COD) Driver Settlement Endpoint
-- **Reconciliation Endpoint**: `POST /api/v1/shelter/deliveries/{public_id}/settle-cash/` (or admin equivalent).
-- **Invariants**:
-  - Requires `is_verified=True` shelter managing the pet or platform admin.
-  - Delivery must be in `delivered` status with `payment_method == 'cod'` and `cash_collected > 0`.
-- **Side Effects**:
-  - Flips `PetDelivery.is_cash_settled_with_shelter = True`.
-  - Sets `cash_settled_at = timezone.now()`.
-  - Dispatches confirmation notifications to both driver and shelter.
-
-#### 3. Operational Cancellation & Exit Path for Stuck Paid Applications
-- **Problem**: Under Milestone 7's Central Refund Guard, an application with a captured online payment or collected cash is blocked from cancellation or rejection. If a customer or shelter legitimately must abort an approved adoption, staff has no automated mechanism to exit this state.
-- **Solution**: Structured `Cancel with Refund` operational workflow:
-  - Invokes `refund_payment(...)` against Razorpay.
-  - Upon confirmed refund capture, safely transitions application: `approved` -> `cancelled` (or `rejected`).
-  - Automatically resets pet status: `pending` -> `available`, unlocking the pet for other adopters.
-
-#### 4. Location & Contact Privacy Enforcement
-- Implement Option A (Tiered Disclosure): Mask `pickup_address`, `latitude`, `longitude`, and `phone` in `PublicPetDetailSerializer` for unauthenticated or unauthorized users, exposing them only to applicants with an approved application.
-- Fix `PublicPetListSerializer.get_shelter_city` to never fall back to raw street address when `city` is blank.
+### 14.1 Feature Scope
+1. **Razorpay Automated Refund Service**: Implement `apps.logistics.payment_services.refund_payment(...)` integrating with Razorpay refund API, tracking `PaymentStatus.REFUNDED` / `PARTIALLY_REFUNDED`, and processing webhook events.
+2. **COD Reconciliation Endpoint**: `POST /api/v1/shelter/deliveries/{public_id}/settle-cash/` flipping `is_cash_settled_with_shelter = True`.
+3. **Operational Exit Path for Stuck Paid Applications**: Coordinated refund and cancellation workflow restoring pet to `available`.
 
 ---
 

@@ -1067,6 +1067,33 @@ class ApplicationPetStatusConvergenceTests(APITestCase):
         ro_cash = admin_instance.get_readonly_fields(request, cod_app)
         self.assertIn('status', ro_cash)
 
+        # 5. Direct save_model call with status modification raises RefundRequiredError
+        from apps.adoptions.services import RefundRequiredError
+        with self.assertRaises(RefundRequiredError):
+            unpaid_app.status = 'cancelled'
+            admin_instance.save_model(request, unpaid_app, form, change=True)
+
+    def test_customer_cannot_modify_status_via_patch_or_put(self):
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='online', total_amount=Decimal('100.00')
+        )
+        self.client.force_authenticate(user=self.adopter_1)
+        res = self.client.patch(f'/api/v1/applications/{app.public_id}/', {'status': 'cancelled'})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'approved')
+
+        res = self.client.put(f'/api/v1/applications/{app.public_id}/', {
+            'living_situation': 'Apartment',
+            'contact_phone': '999',
+            'status': 'rejected'
+        })
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'approved')
+
+
 
 
 
