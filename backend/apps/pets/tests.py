@@ -1092,6 +1092,29 @@ class PetMedicalRecordVisibilityHybridTests(APITestCase):
         med_list_app = res_app.data['medical_overview']['medical_records']
         self.assertEqual(med_list_app[0]['document_url'], self.doc_secret_url)
 
+    def test_inline_serializers_match_schema_keys(self):
+        from apps.pets.serializers import (
+            MedicalOverviewSerializer,
+            MedicalOverviewRecordSerializer,
+            PublicPetShelterSerializer,
+            PublicPetDetailSerializer,
+        )
+        serializer = PublicPetDetailSerializer(self.pet, context={'request': None})
+        data = serializer.data
+
+        # 1. medical_overview matches MedicalOverviewSerializer declared fields
+        med_overview = data['medical_overview']
+        self.assertEqual(set(med_overview.keys()), set(MedicalOverviewSerializer().fields.keys()))
+
+        # 2. Each record in medical_overview matches MedicalOverviewRecordSerializer declared fields
+        for rec in med_overview['medical_records']:
+            self.assertEqual(set(rec.keys()), set(MedicalOverviewRecordSerializer().fields.keys()))
+
+        # 3. shelter matches PublicPetShelterSerializer declared fields
+        shelter_data = data['shelter']
+        self.assertEqual(set(shelter_data.keys()), set(PublicPetShelterSerializer().fields.keys()))
+
+
 
 
 

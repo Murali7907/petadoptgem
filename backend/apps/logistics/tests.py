@@ -2841,6 +2841,40 @@ class ShelterCancelDeliveryAPITests(APITestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data.get('status'), 'failed')
 
+    def test_inline_serializers_match_schema_keys(self):
+        from apps.logistics.serializers import (
+            DeliveryDriverTaskSerializer,
+            DeliveryCustomerSerializer,
+            DriverTaskPetSummarySerializer,
+            CustomerTrackingPetSummarySerializer,
+            DeliveryDriverDetailsSerializer,
+        )
+        # Restore delivery status so serializers operate on standard assigned delivery
+        self.delivery.status = 'assigned'
+        self.delivery.save(update_fields=['status'])
+
+        task_serializer = DeliveryDriverTaskSerializer(self.delivery)
+        task_data = task_serializer.data
+
+        # 1. Driver task pet_summary matches DriverTaskPetSummarySerializer declared fields
+        pet_summary = task_data['pet_summary']
+        self.assertIsNotNone(pet_summary)
+        self.assertEqual(set(pet_summary.keys()), set(DriverTaskPetSummarySerializer().fields.keys()))
+
+        tracking_serializer = DeliveryCustomerSerializer(self.delivery)
+        tracking_data = tracking_serializer.data
+
+        # 2. Customer tracking driver_details matches DeliveryDriverDetailsSerializer declared fields
+        driver_details = tracking_data['driver_details']
+        self.assertIsNotNone(driver_details)
+        self.assertEqual(set(driver_details.keys()), set(DeliveryDriverDetailsSerializer().fields.keys()))
+
+        # 3. Customer tracking pet_summary matches CustomerTrackingPetSummarySerializer declared fields
+        cust_pet_summary = tracking_data['pet_summary']
+        self.assertIsNotNone(cust_pet_summary)
+        self.assertEqual(set(cust_pet_summary.keys()), set(CustomerTrackingPetSummarySerializer().fields.keys()))
+
+
 
 
 
