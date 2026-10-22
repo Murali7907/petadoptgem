@@ -21,6 +21,8 @@ if not SECRET_KEY:
         SECRET_KEY = 'django-insecure-pet-adoption-secret-key-dev-only'
     else:
         raise ImproperlyConfigured("SECRET_KEY environment variable is required and cannot be empty when DEBUG is False.")
+elif not DEBUG and SECRET_KEY.startswith('django-insecure'):
+    raise ImproperlyConfigured("SECRET_KEY cannot start with 'django-insecure' when DEBUG is False.")
 
 # ALLOWED_HOSTS from env (no '*' when DEBUG is False; localhost/127.0.0.1 defaults only when DEBUG is True)
 ALLOWED_HOSTS_ENV = os.getenv('ALLOWED_HOSTS', '').strip()
@@ -220,6 +222,18 @@ if USE_CLOUDINARY:
     if missing_creds:
         from django.core.exceptions import ImproperlyConfigured
         raise ImproperlyConfigured(f"USE_CLOUDINARY is True, but required credentials are missing or empty: {', '.join(missing_creds)}")
+    if not DEBUG:
+        mock_cloudinary = [
+            name for name, val in [
+                ('CLOUDINARY_CLOUD_NAME', CLOUDINARY_CLOUD_NAME),
+                ('CLOUDINARY_API_KEY', CLOUDINARY_API_KEY),
+                ('CLOUDINARY_API_SECRET', CLOUDINARY_API_SECRET),
+            ] if val.lower().startswith('mock')
+        ]
+        if mock_cloudinary:
+            raise ImproperlyConfigured(
+                f"Mock Cloudinary credentials are forbidden when DEBUG is False: {', '.join(mock_cloudinary)}"
+            )
 
 CLOUDINARY_STORAGE = {
     'CLOUD_NAME': CLOUDINARY_CLOUD_NAME or 'mock_cloud',
@@ -277,6 +291,17 @@ if not DEBUG:
     if missing_razorpay:
         raise ImproperlyConfigured(
             f"Missing required Razorpay credentials when DEBUG is False: {', '.join(missing_razorpay)}"
+        )
+    mock_razorpay = [
+        name for name, val in [
+            ('RAZORPAY_KEY_ID', RAZORPAY_KEY_ID),
+            ('RAZORPAY_KEY_SECRET', RAZORPAY_KEY_SECRET),
+            ('RAZORPAY_WEBHOOK_SECRET', RAZORPAY_WEBHOOK_SECRET),
+        ] if 'mock' in val.lower()
+    ]
+    if mock_razorpay:
+        raise ImproperlyConfigured(
+            f"Mock Razorpay credentials forbidden when DEBUG is False: {', '.join(mock_razorpay)}"
         )
 else:
     RAZORPAY_KEY_ID = RAZORPAY_KEY_ID or 'rzp_test_mock_key_id'
@@ -414,4 +439,84 @@ else:
     SECURE_CONTENT_TYPE_NOSNIFF = False
     SECURE_REFERRER_POLICY = 'same-origin'
     SECURE_PROXY_SSL_HEADER = None
+
+
+def validate_production_credentials(
+    debug=None,
+    secret_key=None,
+    razorpay_key_id=None,
+    razorpay_key_secret=None,
+    razorpay_webhook_secret=None,
+    use_cloudinary=None,
+    cloudinary_cloud_name=None,
+    cloudinary_api_key=None,
+    cloudinary_api_secret=None,
+):
+    """
+    Validates security constraints for production deployment.
+    When DEBUG is False:
+      - SECRET_KEY must not be empty or start with 'django-insecure'.
+      - RAZORPAY_* credentials must not be empty or contain 'mock'.
+      - When USE_CLOUDINARY is True, CLOUDINARY_* credentials must not be empty or start with 'mock'.
+    Raises ImproperlyConfigured if any invariant is violated.
+    """
+    if debug is None:
+        debug = os.getenv('DEBUG', 'False').strip().lower() in ('true', '1', 't', 'yes', 'y')
+
+    if debug:
+        return  # Dev (DEBUG=True) is unaffected
+
+    # 1. SECRET_KEY checks
+    if secret_key is None:
+        secret_key = os.getenv('SECRET_KEY', '').strip()
+    if not secret_key:
+        raise ImproperlyConfigured("SECRET_KEY environment variable is required and cannot be empty when DEBUG is False.")
+    if secret_key.startswith('django-insecure'):
+        raise ImproperlyConfigured("SECRET_KEY cannot start with 'django-insecure' when DEBUG is False.")
+
+    # 2. RAZORPAY_* checks
+    rp_id = razorpay_key_id if razorpay_key_id is not None else os.getenv('RAZORPAY_KEY_ID', '').strip()
+    rp_secret = razorpay_key_secret if razorpay_key_secret is not None else os.getenv('RAZORPAY_KEY_SECRET', '').strip()
+    rp_webhook = razorpay_webhook_secret if razorpay_webhook_secret is not None else os.getenv('RAZORPAY_WEBHOOK_SECRET', '').strip()
+
+    rp_dict = {
+        'RAZORPAY_KEY_ID': rp_id,
+        'RAZORPAY_KEY_SECRET': rp_secret,
+        'RAZORPAY_WEBHOOK_SECRET': rp_webhook,
+    }
+    missing_rp = [k for k, v in rp_dict.items() if not v]
+    if missing_rp:
+        raise ImproperlyConfigured(
+            f"Missing required Razorpay credentials when DEBUG is False: {', '.join(missing_rp)}"
+        )
+    mock_rp = [k for k, v in rp_dict.items() if 'mock' in v.lower()]
+    if mock_rp:
+        raise ImproperlyConfigured(
+            f"Mock Razorpay credentials forbidden when DEBUG is False: {', '.join(mock_rp)}"
+        )
+
+    # 3. CLOUDINARY_* checks
+    if use_cloudinary is None:
+        use_cloudinary = os.getenv('USE_CLOUDINARY', 'False').lower() in ('true', '1', 't')
+
+    if use_cloudinary:
+        c_name = cloudinary_cloud_name if cloudinary_cloud_name is not None else os.getenv('CLOUDINARY_CLOUD_NAME', '').strip()
+        c_key = cloudinary_api_key if cloudinary_api_key is not None else os.getenv('CLOUDINARY_API_KEY', '').strip()
+        c_secret = cloudinary_api_secret if cloudinary_api_secret is not None else os.getenv('CLOUDINARY_API_SECRET', '').strip()
+
+        c_dict = {
+            'CLOUDINARY_CLOUD_NAME': c_name,
+            'CLOUDINARY_API_KEY': c_key,
+            'CLOUDINARY_API_SECRET': c_secret,
+        }
+        missing_c = [k for k, v in c_dict.items() if not v]
+        if missing_c:
+            raise ImproperlyConfigured(
+                f"USE_CLOUDINARY is True, but required credentials are missing or empty: {', '.join(missing_c)}"
+            )
+        mock_c = [k for k, v in c_dict.items() if v.lower().startswith('mock')]
+        if mock_c:
+            raise ImproperlyConfigured(
+                f"Mock Cloudinary credentials are forbidden when DEBUG is False: {', '.join(mock_c)}"
+            )
 

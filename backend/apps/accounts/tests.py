@@ -724,6 +724,133 @@ class SettingsAndLoggingTests(APITestCase):
         self.assertIn('[REDACTED_TOKEN]', formatted)
 
 
+class ProductionCredentialFailClosedTests(APITestCase):
+    """
+    Unit tests ensuring production security fails closed against mock/insecure credentials
+    when DEBUG is False, while leaving development (DEBUG=True) completely unaffected.
+    """
+    def setUp(self):
+        from config.settings import validate_production_credentials
+        self.validator = validate_production_credentials
+        self.valid_prod_env = {
+            'DEBUG': 'False',
+            'SECRET_KEY': 'real-strong-production-random-secret-key-123456789',
+            'RAZORPAY_KEY_ID': 'rzp_live_realKeyId123',
+            'RAZORPAY_KEY_SECRET': 'realLiveSecretKey456',
+            'RAZORPAY_WEBHOOK_SECRET': 'realLiveWebhookSecret789',
+            'USE_CLOUDINARY': 'True',
+            'CLOUDINARY_CLOUD_NAME': 'real_cloud_kindheart',
+            'CLOUDINARY_API_KEY': '987654321098765',
+            'CLOUDINARY_API_SECRET': 'realCloudinarySecretKeyXyZ',
+        }
+
+    def test_dev_mode_debug_true_unaffected(self):
+        """When DEBUG is True, mock and insecure credentials must not raise ImproperlyConfigured."""
+        from unittest import mock
+        dev_env = {
+            'DEBUG': 'True',
+            'SECRET_KEY': 'django-insecure-pet-adoption-secret-key-dev-only',
+            'RAZORPAY_KEY_ID': 'rzp_test_mock_key_id',
+            'RAZORPAY_KEY_SECRET': 'mock_secret_key_12345',
+            'RAZORPAY_WEBHOOK_SECRET': 'mock_webhook_secret_12345',
+            'USE_CLOUDINARY': 'True',
+            'CLOUDINARY_CLOUD_NAME': 'mock_cloud',
+            'CLOUDINARY_API_KEY': 'mock_key',
+            'CLOUDINARY_API_SECRET': 'mock_secret',
+        }
+        with mock.patch.dict('os.environ', dev_env):
+            # Should succeed silently
+            self.validator()
+
+    def test_production_valid_real_credentials_pass(self):
+        """When DEBUG is False with real production credentials, validation passes."""
+        from unittest import mock
+        with mock.patch.dict('os.environ', self.valid_prod_env):
+            self.validator()
+
+    def test_production_secret_key_insecure_fails(self):
+        """When DEBUG is False, SECRET_KEY starting with 'django-insecure' raises ImproperlyConfigured."""
+        from unittest import mock
+        from django.core.exceptions import ImproperlyConfigured
+
+        bad_env = dict(self.valid_prod_env, SECRET_KEY='django-insecure-dev-key')
+        with mock.patch.dict('os.environ', bad_env):
+            with self.assertRaises(ImproperlyConfigured) as ctx:
+                self.validator()
+            self.assertIn("django-insecure", str(ctx.exception))
+
+    def test_production_secret_key_empty_fails(self):
+        """When DEBUG is False, empty SECRET_KEY raises ImproperlyConfigured."""
+        from unittest import mock
+        from django.core.exceptions import ImproperlyConfigured
+
+        bad_env = dict(self.valid_prod_env, SECRET_KEY='')
+        with mock.patch.dict('os.environ', bad_env):
+            with self.assertRaises(ImproperlyConfigured) as ctx:
+                self.validator()
+            self.assertIn("SECRET_KEY", str(ctx.exception))
+
+    def test_production_razorpay_mock_key_id_fails(self):
+        """When DEBUG is False, RAZORPAY_KEY_ID containing 'mock' raises ImproperlyConfigured."""
+        from unittest import mock
+        from django.core.exceptions import ImproperlyConfigured
+
+        bad_env = dict(self.valid_prod_env, RAZORPAY_KEY_ID='rzp_live_mock_123')
+        with mock.patch.dict('os.environ', bad_env):
+            with self.assertRaises(ImproperlyConfigured) as ctx:
+                self.validator()
+            self.assertIn("RAZORPAY_KEY_ID", str(ctx.exception))
+
+    def test_production_razorpay_mock_secret_fails(self):
+        """When DEBUG is False, RAZORPAY_KEY_SECRET containing 'mock' raises ImproperlyConfigured."""
+        from unittest import mock
+        from django.core.exceptions import ImproperlyConfigured
+
+        bad_env = dict(self.valid_prod_env, RAZORPAY_KEY_SECRET='super_mock_secret')
+        with mock.patch.dict('os.environ', bad_env):
+            with self.assertRaises(ImproperlyConfigured) as ctx:
+                self.validator()
+            self.assertIn("RAZORPAY_KEY_SECRET", str(ctx.exception))
+
+    def test_production_razorpay_mock_webhook_secret_fails(self):
+        """When DEBUG is False, RAZORPAY_WEBHOOK_SECRET containing 'mock' raises ImproperlyConfigured."""
+        from unittest import mock
+        from django.core.exceptions import ImproperlyConfigured
+
+        bad_env = dict(self.valid_prod_env, RAZORPAY_WEBHOOK_SECRET='mock_wh_secret')
+        with mock.patch.dict('os.environ', bad_env):
+            with self.assertRaises(ImproperlyConfigured) as ctx:
+                self.validator()
+            self.assertIn("RAZORPAY_WEBHOOK_SECRET", str(ctx.exception))
+
+    def test_production_cloudinary_mock_fails_when_use_cloudinary_true(self):
+        """When DEBUG is False and USE_CLOUDINARY is True, CLOUDINARY_* starting with 'mock' raises ImproperlyConfigured."""
+        from unittest import mock
+        from django.core.exceptions import ImproperlyConfigured
+
+        for field in ['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET']:
+            bad_env = dict(self.valid_prod_env, **{field: f'mock_{field.lower()}'})
+            with mock.patch.dict('os.environ', bad_env):
+                with self.assertRaises(ImproperlyConfigured) as ctx:
+                    self.validator()
+                self.assertIn(field, str(ctx.exception))
+
+    def test_production_cloudinary_mock_ignored_when_use_cloudinary_false(self):
+        """When DEBUG is False and USE_CLOUDINARY is False, mock Cloudinary credentials are not checked."""
+        from unittest import mock
+        env = dict(
+            self.valid_prod_env,
+            USE_CLOUDINARY='False',
+            CLOUDINARY_CLOUD_NAME='mock_cloud',
+            CLOUDINARY_API_KEY='mock_key',
+            CLOUDINARY_API_SECRET='mock_secret',
+        )
+        with mock.patch.dict('os.environ', env):
+            # Should not raise because Cloudinary is disabled
+            self.validator()
+
+
+
 
 
 
