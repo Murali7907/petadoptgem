@@ -13,9 +13,17 @@ class CustomUserAdmin(UserAdmin):
 
 @admin.register(ShelterProfile)
 class ShelterProfileAdmin(admin.ModelAdmin):
-    list_display = ('organization_name', 'user', 'license_no', 'is_active', 'created_at')
+    list_display = ('organization_name', 'user', 'license_no', 'is_verified', 'is_active', 'created_at')
+    list_filter = ('is_verified', 'is_active')
     search_fields = ('organization_name', 'license_no', 'user__username')
     readonly_fields = ('public_id',)
+    actions = ['verify_shelters']
+
+    @admin.action(description="Verify selected shelters")
+    def verify_shelters(self, request, queryset):
+        count = queryset.update(is_verified=True)
+        self.message_user(request, f"{count} shelter(s) successfully verified.")
+
 
 @admin.register(DeliveryProfile)
 class DeliveryProfileAdmin(admin.ModelAdmin):
