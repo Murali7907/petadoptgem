@@ -722,7 +722,81 @@ Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medic
 
 ---
 
-*Last updated: 2026-10-19*
+## 11. Milestone 6 — Ordering Migrations, Paid Application Guards, Real Types, Medical File Exposure Audit & Handoff
+
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Milestone 6 approved and finalized.
+
+### 11.1 Task 1: Ordering Migrations (Status: COMMITTED - `fcc1183`)
+- Generated and committed pending migrations for model `Meta.ordering` declarations without table schema alterations:
+  - `adoptions`: `0008_alter_adoptionapplication_options_and_more.py`
+  - `logistics`: `0006_alter_petdelivery_options.py`
+  - `pets`: `0004_alter_pet_options.py`
+- Verified `makemigrations --check --dry-run` reports clean `No changes detected` (exit code 0).
+
+### 11.2 Task 2: Paid-Application Guard
+- **Current Behavior Audit**:
+  - `CustomerApplicationViewSet.cancel`: Previously allowed cancellation of approved applications even if cash was collected or online payment captured.
+  - `ShelterApplicationViewSet.reject`: Previously allowed rejection of approved applications even if cash was collected or online payment captured.
+  - `AdoptionStatusUpdateView.patch` / `AdoptionApplicationDetailView.patch` (legacy alias): Previously allowed setting `status='rejected'` on approved applications regardless of captured payments.
+- **Invariants Enforced**:
+  - Any cancellation or rejection attempt on an application with a captured online payment (`Payment.status in ['captured', 'paid']` excluding `payment_method='cod'`) OR with `cash_collected > 0` on its linked delivery must be blocked across all canonical and legacy endpoints with HTTP 409 Conflict:
+    ```json
+    {
+      "code": "refund_required",
+      "detail": "Cannot cancel/reject application: online payment has already been captured or cash collected. A refund must be processed before cancellation."
+    }
+    ```
+  - Unpaid applications and COD applications without collected cash (`cash_collected == 0`) remain cancellable.
+  - In `cancel_delivery_by_shelter`, the payment query explicitly filters `.exclude(payment_method='cod')` so the error code never depends on check order.
+
+### 11.3 Task 3: Real Types for Client Generator
+- Replaced all generic `OpenApiTypes.OBJECT` in serializer fields with concrete, documented serializers:
+  - `MedicalOverviewSerializer` and `MedicalOverviewRecordSerializer`
+  - `PublicPetShelterSerializer`
+  - `DriverTaskPetSummarySerializer` and `CustomerTrackingPetSummarySerializer`
+  - `DeliveryDriverDetailsSerializer`
+- Added unit tests per type asserting that serializing a real database model/object produces keys that strictly match `serializer.fields.keys()`.
+- Verified `drf-spectacular` schema generation remains at 0 errors, 0 warnings, 0 collisions.
+
+### 11.4 Task 4: Medical File Exposure Audit (Report Only)
+- **Current URL Output**:
+  - **Local Development**: `http://localhost:8000/media/medical/<pet_id>/<filename>`
+  - **Cloudinary CDN**: `https://res.cloudinary.com/<cloud_name>/raw/upload/v<version>/medical/<pet_id>/<filename>`
+- **Unauthenticated Fetch Assessment**:
+  - Yes, in both modes, if an unauthenticated user acquires the direct URL, the web server (or Cloudinary CDN edge) serves the file without HTTP request header authentication.
+  - The previous report's description of "signed" URLs was **inaccurate**; the system currently issues standard absolute storage URLs, and security is enforced strictly via response-body link masking for unauthenticated users.
+- **Architectural Options**:
+  1. **Option 1: Accept as is (MVP Serializer Link Masking)**:
+     - Keep direct media URLs, relying on serializer masking (`document_url: null` for anonymous and unauthorized users).
+     - *Pros*: Zero infrastructure overhead; completely free of cloud vendor lock-in.
+     - *Cons*: Security by obscurity for the static URL; knowing the exact filename allows direct download.
+  2. **Option 2: Authenticated Streaming Download Endpoint**:
+     - Introduce `GET /api/v1/pets/<pet_id>/medical-records/<id>/download/`.
+     - The view runs `user_can_access_medical_documents(request.user, pet)`, opens the file via `default_storage.open()`, and streams a `FileResponse` with `Content-Disposition: attachment`.
+     - Static media directory is blocked from direct public serving via web server (nginx/caddy) configuration.
+     - *Pros*: Full authentication and access logging on every download; works identically with local storage and cloud storage.
+     - *Cons*: Application server bandwidth consumption for streaming large PDF/image assets.
+  3. **Option 3: Cloudinary Authenticated Delivery with Signed URLs**:
+     - Store medical documents with Cloudinary `type="authenticated"`.
+     - Serializer generates an HMAC-signed, time-limited URL using `cloudinary.utils.cloudinary_url(..., sign_url=True, type='authenticated')` that expires after a configurable TTL (e.g., 15 minutes).
+     - *Pros*: Offloads asset delivery to CDN while guaranteeing expiring cryptographic access tokens.
+     - *Cons*: Hard dependency on Cloudinary API SDK; does not function in local offline development without mock signing helpers.
+
+### 11.5 Task 5: API Handoff Documentation
+- Generated and validated `docs/openapi.yaml` via `manage.py spectacular --file docs/openapi.yaml --validate --fail-on-warn`.
+- Authored `docs/backend_handoff.md` detailing:
+  - SimpleJWT authentication lifecycle, token refresh, logout token blacklist, and rate limits.
+  - Role-based permissions matrix (Customer, Shelter, Driver, Admin).
+  - Catalogue of error codes (`adopter_email_missing`, `refund_required`, `cash_collected`, `max_attempts_exceeded`, `token_blacklisted`, etc.).
+  - Delivery state machine with pickup and doorstep OTP gates and payment invariants.
+  - Step-by-step happy path per user role.
+
+---
+
+*Last updated: 2026-10-22*
+
 
 
 
