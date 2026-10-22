@@ -825,6 +825,119 @@ class ApplicationPetStatusConvergenceTests(APITestCase):
         app.refresh_from_db()
         self.assertEqual(app.status, 'approved')
 
+    def test_adopter_cannot_cancel_approved_app_with_cash_collected(self):
+        from apps.logistics.models import PetDelivery
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='cod', total_amount=Decimal('100.00')
+        )
+        PetDelivery.objects.create(
+            application=app, driver=self.driver, status='out_for_delivery', cash_collected=Decimal('100.00')
+        )
+        self.client.force_authenticate(user=self.adopter_1)
+        res = self.client.post(f'/api/v1/applications/{app.public_id}/cancel/')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'refund_required')
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'approved')
+
+    def test_shelter_cannot_reject_approved_app_with_cash_collected(self):
+        from apps.logistics.models import PetDelivery
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='cod', total_amount=Decimal('100.00')
+        )
+        PetDelivery.objects.create(
+            application=app, driver=self.driver, status='assigned', cash_collected=Decimal('100.00')
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(f'/api/v1/shelter/applications/{app.public_id}/reject/', {'notes': 'No longer eligible'})
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'refund_required')
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'approved')
+
+    def test_legacy_patch_cannot_reject_approved_app_with_captured_online_payment(self):
+        from apps.logistics.models import Payment, PaymentStatus
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='online', total_amount=Decimal('100.00')
+        )
+        Payment.objects.create(
+            application=app, status=PaymentStatus.CAPTURED, payment_method='razorpay',
+            amount=Decimal('100.00'), razorpay_payment_id='pay_legacy_online_123'
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.patch(f'/api/v1/adoptions/{app.public_id}/status/', {'status': 'rejected', 'notes': 'Refund needed'})
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'refund_required')
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'approved')
+
+    def test_legacy_patch_cannot_reject_approved_app_with_cash_collected(self):
+        from apps.logistics.models import PetDelivery
+        app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='cod', total_amount=Decimal('100.00')
+        )
+        PetDelivery.objects.create(
+            application=app, driver=self.driver, status='assigned', cash_collected=Decimal('100.00')
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.patch(f'/api/v1/adoptions/{app.public_id}/status/', {'status': 'rejected', 'notes': 'Refund needed'})
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'refund_required')
+        app.refresh_from_db()
+        self.assertEqual(app.status, 'approved')
+
+    def test_unpaid_and_cod_without_cash_applications_stay_cancellable_and_rejectable(self):
+        from apps.logistics.models import PetDelivery
+        # 1. Unpaid application can be cancelled by adopter
+        unpaid_app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='online', total_amount=Decimal('100.00')
+        )
+        self.client.force_authenticate(user=self.adopter_1)
+        res = self.client.post(f'/api/v1/applications/{unpaid_app.public_id}/cancel/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        unpaid_app.refresh_from_db()
+        self.assertEqual(unpaid_app.status, 'cancelled')
+
+        # 2. COD application without cash can be cancelled by adopter
+        cod_app = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='cod', total_amount=Decimal('100.00')
+        )
+        PetDelivery.objects.create(
+            application=cod_app, driver=self.driver, status='assigned', cash_collected=Decimal('0.00')
+        )
+        res = self.client.post(f'/api/v1/applications/{cod_app.public_id}/cancel/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        cod_app.refresh_from_db()
+        self.assertEqual(cod_app.status, 'cancelled')
+
+        # 3. Unpaid application can be rejected by shelter (canonical)
+        unpaid_app2 = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='online', total_amount=Decimal('100.00')
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(f'/api/v1/shelter/applications/{unpaid_app2.public_id}/reject/', {'notes': 'Rejected'})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        unpaid_app2.refresh_from_db()
+        self.assertEqual(unpaid_app2.status, 'rejected')
+
+        # 4. COD application without cash can be rejected by shelter via legacy PATCH
+        cod_app2 = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='cod', total_amount=Decimal('100.00')
+        )
+        res = self.client.patch(f'/api/v1/adoptions/{cod_app2.public_id}/status/', {'status': 'rejected', 'notes': 'Rejected'})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        cod_app2.refresh_from_db()
+        self.assertEqual(cod_app2.status, 'rejected')
+
+
 
 
 

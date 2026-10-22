@@ -6,6 +6,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from decimal import Decimal
 from django.shortcuts import get_object_or_404
 from django.db import transaction, models, DatabaseError, IntegrityError, InternalError
 from rest_framework import viewsets, mixins, status, permissions
@@ -68,16 +69,19 @@ class CustomerApplicationViewSet(mixins.ListModelMixin,
 
         if application.status == 'approved':
             from apps.logistics.models import Payment, PaymentStatus, PetDelivery
-            if Payment.objects.filter(
+            deliv = PetDelivery.objects.filter(application=application).first()
+            has_cash = deliv and deliv.cash_collected and deliv.cash_collected > Decimal('0.00')
+            has_online_payment = Payment.objects.filter(
                 application=application,
                 status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid']
-            ).exclude(payment_method='cod').exists():
+            ).exclude(payment_method='cod').exists()
+
+            if has_online_payment or has_cash:
                 return Response({
                     "code": "refund_required",
-                    "detail": "Cannot cancel application: online payment has already been captured. Please contact the shelter to arrange a refund before cancellation."
+                    "detail": "Cannot cancel application: online payment has already been captured or cash collected. A refund must be processed before cancellation."
                 }, status=status.HTTP_409_CONFLICT)
 
-            deliv = PetDelivery.objects.filter(application=application).first()
             if deliv and deliv.status in ['out_for_delivery', 'delivered']:
                 raise ValidationError("Cannot cancel application while delivery is in progress or completed.")
             if deliv and deliv.status == 'assigned':
@@ -199,13 +203,17 @@ class ShelterApplicationViewSet(viewsets.ReadOnlyModelViewSet):
 
         if application.status == 'approved':
             from apps.logistics.models import Payment, PaymentStatus, PetDelivery
-            if Payment.objects.filter(
+            deliv = PetDelivery.objects.filter(application=application).first()
+            has_cash = deliv and deliv.cash_collected and deliv.cash_collected > Decimal('0.00')
+            has_online_payment = Payment.objects.filter(
                 application=application,
                 status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid']
-            ).exclude(payment_method='cod').exists():
+            ).exclude(payment_method='cod').exists()
+
+            if has_online_payment or has_cash:
                 return Response({
                     "code": "refund_required",
-                    "detail": "Cannot reject application: online payment has already been captured. A refund must be processed before rejection."
+                    "detail": "Cannot reject application: online payment has already been captured or cash collected. A refund must be processed before rejection."
                 }, status=status.HTTP_409_CONFLICT)
 
             active_delivery = PetDelivery.objects.filter(
@@ -461,14 +469,18 @@ class AdoptionStatusUpdateView(APIView):
 
         elif new_status == 'rejected':
             if application.status == 'approved':
-                from apps.logistics.models import Payment, PaymentStatus
-                if Payment.objects.filter(
+                from apps.logistics.models import Payment, PaymentStatus, PetDelivery
+                deliv = PetDelivery.objects.filter(application=application).first()
+                has_cash = deliv and deliv.cash_collected and deliv.cash_collected > Decimal('0.00')
+                has_online_payment = Payment.objects.filter(
                     application=application,
                     status__in=[PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid']
-                ).exclude(payment_method='cod').exists():
+                ).exclude(payment_method='cod').exists()
+
+                if has_online_payment or has_cash:
                     return Response({
                         "code": "refund_required",
-                        "detail": "Cannot reject application: online payment has already been captured. A refund must be processed before rejection."
+                        "detail": "Cannot reject application: online payment has already been captured or cash collected. A refund must be processed before rejection."
                     }, status=status.HTTP_409_CONFLICT)
 
             application.status = 'rejected'
