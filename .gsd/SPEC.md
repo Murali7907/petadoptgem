@@ -795,7 +795,57 @@ Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medic
 
 ---
 
+## 12. Milestone 7 — Repo Hygiene, Central Refund Guard, Stable Error Codes, Mock Credential Fail-Closed, Doc Alignment & Milestone 8 Scope
+
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Milestone 7 approved and finalized.
+
+### 12.1 Task 0: Repo Hygiene
+- Verify tracked and untracked file status across database dumps, backup artifacts, and one-off execution scripts.
+- Ensure `*.dump`, `backup_*`, and scratch scripts are strictly ignored in `.gitignore` while maintaining `docs/legacy/schema.sql.old` tracked.
+- Confirm whether any dump or scratch script was ever committed or pushed to remote git history.
+
+### 12.2 Task 1: Central Refund Guard
+- Consolidate all application state modification paths moving an `AdoptionApplication` out of `'approved'` or into `'cancelled'` / `'rejected'` / `'reviewing'` into a single authoritative service guard (`assert_application_refund_safe` in `apps.adoptions.services`).
+- Guarded paths:
+  - `CustomerApplicationViewSet.cancel`
+  - `ShelterApplicationViewSet.reject`
+  - `ShelterApplicationViewSet.review` (approved -> reviewing transition)
+  - `AdoptionStatusUpdateView.patch` (canonical and legacy aliases, handling 'rejected' and 'reviewing')
+  - `AdoptionApplicationAdmin` in Django admin (status read-only or blocked when captured online payment or cash exists).
+- Refuse any state transition on paid applications with HTTP 409 Conflict: `{"code": "refund_required", "detail": "..."}`.
+- Unpaid and COD applications with 0 cash remain freely modifiable/cancellable.
+
+### 12.3 Task 2: Stable Error Codes (Additive Only)
+- Add standard `"code"` attributes to every error response across logistics actions without altering `detail` messages or HTTP status codes:
+  - `otp_invalid`: Invalid OTP provided (retains `attempts_remaining`).
+  - `otp_locked`: HTTP 423 Locked when attempts exhausted.
+  - `otp_expired`: HTTP 410 Gone when OTP TTL expired.
+  - `invalid_state`: HTTP 409 Conflict when delivery/application is in wrong lifecycle state.
+  - `validation_error`: HTTP 400 Bad Request on malformed or missing OTP/amount.
+- Update tests, `drf-spectacular` schema annotations, `docs/openapi.yaml`, and `docs/backend_handoff.md`.
+
+### 12.4 Task 3: Fail Closed on Mock Credentials in Production
+- When `DEBUG=False`:
+  - Raise `ImproperlyConfigured` if `SECRET_KEY` starts with `'django-insecure'`.
+  - Raise `ImproperlyConfigured` if any `RAZORPAY_*` setting contains `'mock'`.
+  - Raise `ImproperlyConfigured` if `USE_CLOUDINARY=True` and any `CLOUDINARY_*` setting starts with `'mock'`.
+- Local development (`DEBUG=True`) remains unaffected.
+
+### 12.5 Task 4: Documentation Corrections & Alignment
+- Correct Django version to exact pinned runtime version across all documentation.
+- Script and verify route consistency between `docs/backend_handoff.md`, `docs/api_contract_logistics.md`, and generated `docs/openapi.yaml`.
+- Regenerate `docs/openapi.yaml` with 0 warnings and 0 errors.
+
+### 12.6 Task 5: Location Privacy & Milestone 8 Scope (Report Only)
+- Document all public response surfaces exposing shelter contact phone, pickup address, latitude, and longitude; analyze privacy risk and present options in `SPEC.md`.
+- Detail Milestone 8 scope: Razorpay refund flow (refund API calls, `PaymentStatus.REFUNDED`, webhook events), COD cash reconciliation endpoint writing `is_cash_settled_with_shelter`, and operational resolution for paid applications stuck in `'approved'`.
+
+---
+
 *Last updated: 2026-10-22*
+
 
 
 
