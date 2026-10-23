@@ -4643,7 +4643,7 @@ components:
           readOnly: true
         shelter:
           allOf:
-          - $ref: '#/components/schemas/ShelterProfile'
+          - $ref: '#/components/schemas/PublicPetShelter'
           readOnly: true
         name:
           type: string
@@ -5159,6 +5159,11 @@ components:
           allOf:
           - $ref: '#/components/schemas/MedicalOverview'
           readOnly: true
+        medical_records:
+          type: array
+          items:
+            $ref: '#/components/schemas/PetMedicalRecord'
+          readOnly: true
         shelter:
           allOf:
           - $ref: '#/components/schemas/PublicPetShelter'
@@ -5182,6 +5187,7 @@ components:
       - gender
       - images
       - medical_overview
+      - medical_records
       - name
       - primary_image
       - public_id
@@ -5708,39 +5714,6 @@ components:
       - organization_name
       - pickup_address
       - public_id
-    ShelterProfileRequest:
-      type: object
-      properties:
-        organization_name:
-          type: string
-          minLength: 1
-          maxLength: 150
-        license_no:
-          type: string
-          maxLength: 50
-        pickup_address:
-          type: string
-          minLength: 1
-        city:
-          type: string
-          maxLength: 100
-        latitude:
-          type: string
-          format: decimal
-          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
-          nullable: true
-        longitude:
-          type: string
-          format: decimal
-          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
-          nullable: true
-        is_active:
-          type: boolean
-        is_verified:
-          type: boolean
-      required:
-      - organization_name
-      - pickup_address
     SpeciesEnum:
       enum:
       - dog
