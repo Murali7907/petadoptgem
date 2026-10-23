@@ -211,7 +211,7 @@ class PetListSerializer(serializers.ModelSerializer):
 
 
 class PetDetailSerializer(serializers.ModelSerializer):
-    shelter = ShelterProfileSerializer(read_only=True)
+    shelter = serializers.SerializerMethodField()
     images = PetImageSerializer(many=True, read_only=True)
     medical_records = PetMedicalRecordSerializer(many=True, read_only=True)
     medical_overview = serializers.SerializerMethodField()
@@ -277,6 +277,26 @@ class PetDetailSerializer(serializers.ModelSerializer):
             return obj.image.url
         first_img = obj.images.first()
         return first_img.image_url if first_img else None
+
+    @extend_schema_field(PublicPetShelterSerializer)
+    def get_shelter(self, obj):
+        if not obj.shelter:
+            return None
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        can_access = user_can_access_medical_documents(user, obj)
+
+        city_val = getattr(obj.shelter, 'city', '') or "location not provided"
+
+        return {
+            'public_id': obj.shelter.public_id,
+            'organization_name': obj.shelter.organization_name,
+            'city': city_val,
+            'pickup_address': obj.shelter.pickup_address if can_access else None,
+            'latitude': str(obj.shelter.latitude) if (can_access and obj.shelter.latitude) else None,
+            'longitude': str(obj.shelter.longitude) if (can_access and obj.shelter.longitude) else None,
+            'phone': (obj.shelter.user.phone if (obj.shelter.user and obj.shelter.user.phone) else None) if can_access else None,
+        }
 
 
 class PetWriteSerializer(serializers.ModelSerializer):
@@ -359,6 +379,7 @@ class PublicPetDetailSerializer(serializers.ModelSerializer):
     primary_image = serializers.SerializerMethodField()
     shelter = serializers.SerializerMethodField()
     medical_overview = serializers.SerializerMethodField()
+    medical_records = PetMedicalRecordSerializer(many=True, read_only=True)
     distance_km = serializers.SerializerMethodField()
 
     class Meta:
@@ -377,6 +398,7 @@ class PublicPetDetailSerializer(serializers.ModelSerializer):
             'primary_image',
             'images',
             'medical_overview',
+            'medical_records',
             'shelter',
             'distance_km',
             'created_at',
