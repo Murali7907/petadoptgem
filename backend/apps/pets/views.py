@@ -95,13 +95,34 @@ class PetViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user if hasattr(self, 'request') else None
-        qs = Pet.objects.all().select_related('shelter').prefetch_related('images', 'medical_records')
+        qs = Pet.objects.all().select_related('shelter', 'shelter__user').prefetch_related('images', 'medical_records')
         if user and user.is_authenticated:
             if user.is_superuser or user.role == 'admin':
-                return qs
-            if user.role == 'shelter' and hasattr(user, 'shelter_profile'):
-                return qs.filter(Q(shelter=user.shelter_profile) | Q(shelter__is_verified=True))
-        return qs.filter(shelter__is_verified=True)
+                pass
+            elif user.role == 'shelter' and hasattr(user, 'shelter_profile'):
+                qs = qs.filter(Q(shelter=user.shelter_profile) | Q(shelter__is_verified=True))
+            else:
+                qs = qs.filter(shelter__is_verified=True)
+                if self.action == 'list':
+                    qs = qs.filter(status='available')
+        else:
+            qs = qs.filter(shelter__is_verified=True)
+            if self.action == 'list':
+                qs = qs.filter(status='available')
+
+        if hasattr(self, 'request') and self.request:
+            lat = self.request.query_params.get('lat')
+            lng = self.request.query_params.get('lng')
+            if lat is not None and lng is not None:
+                try:
+                    lat_val = float(lat)
+                    lng_val = float(lng)
+                    qs = qs.annotate(
+                        distance_meters=Distance('shelter__location', Point(float(lng_val), float(lat_val), srid=4326))
+                    ).order_by('distance_meters')
+                except (ValueError, TypeError):
+                    pass
+        return qs
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
@@ -110,10 +131,10 @@ class PetViewSet(viewsets.ModelViewSet):
 
     def get_serializer_class(self):
         if self.action == 'list':
-            return PetListSerializer
+            return PublicPetListSerializer
         elif self.action in ['create', 'update', 'partial_update']:
             return PetWriteSerializer
-        return PetDetailSerializer
+        return PublicPetDetailSerializer
 
     def get_object(self):
         queryset = self.filter_queryset(self.get_queryset())

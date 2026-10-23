@@ -427,14 +427,26 @@ class PublicPetCatalogAPITests(APITestCase):
         self.assertGreaterEqual(len(med['medical_records']), 1)
         self.assertEqual(med['medical_records'][0]['title'], 'Annual Core Vaccinations')
 
-        # Verify shelter details and coordinates
+        # Verify shelter details: masked coordinates & phone for anonymous
         self.assertIn('shelter', data)
         shelter_data = data['shelter']
         self.assertEqual(shelter_data['organization_name'], 'Central City Animal Rescue')
         self.assertEqual(shelter_data['city'], 'Bangalore')
-        self.assertEqual(shelter_data['phone'], '+919876543210')
-        self.assertIsNotNone(shelter_data['latitude'])
-        self.assertIsNotNone(shelter_data['longitude'])
+        self.assertIsNone(shelter_data['phone'])
+        self.assertIsNone(shelter_data['latitude'])
+        self.assertIsNone(shelter_data['longitude'])
+        self.assertIsNone(shelter_data['pickup_address'])
+
+        # Verify unmasked coordinates & phone for owning shelter
+        self.client.force_authenticate(user=self.shelter_user_central)
+        res_owner = self.client.get(detail_url)
+        self.assertEqual(res_owner.status_code, status.HTTP_200_OK)
+        owner_shelter = res_owner.data['shelter']
+        self.assertEqual(owner_shelter['phone'], '+919876543210')
+        self.assertIsNotNone(owner_shelter['latitude'])
+        self.assertIsNotNone(owner_shelter['longitude'])
+        self.assertIsNotNone(owner_shelter['pickup_address'])
+        self.client.logout()
 
         # Verify gallery images
         self.assertIn('images', data)
@@ -948,15 +960,18 @@ class UploadValidationAPITests(APITestCase):
 
 class PetMedicalRecordVisibilityHybridTests(APITestCase):
     def setUp(self):
+        from decimal import Decimal
         from apps.accounts.models import ShelterProfile
         from apps.adoptions.models import AdoptionApplication
 
         # 1. Owner shelter
         self.owner_user = User.objects.create_user(
-            username='med_shelter_owner', email='owner@medhaven.org', password='password123', role='shelter'
+            username='med_shelter_owner', email='owner@medhaven.org', password='password123', role='shelter', phone='9876543210'
         )
         self.shelter = ShelterProfile.objects.create(
-            user=self.owner_user, organization_name='Med Haven Shelter', is_verified=True
+            user=self.owner_user, organization_name='Med Haven Shelter', is_verified=True,
+            pickup_address='42 Rescue Lane', city='Bangalore',
+            latitude=Decimal('12.971600'), longitude=Decimal('77.594600')
         )
 
         # 2. Foreign shelter
@@ -967,7 +982,7 @@ class PetMedicalRecordVisibilityHybridTests(APITestCase):
             user=self.foreign_user, organization_name='Foreign Shelter', is_verified=True
         )
 
-        # 3. Applicant customer
+        # 3. Applicant customer with approved application
         self.applicant = User.objects.create_user(
             username='med_applicant', email='applicant@example.com', password='password123', role='customer'
         )
@@ -977,12 +992,17 @@ class PetMedicalRecordVisibilityHybridTests(APITestCase):
             username='other_customer_med', email='other@example.com', password='password123', role='customer'
         )
 
-        # 5. Admin
+        # 5. Pending applicant (application still submitted/reviewing)
+        self.pending_applicant = User.objects.create_user(
+            username='pending_applicant_med', email='pending@example.com', password='password123', role='customer'
+        )
+
+        # 6. Admin
         self.admin = User.objects.create_user(
             username='med_admin', email='admin@medhaven.org', password='password123', role='admin', is_staff=True
         )
 
-        # 6. Pet & Medical Record
+        # 7. Pet & Medical Record
         self.pet = Pet.objects.create(
             shelter=self.shelter, name='MedPet', species='dog', breed='Retriever', age_months=18, gender='male', status='available'
         )
@@ -995,9 +1015,12 @@ class PetMedicalRecordVisibilityHybridTests(APITestCase):
             record_date='2026-05-15'
         )
 
-        # 7. Application for applicant
+        # 8. Applications
         self.application = AdoptionApplication.objects.create(
-            pet=self.pet, applicant=self.applicant, living_situation='House', contact_phone='9876543210', status='submitted'
+            pet=self.pet, applicant=self.applicant, living_situation='House', contact_phone='9876543210', status='approved'
+        )
+        self.pending_application = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.pending_applicant, living_situation='Apartment', contact_phone='9876543211', status='submitted'
         )
 
     def test_anonymous_user_sees_metadata_but_null_document_url(self):
@@ -1029,6 +1052,17 @@ class PetMedicalRecordVisibilityHybridTests(APITestCase):
         rec = records[0]
 
         self.assertEqual(rec['document_url'], self.doc_secret_url)
+
+    def test_pending_applicant_gets_null_document_url(self):
+        self.client.force_authenticate(user=self.pending_applicant)
+        url = f'/api/v1/pets/{self.pet.public_id}/medical-records/'
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        records = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        rec = records[0]
+
+        self.assertIsNone(rec['document_url'])
+        self.assertNotIn(self.doc_secret_url, rec['description'])
 
     def test_other_customer_gets_null_document_url(self):
         self.client.force_authenticate(user=self.other_customer)
@@ -1085,12 +1119,112 @@ class PetMedicalRecordVisibilityHybridTests(APITestCase):
         self.assertIsNone(med_list_cust[0]['document_url'])
         self.assertNotIn(self.doc_secret_url, res_cust.content.decode())
 
-        # 3. Applicant request to public pet detail -> gets link
+        # 3. Applicant with approved application request to public pet detail -> gets link
         self.client.force_authenticate(user=self.applicant)
         res_app = self.client.get(url)
         self.assertEqual(res_app.status_code, status.HTTP_200_OK)
         med_list_app = res_app.data['medical_overview']['medical_records']
         self.assertEqual(med_list_app[0]['document_url'], self.doc_secret_url)
+
+    def test_tiered_location_disclosure_all_roles(self):
+        url = f'/api/v1/pets/{self.pet.public_id}/'
+
+        # 1. Anonymous
+        self.client.logout()
+        res_anon = self.client.get(url)
+        self.assertEqual(res_anon.status_code, status.HTTP_200_OK)
+        shelter = res_anon.data['shelter']
+        self.assertEqual(shelter['organization_name'], 'Med Haven Shelter')
+        self.assertEqual(shelter['city'], 'Bangalore')
+        self.assertIsNone(shelter['pickup_address'])
+        self.assertIsNone(shelter['latitude'])
+        self.assertIsNone(shelter['longitude'])
+        self.assertIsNone(shelter['phone'])
+
+        # 2. Other customer
+        self.client.force_authenticate(user=self.other_customer)
+        res_other = self.client.get(url)
+        shelter_other = res_other.data['shelter']
+        self.assertEqual(shelter_other['organization_name'], 'Med Haven Shelter')
+        self.assertEqual(shelter_other['city'], 'Bangalore')
+        self.assertIsNone(shelter_other['pickup_address'])
+        self.assertIsNone(shelter_other['latitude'])
+        self.assertIsNone(shelter_other['longitude'])
+        self.assertIsNone(shelter_other['phone'])
+
+        # 3. Pending applicant
+        self.client.force_authenticate(user=self.pending_applicant)
+        res_pending = self.client.get(url)
+        shelter_pending = res_pending.data['shelter']
+        self.assertEqual(shelter_pending['organization_name'], 'Med Haven Shelter')
+        self.assertEqual(shelter_pending['city'], 'Bangalore')
+        self.assertIsNone(shelter_pending['pickup_address'])
+        self.assertIsNone(shelter_pending['latitude'])
+        self.assertIsNone(shelter_pending['longitude'])
+        self.assertIsNone(shelter_pending['phone'])
+
+        # 4. Adopter with approved application
+        self.client.force_authenticate(user=self.applicant)
+        res_approved = self.client.get(url)
+        shelter_approved = res_approved.data['shelter']
+        self.assertEqual(shelter_approved['organization_name'], 'Med Haven Shelter')
+        self.assertEqual(shelter_approved['city'], 'Bangalore')
+        self.assertEqual(shelter_approved['pickup_address'], '42 Rescue Lane')
+        self.assertEqual(shelter_approved['latitude'], '12.971600')
+        self.assertEqual(shelter_approved['longitude'], '77.594600')
+        self.assertEqual(shelter_approved['phone'], '9876543210')
+
+        # 5. Adopter with completed application
+        from apps.adoptions.models import AdoptionApplication
+        completed_user = User.objects.create_user(
+            username='med_completed', email='completed@example.com', password='password123', role='customer'
+        )
+        AdoptionApplication.objects.create(
+            pet=self.pet, applicant=completed_user, living_situation='House', contact_phone='1234567890', status='completed'
+        )
+        self.client.force_authenticate(user=completed_user)
+        res_comp = self.client.get(url)
+        shelter_comp = res_comp.data['shelter']
+        self.assertEqual(shelter_comp['pickup_address'], '42 Rescue Lane')
+        self.assertEqual(shelter_comp['phone'], '9876543210')
+
+        # 6. Owning shelter staff
+        self.client.force_authenticate(user=self.owner_user)
+        res_owner = self.client.get(url)
+        shelter_owner = res_owner.data['shelter']
+        self.assertEqual(shelter_owner['pickup_address'], '42 Rescue Lane')
+        self.assertEqual(shelter_owner['phone'], '9876543210')
+
+        # 7. Admin
+        self.client.force_authenticate(user=self.admin)
+        res_admin = self.client.get(url)
+        shelter_admin = res_admin.data['shelter']
+        self.assertEqual(shelter_admin['pickup_address'], '42 Rescue Lane')
+        self.assertEqual(shelter_admin['phone'], '9876543210')
+
+    def test_public_pet_list_empty_city_returns_placeholder_not_address(self):
+        from apps.accounts.models import ShelterProfile
+        empty_city_shelter_user = User.objects.create_user(
+            username='empty_city_shelter', email='empty@shelter.org', password='password123', role='shelter'
+        )
+        empty_shelter = ShelterProfile.objects.create(
+            user=empty_city_shelter_user,
+            organization_name='Secret Sanctuary',
+            is_verified=True,
+            city='',
+            pickup_address='Hidden Basement 77, Secret Road'
+        )
+        secret_pet = Pet.objects.create(
+            shelter=empty_shelter, name='HiddenPet', species='cat', breed='Persian', age_months=12, gender='female', status='available'
+        )
+        self.client.logout()
+        res = self.client.get('/api/v1/pets/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        data = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        pet_entry = next((p for p in data if p['name'] == 'HiddenPet'), None)
+        self.assertIsNotNone(pet_entry)
+        self.assertEqual(pet_entry['shelter_city'], 'location not provided')
+        self.assertNotIn('Hidden Basement 77', res.content.decode())
 
     def test_inline_serializers_match_schema_keys(self):
         from apps.pets.serializers import (
@@ -1113,6 +1247,7 @@ class PetMedicalRecordVisibilityHybridTests(APITestCase):
         # 3. shelter matches PublicPetShelterSerializer declared fields
         shelter_data = data['shelter']
         self.assertEqual(set(shelter_data.keys()), set(PublicPetShelterSerializer().fields.keys()))
+
 
 
 

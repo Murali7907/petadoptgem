@@ -1553,7 +1553,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PaginatedPetListList'
+                $ref: '#/components/schemas/PaginatedPublicPetListList'
           description: ''
     post:
       operationId: pets_create
@@ -1720,7 +1720,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PetDetail'
+                $ref: '#/components/schemas/PublicPetDetail'
           description: ''
     put:
       operationId: pets_update
@@ -4270,6 +4270,29 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PetMedicalRecord'
+    PaginatedPublicPetListList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/PublicPetList'
     PaginatedShelterApplicationList:
       type: object
       required:
@@ -5082,6 +5105,182 @@ components:
       - gender
       - name
       - species
+    PublicPetDetail:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          readOnly: true
+        species:
+          allOf:
+          - $ref: '#/components/schemas/SpeciesEnum'
+          readOnly: true
+        breed:
+          type: string
+          readOnly: true
+        age_months:
+          type: integer
+          readOnly: true
+        gender:
+          allOf:
+          - $ref: '#/components/schemas/GenderEnum'
+          readOnly: true
+        size:
+          type: string
+          readOnly: true
+        description:
+          type: string
+          readOnly: true
+        adoption_fee:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          readOnly: true
+          description: Medical care fee (e.g. ₹100 dog, ₹200 cat)
+        status:
+          allOf:
+          - $ref: '#/components/schemas/PetStatus'
+          readOnly: true
+        primary_image:
+          type: string
+          format: uri
+          nullable: true
+          readOnly: true
+        images:
+          type: array
+          items:
+            $ref: '#/components/schemas/PetImage'
+          readOnly: true
+        medical_overview:
+          allOf:
+          - $ref: '#/components/schemas/MedicalOverview'
+          readOnly: true
+        shelter:
+          allOf:
+          - $ref: '#/components/schemas/PublicPetShelter'
+          readOnly: true
+        distance_km:
+          type: number
+          format: double
+          nullable: true
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - adoption_fee
+      - age_months
+      - breed
+      - created_at
+      - description
+      - distance_km
+      - gender
+      - images
+      - medical_overview
+      - name
+      - primary_image
+      - public_id
+      - shelter
+      - size
+      - species
+      - status
+    PublicPetList:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          readOnly: true
+        species:
+          allOf:
+          - $ref: '#/components/schemas/SpeciesEnum'
+          readOnly: true
+        breed:
+          type: string
+          readOnly: true
+        age_months:
+          type: integer
+          readOnly: true
+        gender:
+          allOf:
+          - $ref: '#/components/schemas/GenderEnum'
+          readOnly: true
+        size:
+          type: string
+          readOnly: true
+        primary_image:
+          type: string
+          format: uri
+          nullable: true
+          readOnly: true
+        shelter_name:
+          type: string
+          readOnly: true
+        shelter_city:
+          type: string
+          readOnly: true
+        distance_km:
+          type: number
+          format: double
+          nullable: true
+          readOnly: true
+      required:
+      - age_months
+      - breed
+      - distance_km
+      - gender
+      - name
+      - primary_image
+      - public_id
+      - shelter_city
+      - shelter_name
+      - size
+      - species
+    PublicPetShelter:
+      type: object
+      properties:
+        public_id:
+          type: string
+          format: uuid
+          description: Public UUID of the shelter organization
+        organization_name:
+          type: string
+          description: Name of the shelter organization
+        city:
+          type: string
+          default: ''
+          description: City of the shelter
+        pickup_address:
+          type: string
+          nullable: true
+          description: Physical pickup address (unmasked only for approved adopters,
+            owning shelter, and admins)
+        latitude:
+          type: string
+          nullable: true
+          description: Shelter latitude coordinates (unmasked only for approved adopters,
+            owning shelter, and admins)
+        longitude:
+          type: string
+          nullable: true
+          description: Shelter longitude coordinates (unmasked only for approved adopters,
+            owning shelter, and admins)
+        phone:
+          type: string
+          nullable: true
+          description: Contact phone number (unmasked only for approved adopters,
+            owning shelter, and admins)
+      required:
+      - organization_name
+      - public_id
     PurposeEnum:
       enum:
       - pickup

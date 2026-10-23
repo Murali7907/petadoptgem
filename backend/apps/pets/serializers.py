@@ -29,11 +29,11 @@ class MedicalOverviewSerializer(serializers.Serializer):
 class PublicPetShelterSerializer(serializers.Serializer):
     public_id = serializers.UUIDField(help_text="Public UUID of the shelter organization")
     organization_name = serializers.CharField(help_text="Name of the shelter organization")
-    pickup_address = serializers.CharField(help_text="Physical pickup address")
-    city = serializers.CharField(help_text="City of the shelter")
-    latitude = serializers.CharField(allow_null=True, required=False, help_text="Shelter latitude coordinates")
-    longitude = serializers.CharField(allow_null=True, required=False, help_text="Shelter longitude coordinates")
-    phone = serializers.CharField(help_text="Contact phone number")
+    city = serializers.CharField(allow_blank=True, default='', help_text="City of the shelter")
+    pickup_address = serializers.CharField(allow_null=True, required=False, help_text="Physical pickup address (unmasked only for approved adopters, owning shelter, and admins)")
+    latitude = serializers.CharField(allow_null=True, required=False, help_text="Shelter latitude coordinates (unmasked only for approved adopters, owning shelter, and admins)")
+    longitude = serializers.CharField(allow_null=True, required=False, help_text="Shelter longitude coordinates (unmasked only for approved adopters, owning shelter, and admins)")
+    phone = serializers.CharField(allow_null=True, required=False, help_text="Contact phone number (unmasked only for approved adopters, owning shelter, and admins)")
 
 
 class PetImageSerializer(serializers.ModelSerializer):
@@ -74,8 +74,15 @@ def user_can_access_medical_documents(user, pet) -> bool:
         return True
     if pet:
         from apps.adoptions.models import AdoptionApplication
-        return AdoptionApplication.objects.filter(applicant=user, pet=pet).exists()
+        return AdoptionApplication.objects.filter(
+            applicant=user,
+            pet=pet,
+            status__in=['approved', 'completed']
+        ).exists()
     return False
+
+
+user_can_access_confidential_pet_details = user_can_access_medical_documents
 
 
 class PetMedicalRecordSerializer(serializers.ModelSerializer):
@@ -336,9 +343,9 @@ class PublicPetListSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.CharField())
     def get_shelter_city(self, obj):
-        if obj.shelter:
-            return getattr(obj.shelter, 'city', '') or obj.shelter.pickup_address
-        return ''
+        if obj.shelter and getattr(obj.shelter, 'city', None):
+            return obj.shelter.city
+        return "location not provided"
 
     @extend_schema_field(serializers.FloatField(allow_null=True))
     def get_distance_km(self, obj):
@@ -414,14 +421,20 @@ class PublicPetDetailSerializer(serializers.ModelSerializer):
     def get_shelter(self, obj):
         if not obj.shelter:
             return None
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        can_access = user_can_access_medical_documents(user, obj)
+
+        city_val = getattr(obj.shelter, 'city', '') or "location not provided"
+
         return {
             'public_id': obj.shelter.public_id,
             'organization_name': obj.shelter.organization_name,
-            'pickup_address': obj.shelter.pickup_address,
-            'city': getattr(obj.shelter, 'city', ''),
-            'latitude': str(obj.shelter.latitude) if obj.shelter.latitude else None,
-            'longitude': str(obj.shelter.longitude) if obj.shelter.longitude else None,
-            'phone': obj.shelter.user.phone if obj.shelter.user else '',
+            'city': city_val,
+            'pickup_address': obj.shelter.pickup_address if can_access else None,
+            'latitude': str(obj.shelter.latitude) if (can_access and obj.shelter.latitude) else None,
+            'longitude': str(obj.shelter.longitude) if (can_access and obj.shelter.longitude) else None,
+            'phone': (obj.shelter.user.phone if (obj.shelter.user and obj.shelter.user.phone) else None) if can_access else None,
         }
 
     @extend_schema_field(serializers.FloatField(allow_null=True))

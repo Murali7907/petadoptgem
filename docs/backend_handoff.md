@@ -50,8 +50,8 @@ When throttled, the server returns HTTP `429 Too Many Requests` with a `Retry-Af
 
 | Endpoint Route | HTTP Method | Allowed Roles | Required Permissions / Invariants |
 |---|---|---|---|
-| `/api/v1/pets/` | `GET` | Public | Open discovery with filters (`species`, `gender`, `breed`, `min_age`, `max_age`, `city`, `q`). |
-| `/api/v1/pets/<uuid:public_id>/` | `GET` | Public | Public pet detail. `medical_overview` masks document links for non-applicants. |
+| `/api/v1/pets/` | `GET` | Public | Open discovery with filters (`species`, `gender`, `breed`, `min_age`, `max_age`, `city`, `q`). Returns `shelter_name`, `shelter_city` (or `"location not provided"`), and `distance_km`. Sensitive coordinates and street addresses are never exposed. |
+| `/api/v1/pets/<uuid:public_id>/` | `GET` | Public | Public pet detail with **Tiered Disclosure**: `pickup_address`, `latitude`, `longitude`, `phone`, and medical `document_url` are masked (`null`) for public/anonymous users and pending applicants; unmasked exclusively for approved/completed adopters, owning shelter staff, and admins. |
 | `/api/v1/customer/favorites/` | `GET`, `POST` | `customer` | Authenticated customer only. |
 | `/api/v1/customer/favorites/<uuid:pet_public_id>/` | `DELETE` | `customer` | Authenticated customer only. |
 | `/api/v1/applications/` | `GET`, `POST` | `customer` | Submit and list personal adoption applications. |
@@ -266,6 +266,31 @@ The KindHeart logistics lifecycle is strictly guarded by two cryptographically h
    - Request the 6-digit Doorstep OTP from the customer.
    - Call `POST /api/v1/delivery/tasks/<id>/verify-doorstep/` with `{"otp": "654321"}`.
    - Task transitions to `delivered`. Driver is automatically returned to available status (`is_available = True`).
+
+---
+
+## 6. Location Privacy & Tiered Disclosure Architecture
+
+To protect rescue volunteers, residential shelters, and confidential clinical documents, KindHeart implements strict **Tiered Disclosure**:
+
+### 6.1 Public Discovery Endpoints (`GET /api/v1/pets/` and `GET /api/v1/pets/<uuid:public_id>/`)
+- **Public Pet List (`GET /api/v1/pets/`)**:
+  - Exposes `shelter_name`, `shelter_city`, and `distance_km`.
+  - When a shelter record lacks a `city`, the API returns `"location not provided"`. Raw physical pickup street addresses are never used as a fallback.
+  - Geographical sorting (`distance_meters`) and distance calculations (`distance_km`) operate entirely on the backend via PostGIS / Haversine database queries without streaming coordinates to the client.
+- **Public Pet Detail (`GET /api/v1/pets/<uuid:public_id>/`)**:
+  - **Masked Data (Public Visitors & Pending Applicants)**:
+    - Anonymous users, general authenticated customers, and applicants with pending applications (`submitted` or `reviewing`) receive:
+      - `shelter.pickup_address = null`
+      - `shelter.latitude = null`
+      - `shelter.longitude = null`
+      - `shelter.phone = null`
+      - `medical_overview.medical_records[].document_url = null`
+  - **Unmasked Data (Authorized Parties)**:
+    - Full street address, high-precision coordinates, personal phone number, and direct clinical document URLs are exposed exclusively to:
+      1. Authenticated staff/user of the owning shelter.
+      2. Platform administrators (`role='admin'`).
+      3. Adopter with an adoption application for that pet in `'approved'` or `'completed'` status.
 
 ---
 
