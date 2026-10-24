@@ -1249,6 +1249,114 @@ class PetMedicalRecordVisibilityHybridTests(APITestCase):
         self.assertEqual(set(shelter_data.keys()), set(PublicPetShelterSerializer().fields.keys()))
 
 
+class DistancePrivacyAndThrottlingTests(APITestCase):
+    """
+    Milestone 8b Task 3:
+    - Round distance_km to whole kilometres (minimum 1) in every response, for every actor.
+    - Two origins 100 m apart give the same value.
+    - Values are integers (not floats).
+    - Throttling (pets_geo, default 30/min) on requests carrying client-supplied coordinates.
+    - 429 after limit.
+    """
+
+    def setUp(self):
+        from decimal import Decimal
+        from rest_framework.test import APIClient
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+
+        # Shelter at Bangalore center: lat=12.971600, lng=77.594600
+        self.shelter_user = User.objects.create_user(
+            username='geoshelter',
+            email='geoshelter@test.org',
+            password='Password123!',
+            role='shelter'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.shelter_user,
+            organization_name='Geo Safe Shelter',
+            license_no='GEO-12345',
+            pickup_address='100 MG Road',
+            city='Bangalore',
+            latitude=Decimal('12.971600'),
+            longitude=Decimal('77.594600'),
+            is_active=True,
+            is_verified=True
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter,
+            name='PrivacyPup',
+            species='dog',
+            breed='Indie',
+            age_months=12,
+            gender='male',
+            size='medium',
+            status='available',
+            adoption_fee=Decimal('100.00')
+        )
+
+    def test_distance_km_values_are_integers_and_minimum_one(self):
+        # Query 1: Very close origin (100m away) -> should round to minimum 1
+        resp = self.client.get('/api/v1/pets/?lat=12.972000&lng=77.594600')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.data.get('results', resp.data)
+        self.assertTrue(len(results) > 0)
+        dist = results[0]['distance_km']
+        self.assertIsInstance(dist, int, f"distance_km should be int, got {type(dist)}")
+        self.assertEqual(dist, 1, "Distance under 1km should be clamped to minimum 1")
+
+        # Query 2: Detail endpoint
+        detail_resp = self.client.get(f'/api/v1/pets/{self.pet.public_id}/?lat=12.972000&lng=77.594600')
+        self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
+        detail_dist = detail_resp.data['distance_km']
+        self.assertIsInstance(detail_dist, int)
+        self.assertEqual(detail_dist, 1)
+
+    def test_two_origins_100m_apart_give_same_value(self):
+        # Origin A: 5.0 km away (approx 0.045 deg north: lat=13.0166, lng=77.5946)
+        lat_a = 13.016600
+        lng_a = 77.594600
+        # Origin B: 100 meters further north (approx 0.0009 deg north: lat=13.0175, lng=77.5946)
+        lat_b = 13.017500
+        lng_b = 77.594600
+
+        resp_a = self.client.get(f'/api/v1/pets/?lat={lat_a}&lng={lng_a}')
+        resp_b = self.client.get(f'/api/v1/pets/?lat={lat_b}&lng={lng_b}')
+
+        self.assertEqual(resp_a.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp_b.status_code, status.HTTP_200_OK)
+
+        dist_a = resp_a.data.get('results', resp_a.data)[0]['distance_km']
+        dist_b = resp_b.data.get('results', resp_b.data)[0]['distance_km']
+
+        self.assertIsInstance(dist_a, int)
+        self.assertIsInstance(dist_b, int)
+        self.assertEqual(dist_a, dist_b, f"Expected same whole km value for origins 100m apart, got {dist_a} vs {dist_b}")
+
+    def test_pets_geo_throttle_enforces_limit_and_returns_429(self):
+        from django.core.cache import cache
+        from unittest.mock import patch
+        cache.clear()
+
+        # Override throttle rate to 3/min via env
+        with patch.dict('os.environ', {'PETS_GEO_THROTTLE_RATE': '3/min'}):
+            # Requests carrying coordinates should be throttled after 3
+            url = '/api/v1/pets/?lat=12.971600&lng=77.594600'
+            for i in range(3):
+                r = self.client.get(url)
+                self.assertEqual(r.status_code, status.HTTP_200_OK, f"Request {i+1} should succeed")
+
+            # 4th request must be throttled with 429
+            r_throttled = self.client.get(url)
+            self.assertEqual(r_throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+            # Requests without coordinates from the same client are NOT throttled
+            r_no_geo = self.client.get('/api/v1/pets/')
+            self.assertEqual(r_no_geo.status_code, status.HTTP_200_OK)
+
+
+
 
 
 

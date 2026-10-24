@@ -127,6 +127,7 @@ REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.ScopedRateThrottle',
+        'apps.pets.throttling.PetsGeoRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
         'otp_verify': OTP_THROTTLE_RATE,
@@ -134,6 +135,7 @@ REST_FRAMEWORK = {
         'auth_login': os.getenv('AUTH_LOGIN_THROTTLE_RATE', '10/min'),
         'auth_register': os.getenv('AUTH_REGISTER_THROTTLE_RATE', '5/min'),
         'auth_refresh': os.getenv('AUTH_REFRESH_THROTTLE_RATE', '30/min'),
+        'pets_geo': os.getenv('PETS_GEO_THROTTLE_RATE', '30/min'),
     },
 }
 

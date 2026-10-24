@@ -367,10 +367,11 @@ class PublicPetListSerializer(serializers.ModelSerializer):
             return obj.shelter.city
         return "location not provided"
 
-    @extend_schema_field(serializers.FloatField(allow_null=True))
+    @extend_schema_field(serializers.IntegerField(allow_null=True))
     def get_distance_km(self, obj):
         if hasattr(obj, 'distance_meters') and obj.distance_meters is not None:
-            return round(float(obj.distance_meters) / 1000.0, 2)
+            km = round(float(obj.distance_meters) / 1000.0)
+            return max(1, int(km))
         return None
 
 
@@ -459,10 +460,11 @@ class PublicPetDetailSerializer(serializers.ModelSerializer):
             'phone': (obj.shelter.user.phone if (obj.shelter.user and obj.shelter.user.phone) else None) if can_access else None,
         }
 
-    @extend_schema_field(serializers.FloatField(allow_null=True))
+    @extend_schema_field(serializers.IntegerField(allow_null=True))
     def get_distance_km(self, obj):
         if hasattr(obj, 'distance_meters') and obj.distance_meters is not None:
-            return round(float(obj.distance_meters) / 1000.0, 2)
+            km = round(float(obj.distance_meters) / 1000.0)
+            return max(1, int(km))
         return None
 
 

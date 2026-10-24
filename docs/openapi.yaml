@@ -5169,8 +5169,7 @@ components:
           - $ref: '#/components/schemas/PublicPetShelter'
           readOnly: true
         distance_km:
-          type: number
-          format: double
+          type: integer
           nullable: true
           readOnly: true
         created_at:
@@ -5234,8 +5233,7 @@ components:
           type: string
           readOnly: true
         distance_km:
-          type: number
-          format: double
+          type: integer
           nullable: true
           readOnly: true
       required:
