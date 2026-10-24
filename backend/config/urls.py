@@ -11,6 +11,8 @@ shelter_router.register('', ShelterPetViewSet, basename='shelter-pet')
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
 from apps.pets.urls import router as public_pets_router
+from apps.logistics.urls import router as logistics_router
+from apps.adoptions.urls import v1_urlpatterns as adoptions_v1_urlpatterns
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -32,9 +34,9 @@ urlpatterns = [
     path('api/v1/pets/', include('apps.pets.urls')),
     path('api/v1/', include(public_pets_router.urls)),
     path('api/v1/adoptions/', include('apps.adoptions.urls')),
-    path('api/v1/', include('apps.adoptions.urls')),
+    path('api/v1/', include(adoptions_v1_urlpatterns)),
     path('api/v1/deliveries/', include('apps.logistics.urls')),
-    path('api/v1/', include('apps.logistics.urls')),
+    path('api/v1/', include(logistics_router.urls)),
     path('api/v1/reviews/', include('apps.reviews.urls')),
 ]
 

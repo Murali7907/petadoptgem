@@ -3142,6 +3142,62 @@ class DocumentationRouteRegressionTests(TestCase):
         with self.assertRaises(Resolver404):
             resolve(bogus_path)
 
+    def test_all_openapi_paths_resolve(self):
+        """Assert that every path specified in docs/openapi.yaml resolves via django.urls.resolve."""
+        import yaml
+        import re
+        from django.urls import resolve, Resolver404
+        from django.conf import settings
+
+        repo_root = Path(settings.BASE_DIR).parent
+        openapi_file = repo_root / "docs" / "openapi.yaml"
+        self.assertTrue(openapi_file.exists(), f"OpenAPI spec file missing: {openapi_file}")
+
+        with open(openapi_file, "r", encoding="utf-8") as f:
+            spec = yaml.safe_load(f)
+
+        paths = list(spec.get("paths", {}).keys())
+        self.assertGreater(len(paths), 30, "Expected openapi.yaml to have routes")
+
+        sample_uuid = "334bd0f8-92c1-4f50-8ba7-b561f67202c3"
+        unresolved = []
+
+        for path_template in paths:
+            concrete = re.sub(r"\{[^}]+\}", sample_uuid, path_template)
+            try:
+                resolve(concrete)
+            except Resolver404:
+                concrete_int = re.sub(r"\{[^}]+\}", "1", path_template)
+                try:
+                    resolve(concrete_int)
+                except Resolver404:
+                    unresolved.append(f"{path_template} -> tried {concrete} and {concrete_int}")
+
+        self.assertEqual(
+            unresolved,
+            [],
+            f"The following openapi.yaml paths failed to resolve via django.urls.resolve: {unresolved}"
+        )
+
+    def test_bare_id_routes_under_v1_do_not_resolve(self):
+        """Assert that ambiguous bare-id flat routes under /api/v1/ do not resolve."""
+        from django.urls import resolve, Resolver404
+        sample_uuid = "334bd0f8-92c1-4f50-8ba7-b561f67202c3"
+        bare_paths = [
+            f"/api/v1/{sample_uuid}/status/",
+            f"/api/v1/{sample_uuid}/pickup/",
+            f"/api/v1/{sample_uuid}/ping/",
+            f"/api/v1/{sample_uuid}/verify-otp/",
+            f"/api/v1/{sample_uuid}/verify-doorstep/",
+            f"/api/v1/{sample_uuid}/collect-cash/",
+            f"/api/v1/{sample_uuid}/reissue-otp/",
+            f"/api/v1/{sample_uuid}/cancel/",
+        ]
+        for path in bare_paths:
+            with self.assertRaises(Resolver404, msg=f"Bare route {path} should not resolve"):
+                resolve(path)
+
+
 
 
 
