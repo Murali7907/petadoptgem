@@ -915,18 +915,40 @@ Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medic
 
 ---
 
-## 14. Milestone 8b — Operational Refunds, COD Reconciliation & Application Exit Paths
+## 14. Milestone 8b — Documentation Alignment, Ambiguous Flat Route Cleanup, Distance Privacy & Leak Sweep
 
-> **Status**: `PROPOSED / PLANNED`
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Milestone 8b approved and finalized.
 
-### 14.1 Feature Scope
-1. **Razorpay Automated Refund Service**: Implement `apps.logistics.payment_services.refund_payment(...)` integrating with Razorpay refund API, tracking `PaymentStatus.REFUNDED` / `PARTIALLY_REFUNDED`, and processing webhook events.
-2. **COD Reconciliation Endpoint**: `POST /api/v1/shelter/deliveries/{public_id}/settle-cash/` flipping `is_cash_settled_with_shelter = True`.
-3. **Operational Exit Path for Stuck Paid Applications**: Coordinated refund and cancellation workflow restoring pet to `available`.
+### 14.1 Task 1: Docs Match Reality
+- Correct 4 documented URLs returning 404 in `docs/backend_handoff.md` and `docs/api_contract_logistics.md`:
+  - `/api/v1/customer/deliveries/<uuid>/track/` -> `/api/v1/delivery/tasks/<uuid:public_id>/tracking/` (canonical) and `/api/deliveries/<uuid:public_id>/track/` (legacy).
+  - `/api/v1/shelter/deliveries/available-drivers/` -> `/api/v1/shelter/deliveries/drivers/`.
+  - `/api/v1/shelter/profile/` -> Document `/api/v1/auth/me/` and `/api/v1/me/` (`UserProfileSerializer` containing `shelter_profile` with `public_id`, `organization_name`, `license_no`, `pickup_address`, `city`, `latitude`, `longitude`, `is_active`, `is_verified`, `created_at`).
+  - `/api/v1/delivery/tasks/` -> Replace with `/api/v1/delivery/tasks/active/` (legacy `/api/deliveries/driver-active/`) and document that driver tasks collection uses dedicated actions.
+- Add regression test extracting every `/api/` path from `docs/backend_handoff.md` and `docs/api_contract_logistics.md`, resolving with `django.urls.resolve()` using UUID/integer substitution, failing on any invalid route.
+- Align hardcoded Django (`6.1.2`) and PostgreSQL (`18.6`) versions to actual locked/runtime versions.
+
+### 14.2 Task 2: Ambiguous Flat Routes Cleanup
+- Audit and document every URL pattern with a bare identifier directly following `/api/` or `/api/v1/` (`<id>`, `<public_id>`, `<int:id>`, `<uuid:public_id>`).
+- Remove bare-id flat routes from the URLconf that duplicate canonical prefixed routes or cause route shadowing (specifically resolving `/api/v1/<uuid:public_id>/status/` collision between adoptions and logistics).
+- Retain canonical `/api/v1/...` routes and legacy prefixed `/api/deliveries/...` and `/api/adoptions/...` routes.
+- Repoint all affected tests, verify all paths in `docs/openapi.yaml` resolve, and regenerate schema (`spectacular --validate --fail-on-warn` exiting 0).
+
+### 14.3 Task 3: Distance Privacy & Geo Rate Throttling
+- Eliminate precision trilateration vulnerabilities by rounding `distance_km` to whole integer kilometres (minimum 1 km) in all serializer responses across all actors.
+- Implement an env-configurable DRF rate throttle scope (`pets_geo`, default `30/min`) triggered when requests supply `lat`/`lng` coordinates.
+- Add tests verifying integer output, identical rounding for origins 100m apart, and HTTP 429 throttling. Update `docs/openapi.yaml`.
+
+### 14.4 Task 4: Comprehensive Sensitive Data Leak Sweep
+- Produce an exhaustive audit table covering all endpoints returning `pickup_address`, `latitude`, `longitude`, `phone`, `email`, or `document_url` across both pet route families (`PetViewSet` and `PublicPetViewSet`), shelter profiles, applications, reviews, and tracking.
+- Implement a recursive response-body regression test asserting zero non-null sensitive key leaks for anonymous users, unrelated customers, and submitted applicants across all 6 actor classes.
+- Remediate any detected data leaks.
 
 ---
 
-*Last updated: 2026-10-22*
+*Last updated: 2026-10-24*
 
 
 

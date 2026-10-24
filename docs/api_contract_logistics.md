@@ -56,7 +56,8 @@ This document specifies the canonical and legacy API contracts for the pet deliv
 ---
 
 ### 2. Get Active Driver Task
-- **URL**: `GET /api/v1/delivery/tasks/driver-active/` (Legacy aliases: `GET /api/v1/deliveries/driver-active/`, `GET /api/deliveries/driver-active/`)
+- **URL**: `GET /api/v1/delivery/tasks/active/` (Canonical), `GET /api/v1/delivery/tasks/driver-active/` (Action alias), `GET /api/deliveries/driver-active/` (Legacy alias)
+- **Collection Endpoint Note**: `DriverDeliveryViewSet` does not expose a root collection list route (requesting the viewset root returns 404). Active delivery tasks must be fetched through `/api/v1/delivery/tasks/active/`.
 - **Authentication**: Required (`Bearer <access_token>`)
 - **Permissions**: Delivery Driver Profile required
 - **Responses**:

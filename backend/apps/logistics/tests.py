@@ -3081,6 +3081,69 @@ class StableErrorCodesTestCase(TestCase):
         self.assertEqual(res_cash.data.get('code'), 'cash_collected')
 
 
+class DocumentationRouteRegressionTests(TestCase):
+    """
+    Milestone 8b Regression: Asserts every endpoint path documented in
+    docs/backend_handoff.md and docs/api_contract_logistics.md resolves
+    strictly via django.urls.resolve().
+    """
+
+    def test_all_documented_routes_resolve(self):
+        import re
+        from django.urls import resolve, Resolver404
+        from django.conf import settings
+
+        repo_root = Path(settings.BASE_DIR).parent
+        doc_files = [
+            repo_root / "docs" / "backend_handoff.md",
+            repo_root / "docs" / "api_contract_logistics.md",
+        ]
+        sample_uuid = "334bd0f8-92c1-4f50-8ba7-b561f67202c3"
+        pattern = r"(/api/[a-zA-Z0-9_\-/<:>{}]*)"
+
+        all_paths = set()
+        for doc_file in doc_files:
+            self.assertTrue(doc_file.exists(), f"Doc file missing: {doc_file}")
+            text = doc_file.read_text(encoding="utf-8")
+            matches = re.findall(pattern, text)
+            for m in matches:
+                p = m.rstrip(".,;:)\"'*`")
+                if not p.endswith("/"):
+                    p += "/"
+                all_paths.add((p, doc_file.name))
+
+        self.assertGreater(len(all_paths), 30, "Expected to find documented routes in markdown files")
+
+        unresolved = []
+        for path_template, doc_name in sorted(all_paths):
+            concrete = re.sub(r"<[^>]+>", sample_uuid, path_template)
+            concrete = re.sub(r"\{[^}]+\}", sample_uuid, concrete)
+            try:
+                resolve(concrete)
+            except Resolver404:
+                # Retry with integer ID if UUID didn't resolve
+                concrete_int = re.sub(r"<[^>]+>", "1", path_template)
+                concrete_int = re.sub(r"\{[^}]+\}", "1", concrete_int)
+                try:
+                    resolve(concrete_int)
+                except Resolver404:
+                    unresolved.append(f"{path_template} (from {doc_name}) -> tried {concrete} and {concrete_int}")
+
+        self.assertEqual(
+            unresolved,
+            [],
+            f"The following documented API paths failed to resolve via django.urls.resolve: {unresolved}"
+        )
+
+    def test_doc_regression_fails_on_bogus_route(self):
+        from django.urls import resolve, Resolver404
+        sample_uuid = "334bd0f8-92c1-4f50-8ba7-b561f67202c3"
+        bogus_path = f"/api/v1/customer/deliveries/{sample_uuid}/track/"
+        with self.assertRaises(Resolver404):
+            resolve(bogus_path)
+
+
+
 
 
 
