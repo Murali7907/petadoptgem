@@ -1248,6 +1248,111 @@ class PetMedicalRecordVisibilityHybridTests(APITestCase):
         shelter_data = data['shelter']
         self.assertEqual(set(shelter_data.keys()), set(PublicPetShelterSerializer().fields.keys()))
 
+    def _assert_no_leaks_recursive(self, data, sensitive_keys, path=""):
+        if isinstance(data, dict):
+            for key, val in data.items():
+                curr_path = f"{path}.{key}" if path else key
+                if key in sensitive_keys and val is not None:
+                    self.fail(f"Privacy leak detected at '{curr_path}': value is {val!r}")
+                self._assert_no_leaks_recursive(val, sensitive_keys, curr_path)
+        elif isinstance(data, list):
+            for idx, item in enumerate(data):
+                self._assert_no_leaks_recursive(item, sensitive_keys, f"{path}[{idx}]")
+
+    def _get_pet_family_endpoints(self):
+        pet_id = str(self.pet.public_id)
+        return [
+            # PetViewSet (List and Detail)
+            ('/api/pets/', 'PetViewSet List (legacy)'),
+            (f'/api/pets/{pet_id}/', 'PetViewSet Detail (legacy)'),
+            ('/api/v1/pets/', 'PetViewSet List (canonical)'),
+            (f'/api/v1/pets/{pet_id}/', 'PetViewSet Detail (canonical)'),
+            # PublicPetViewSet (List and Detail)
+            ('/api/pets/public/pets/', 'PublicPetViewSet List (legacy)'),
+            (f'/api/pets/public/pets/{pet_id}/', 'PublicPetViewSet Detail (legacy)'),
+            ('/api/v1/pets/public/pets/', 'PublicPetViewSet List (v1 nested)'),
+            (f'/api/v1/pets/public/pets/{pet_id}/', 'PublicPetViewSet Detail (v1 nested)'),
+            ('/api/v1/public/pets/', 'PublicPetViewSet List (canonical)'),
+            (f'/api/v1/public/pets/{pet_id}/', 'PublicPetViewSet Detail (canonical)'),
+        ]
+
+    def test_recursive_leak_sweep_anonymous_actor(self):
+        """
+        Verify that an anonymous visitor receives NO non-null sensitive fields
+        at any depth across all pet route families (PetViewSet and PublicPetViewSet).
+        """
+        self.client.logout()
+        sensitive_keys = {'pickup_address', 'latitude', 'longitude', 'phone', 'email', 'document_url'}
+        for url, desc in self._get_pet_family_endpoints():
+            res = self.client.get(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK, f"Failed on {desc} ({url})")
+            self._assert_no_leaks_recursive(res.data, sensitive_keys, path=f"{desc}:{url}")
+
+    def test_recursive_leak_sweep_other_customer_actor(self):
+        """
+        Verify that an authenticated customer with NO application receives NO non-null
+        sensitive fields at any depth across all pet route families.
+        """
+        self.client.force_authenticate(user=self.other_customer)
+        sensitive_keys = {'pickup_address', 'latitude', 'longitude', 'phone', 'email', 'document_url'}
+        for url, desc in self._get_pet_family_endpoints():
+            res = self.client.get(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK, f"Failed on {desc} ({url})")
+            self._assert_no_leaks_recursive(res.data, sensitive_keys, path=f"{desc}:{url}")
+
+    def test_recursive_leak_sweep_submitted_applicant_actor(self):
+        """
+        Verify that a customer with a SUBMITTED (pending review) application receives NO non-null
+        sensitive fields at any depth across all pet route families.
+        """
+        self.client.force_authenticate(user=self.pending_applicant)
+        sensitive_keys = {'pickup_address', 'latitude', 'longitude', 'phone', 'email', 'document_url'}
+        for url, desc in self._get_pet_family_endpoints():
+            res = self.client.get(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK, f"Failed on {desc} ({url})")
+            self._assert_no_leaks_recursive(res.data, sensitive_keys, path=f"{desc}:{url}")
+
+    def test_recursive_leak_sweep_approved_applicant_receives_confidential_fields(self):
+        """
+        Verify that an applicant with an APPROVED application successfully receives
+        unmasked confidential fields (pickup_address, latitude, longitude, phone, document_url) on detail endpoints.
+        """
+        self.client.force_authenticate(user=self.applicant)
+        for url in [f'/api/pets/{self.pet.public_id}/', f'/api/v1/pets/{self.pet.public_id}/', f'/api/v1/public/pets/{self.pet.public_id}/']:
+            res = self.client.get(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            shelter = res.data['shelter']
+            self.assertEqual(shelter['pickup_address'], '42 Rescue Lane')
+            self.assertIsNotNone(shelter['latitude'])
+            self.assertIsNotNone(shelter['longitude'])
+            self.assertEqual(shelter['phone'], '9876543210')
+            records = res.data['medical_overview']['medical_records']
+            self.assertEqual(records[0]['document_url'], self.doc_secret_url)
+
+    def test_recursive_leak_sweep_owner_shelter_receives_confidential_fields(self):
+        """
+        Verify that the owning shelter staff successfully receives unmasked confidential fields on detail endpoints.
+        """
+        self.client.force_authenticate(user=self.owner_user)
+        for url in [f'/api/pets/{self.pet.public_id}/', f'/api/v1/pets/{self.pet.public_id}/', f'/api/v1/public/pets/{self.pet.public_id}/']:
+            res = self.client.get(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            shelter = res.data['shelter']
+            self.assertEqual(shelter['pickup_address'], '42 Rescue Lane')
+            self.assertEqual(shelter['phone'], '9876543210')
+
+    def test_recursive_leak_sweep_admin_receives_confidential_fields(self):
+        """
+        Verify that platform admin successfully receives unmasked confidential fields on detail endpoints.
+        """
+        self.client.force_authenticate(user=self.admin)
+        for url in [f'/api/pets/{self.pet.public_id}/', f'/api/v1/pets/{self.pet.public_id}/', f'/api/v1/public/pets/{self.pet.public_id}/']:
+            res = self.client.get(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            shelter = res.data['shelter']
+            self.assertEqual(shelter['pickup_address'], '42 Rescue Lane')
+            self.assertEqual(shelter['phone'], '9876543210')
+
 
 class DistancePrivacyAndThrottlingTests(APITestCase):
     """
