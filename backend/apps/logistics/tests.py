@@ -3796,6 +3796,216 @@ class CancelAndRefundConcurrencyTests(TransactionTestCase):
         self.assertIn(status.HTTP_200_OK, status_codes)
 
 
+class LateCaptureAndRefundCommandTests(TestCase):
+    """Milestone 9 Task 3: Late capture refund scheduling, retry command, and admin tests."""
+
+    def setUp(self):
+        self.shelter_user = User.objects.create_user(
+            username='late_shelter_mgr', email='late_s@test.com', role='shelter'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.shelter_user, organization_name='Late Shelter', pickup_address='1 Late Rd', is_verified=True
+        )
+        self.adopter = User.objects.create_user(
+            username='late_adopter', email='late_a@test.com', role='adopter'
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter, name='LatePet', species='dog', breed='Terrier', age_months=8, status='available'
+        )
+        self.application = AdoptionApplication.objects.create(
+            pet=self.pet,
+            applicant=self.adopter,
+            living_situation='Apartment',
+            contact_phone='9991112222',
+            status='cancelled',
+            total_amount=Decimal('200.00'),
+            payment_status='pending'
+        )
+        self.delivery = PetDelivery.objects.create(
+            application=self.application,
+            status='failed',
+            payment_status='pending'
+        )
+        self.payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount=Decimal('200.00'),
+            amount_in_paise=20000,
+            status=PaymentStatus.CREATED,
+            payment_method='razorpay',
+            razorpay_order_id='order_late_cap_1',
+            razorpay_payment_id='pay_late_cap_1'
+        )
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_late_capture_on_cancelled_app_records_capture_and_processes_refund(self, mock_get_client):
+        """Late capture on cancelled application records payment capture and processes refund."""
+        from apps.logistics.payment_services import mark_payment_captured
+        from apps.logistics.models import Refund, RefundStatus, RefundSource
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_late_auto_1',
+            'amount': 20000,
+            'status': 'processed'
+        }
+
+        with self.captureOnCommitCallbacks(execute=True):
+            res = mark_payment_captured(self.payment, 'pay_late_cap_1')
+            self.assertTrue(res)
+
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, PaymentStatus.REFUNDED)
+        self.assertEqual(self.payment.razorpay_payment_id, 'pay_late_cap_1')
+
+        # Check Refund row
+        refund = Refund.objects.filter(payment=self.payment).first()
+        self.assertIsNotNone(refund)
+        self.assertEqual(refund.status, RefundStatus.PROCESSED)
+        self.assertEqual(refund.source, RefundSource.LATE_CAPTURE)
+        self.assertEqual(refund.amount_in_paise, 20000)
+        self.assertEqual(refund.razorpay_refund_id, 'rfnd_late_auto_1')
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_retry_pending_refunds_command_is_idempotent(self, mock_get_client):
+        """Management command retry_pending_refunds retries older failed/created refunds idempotently."""
+        from datetime import timedelta
+        from django.utils import timezone
+        from django.core.management import call_command
+        from io import StringIO
+        from apps.logistics.models import Refund, RefundStatus
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_mgmt_retry_100',
+            'amount': 20000,
+            'status': 'processed'
+        }
+
+        self.payment.status = PaymentStatus.CAPTURED
+        self.payment.save()
+
+        # Create a refund in failed state, backdated by 20 minutes
+        old_time = timezone.now() - timedelta(minutes=20)
+        refund = Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=20000,
+            status=RefundStatus.FAILED,
+            reason="Initial attempt failed",
+            failure_reason="Gateway timeout"
+        )
+        Refund.objects.filter(id=refund.id).update(created_at=old_time)
+
+        out = StringIO()
+        call_command('retry_pending_refunds', minutes=15, stdout=out)
+        output = out.getvalue()
+        self.assertIn("Completed refund retries: 1 retried, 1 succeeded", output)
+
+        # Check refund was processed
+        processed_refund = Refund.objects.filter(payment=self.payment, status=RefundStatus.PROCESSED).first()
+        self.assertIsNotNone(processed_refund)
+        self.assertEqual(processed_refund.razorpay_refund_id, 'rfnd_mgmt_retry_100')
+
+        # Re-run command - must be idempotent (0 pending found)
+        out_second = StringIO()
+        call_command('retry_pending_refunds', minutes=15, stdout=out_second)
+        self.assertIn("No pending or failed refunds found", out_second.getvalue())
+
+    def test_refund_admin_is_read_only(self):
+        """RefundAdmin has all permissions disabled (no add, change, delete)."""
+        from django.contrib.admin.sites import AdminSite
+        from apps.logistics.admin import RefundAdmin
+        from apps.logistics.models import Refund
+
+        admin_instance = RefundAdmin(Refund, AdminSite())
+        self.assertFalse(admin_instance.has_add_permission(None))
+        self.assertFalse(admin_instance.has_delete_permission(None))
+        self.assertFalse(admin_instance.has_change_permission(None))
+
+
+class LateCaptureConcurrencyTests(TransactionTestCase):
+    """Milestone 9: Concurrent verify + webhook on cancelled application creates exactly one refund."""
+
+    def setUp(self):
+        super().setUp()
+        self.shelter_user = User.objects.create_user(
+            username='conc_late_shelter', email='cls@test.com', role='shelter'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.shelter_user, organization_name='CLS Shelter', pickup_address='102 Conc St', is_verified=True
+        )
+        self.adopter = User.objects.create_user(
+            username='conc_late_adopter', email='cla@test.com', role='adopter'
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter, name='ConcLatePet', species='cat', breed='Persian', age_months=7, status='available'
+        )
+        self.application = AdoptionApplication.objects.create(
+            pet=self.pet,
+            applicant=self.adopter,
+            living_situation='Apartment',
+            contact_phone='9777766666',
+            status='cancelled',
+            total_amount=Decimal('180.00'),
+            payment_status='pending'
+        )
+        self.delivery = PetDelivery.objects.create(
+            application=self.application,
+            status='failed',
+            payment_status='pending'
+        )
+        self.payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount=Decimal('180.00'),
+            amount_in_paise=18000,
+            status=PaymentStatus.CREATED,
+            payment_method='razorpay',
+            razorpay_order_id='order_late_conc_1',
+            razorpay_payment_id='pay_late_conc_1'
+        )
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_concurrent_mark_payment_captured_creates_exactly_one_refund(self, mock_get_client):
+        import threading
+        from django.db import connection
+        from apps.logistics.payment_services import mark_payment_captured
+        from apps.logistics.models import Refund
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_late_conc_single',
+            'amount': 18000,
+            'status': 'processed'
+        }
+
+        barrier = threading.Barrier(2)
+        errors = []
+
+        def worker():
+            try:
+                barrier.wait(timeout=5)
+                mark_payment_captured(self.payment, 'pay_late_conc_1')
+            except Exception as e:
+                errors.append(e)
+            finally:
+                connection.close()
+
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        self.assertEqual(errors, [])
+        # Exactly one non-failed Refund created
+        active_refunds = Refund.objects.filter(payment=self.payment).exclude(status='failed')
+        self.assertEqual(active_refunds.count(), 1)
+
+
+
 
 
 

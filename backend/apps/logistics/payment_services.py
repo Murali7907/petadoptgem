@@ -41,21 +41,34 @@ def get_razorpay_client():
     return razorpay.Client(auth=(key_id, key_secret))
 
 
+def _execute_late_capture_refund(payment_id: int, reason: str, source: str):
+    try:
+        pay = Payment.objects.get(id=payment_id)
+        issue_refund(payment=pay, reason=reason, initiated_by=None, source=source)
+    except Exception as exc:
+        logger.error(f"Late capture refund dispatch failed for Payment #{payment_id}: {exc}", exc_info=True)
+
+
 def mark_payment_captured(payment: Payment, razorpay_payment_id: str = '') -> bool:
     """
     Atomically transitions payment from a non-terminal state to 'captured'.
     Under row lock (select_for_update), sets:
       - payment.status = 'captured'
       - payment.razorpay_payment_id = razorpay_payment_id
+    When application is no longer 'approved' (cancelled, rejected, or completed by another path)
+    or delivery is 'failed'/'cancelled':
+      - Records capture and schedules issue_refund(source='late_capture') after commit.
+    Else:
       - application.payment_status = 'paid'
       - delivery.payment_status = 'paid'
-    Idempotent: if payment is already 'captured' or 'paid', returns True without duplicate writes.
+    Idempotent: if payment is already 'captured', 'paid', or 'refunded', returns True without duplicate writes.
     If payment is in terminal 'failed' state, does not overwrite and returns False.
+    Concurrent verify + webhook creates exactly one refund.
     """
     with transaction.atomic():
         locked_payment = Payment.objects.select_for_update().get(id=payment.id)
 
-        if locked_payment.status in (PaymentStatus.CAPTURED, PaymentStatus.PAID):
+        if locked_payment.status in (PaymentStatus.CAPTURED, PaymentStatus.PAID, PaymentStatus.REFUNDED):
             return True
 
         if locked_payment.status == PaymentStatus.FAILED:
@@ -68,17 +81,50 @@ def mark_payment_captured(payment: Payment, razorpay_payment_id: str = '') -> bo
             locked_payment.transaction_id = razorpay_payment_id
         locked_payment.save(update_fields=['status', 'razorpay_payment_id', 'transaction_id', 'updated_at'])
 
+        app = None
         if locked_payment.application_id:
             app = AdoptionApplication.objects.select_for_update().get(id=locked_payment.application_id)
-            app.payment_status = 'paid'
-            if razorpay_payment_id:
-                app.razorpay_payment_id = razorpay_payment_id
-            app.save(update_fields=['payment_status', 'razorpay_payment_id', 'updated_at'])
+        elif locked_payment.delivery and locked_payment.delivery.application_id:
+            app = AdoptionApplication.objects.select_for_update().get(id=locked_payment.delivery.application_id)
 
+        deliv = None
         if locked_payment.delivery_id:
             deliv = PetDelivery.objects.select_for_update().get(id=locked_payment.delivery_id)
-            deliv.payment_status = 'paid'
-            deliv.save(update_fields=['payment_status'])
+        elif app and hasattr(app, 'delivery') and app.delivery:
+            deliv = PetDelivery.objects.select_for_update().get(id=app.delivery.id)
+
+        # Check for late capture: application not approved or delivery failed/cancelled
+        is_late_capture = False
+        if app and app.status != 'approved':
+            is_late_capture = True
+        if deliv and deliv.status in ('failed', 'cancelled'):
+            is_late_capture = True
+
+        if is_late_capture:
+            if app and razorpay_payment_id:
+                app.razorpay_payment_id = razorpay_payment_id
+                app.save(update_fields=['razorpay_payment_id', 'updated_at'])
+
+            active_refund_exists = Refund.objects.filter(payment=locked_payment).exclude(status=RefundStatus.FAILED).exists()
+            if not active_refund_exists:
+                pay_id = locked_payment.id
+                transaction.on_commit(
+                    lambda: _execute_late_capture_refund(
+                        pay_id,
+                        reason="Late capture after cancellation/rejection",
+                        source=RefundSource.LATE_CAPTURE
+                    )
+                )
+        else:
+            if app:
+                app.payment_status = 'paid'
+                if razorpay_payment_id:
+                    app.razorpay_payment_id = razorpay_payment_id
+                app.save(update_fields=['payment_status', 'razorpay_payment_id', 'updated_at'])
+
+            if deliv:
+                deliv.payment_status = 'paid'
+                deliv.save(update_fields=['payment_status'])
 
         return True
 

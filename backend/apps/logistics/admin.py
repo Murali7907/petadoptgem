@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import PetDelivery, Payment, DeliveryLocationPing
+from .models import PetDelivery, Payment, DeliveryLocationPing, Refund
 
 @admin.register(PetDelivery)
 class PetDeliveryAdmin(admin.ModelAdmin):
@@ -37,3 +37,47 @@ class PaymentAdmin(admin.ModelAdmin):
 class DeliveryLocationPingAdmin(admin.ModelAdmin):
     list_display = ('id', 'delivery', 'latitude', 'longitude', 'pinged_at')
     readonly_fields = ('public_id',)
+
+
+@admin.register(Refund)
+class RefundAdmin(admin.ModelAdmin):
+    """Read-only Django admin interface for inspecting payment refunds."""
+    list_display = (
+        'id',
+        'public_id',
+        'payment',
+        'application',
+        'amount_in_paise',
+        'status',
+        'razorpay_refund_id',
+        'source',
+        'initiated_by',
+        'created_at',
+        'updated_at',
+    )
+    list_filter = ('status', 'source', 'created_at')
+    search_fields = ('razorpay_refund_id', 'payment__transaction_id', 'application__applicant__username', 'reason')
+    readonly_fields = (
+        'public_id',
+        'payment',
+        'application',
+        'amount_in_paise',
+        'status',
+        'razorpay_refund_id',
+        'reason',
+        'initiated_by',
+        'source',
+        'failure_reason',
+        'created_at',
+        'updated_at',
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
