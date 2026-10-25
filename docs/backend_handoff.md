@@ -71,9 +71,12 @@ When throttled, the server returns HTTP `429 Too Many Requests` with a `Retry-Af
 | `/api/v1/shelter/applications/<uuid:public_id>/review/` | `POST` | `shelter` | Move application to `reviewing`. Requires `is_verified=True`. |
 | `/api/v1/shelter/applications/<uuid:public_id>/approve/` | `POST` | `shelter` | Approve application; sets pet to `pending`, auto-rejects competitors. Requires `is_verified=True`. |
 | `/api/v1/shelter/applications/<uuid:public_id>/reject/` | `POST` | `shelter` | Reject application. Blocked (409) if online payment captured or delivery cash collected. Requires `is_verified=True`. |
+| `/api/v1/shelter/deliveries/` | `GET` | `shelter`, `admin` | List deliveries belonging to shelter with optional `cash_unsettled=true` filter. |
 | `/api/v1/shelter/deliveries/drivers/` | `GET` | `shelter` | Lists active delivery drivers registered under the shelter. |
 | `/api/v1/shelter/deliveries/assign/` | `POST` | `shelter` | Assigns driver; creates delivery task; generates pickup OTP. Requires `is_verified=True`. |
 | `/api/v1/shelter/deliveries/<uuid:public_id>/cancel/` | `POST` | `shelter` | Cancels delivery. Blocked (409) if online payment captured or delivery cash collected. Requires `is_verified=True`. |
+| `/api/v1/shelter/deliveries/<uuid:public_id>/cancel-and-refund/` | `POST` | `shelter`, `admin` | Cancels active/failed delivery and triggers full refund of captured online payment. Throttled (`refund`, 10/min). Requires owning verified shelter or admin. |
+| `/api/v1/shelter/deliveries/<uuid:public_id>/reconcile-cash/` | `POST` | `shelter`, `admin` | Reconciles and settles collected COD cash on delivered tasks. Requires owning verified shelter or admin. |
 | `/api/v1/shelter/deliveries/<uuid:public_id>/reissue-otp/` | `POST` | `shelter` | Reissues pickup or doorstep OTP after expiry or lockout. Requires `is_verified=True`. |
 | `/api/v1/shelter/reviews/` | `GET` | `shelter` | View customer ratings and feedback. |
 | `/api/v1/delivery/tasks/driver-active/` | `GET` | `delivery` | Active delivery task assigned to driver (legacy alias: `/api/deliveries/driver-active/`). |
@@ -123,10 +126,14 @@ For invalid OTP attempts, the payload includes remaining attempts:
 | `409 Conflict` | `payment_method_required` | `/api/v1/delivery/tasks/<id>/pickup/` | Pickup OTP verification was rejected because the application payment method is `'unset'` and `total_amount > 0`. Shelter or adopter must designate payment method before pet leaves the facility. |
 | `409 Conflict` | `cash_not_collected` | `/api/v1/delivery/tasks/<id>/verify-doorstep/` | Doorstep OTP verification was rejected because the delivery is Cash on Delivery (COD) and the driver has not yet called `collect-cash` with `cash_collected >= total_amount`. Driver must collect cash first. |
 | `409 Conflict` | `cash_already_collected` | `/api/v1/delivery/tasks/<id>/collect-cash/` | Driver attempted to record cash collection on a delivery where cash has already been logged. |
-| `409 Conflict` | `cash_collected` | `/api/v1/shelter/deliveries/<id>/cancel/` | Shelter attempted to cancel a delivery task after the driver physically collected cash from the customer. The shelter must reconcile cash with the driver directly. |
+| `409 Conflict` | `cash_collected` | `/api/v1/shelter/deliveries/<id>/cancel/`<br>`/api/v1/shelter/deliveries/<id>/cancel-and-refund/` | Shelter attempted to cancel a delivery task after the driver physically collected cash from the customer. The shelter must reconcile cash with the driver directly. |
+| `409 Conflict` | `delivery_completed` | `/api/v1/shelter/deliveries/<id>/cancel-and-refund/` | Cannot cancel or refund an already delivered order. Returns and post-delivery refunds are out of scope. |
+| `409 Conflict` | `no_captured_payment` | `/api/v1/shelter/deliveries/<id>/cancel-and-refund/` | No captured online payment was found for the delivery or application. |
+| `409 Conflict` | `refund_in_progress` | `/api/v1/shelter/deliveries/<id>/cancel-and-refund/` | A refund transaction is currently created or processing with the payment gateway. |
 | `409 Conflict` | `refund_required` | - `/api/v1/applications/<id>/cancel/`<br>- `/api/v1/shelter/applications/<id>/reject/`<br>- `/api/v1/shelter/deliveries/<id>/cancel/`<br>- `/api/v1/adoptions/<id>/status/` | An online Razorpay payment has already been captured (`PaymentStatus.CAPTURED`), or delivery cash has been collected. The application or delivery cannot be cancelled/rejected until shelter staff arranges a refund with the customer. |
 | `410 Gone` | `otp_expired` | `/api/v1/delivery/tasks/<id>/pickup/`<br>`/api/v1/delivery/tasks/<id>/verify-doorstep/`<br>`/api/v1/delivery/tasks/<id>/verify-otp/` | The OTP has expired (standard 24-hour TTL). Contact shelter staff to reissue an OTP via `reissue-otp/`. |
 | `423 Locked` | `otp_locked` | `/api/v1/delivery/tasks/<id>/pickup/`<br>`/api/v1/delivery/tasks/<id>/verify-doorstep/`<br>`/api/v1/delivery/tasks/<id>/verify-otp/` | Maximum failed OTP attempts exceeded (3 attempts). The OTP is permanently locked. Contact shelter staff to reissue an OTP via `reissue-otp/`. |
+| `502 Bad Gateway` | `refund_failed` | `/api/v1/shelter/deliveries/<id>/cancel-and-refund/` | The payment gateway rejected the refund request or encountered a network error. Client may safely retry without double-refund risk. |
 
 ---
 
@@ -196,6 +203,38 @@ The KindHeart logistics lifecycle is strictly guarded by two cryptographically h
   - `pet.status` -> `'adopted'`.
   - `driver.is_available` -> `True` (driver freed for new assignments).
   - `application.payment_status` -> `'paid'`.
+
+### 4.4 Cancel & Refund Lifecycle (Exit Path for Paid Applications)
+- **Initiator**: Owning verified shelter staff or platform administrator (`POST /api/v1/shelter/deliveries/<id>/cancel-and-refund/`). Adopters cannot trigger refunds directly.
+- **Allowed States**: Delivery `status in ('assigned', 'out_for_delivery', 'failed')` with a captured online payment. Blocked if delivery is `delivered` (`409 {"code": "delivery_completed"}`).
+- **Execution Order**:
+  1. Validate preconditions under `select_for_update` on `Payment`.
+  2. Idempotent check: if already refunded, return 200 immediately.
+  3. Release row locks, then call Razorpay refund API (`client.payment.refund`) for the full captured amount with idempotency key.
+  4. If gateway fails, return `502 {"code": "refund_failed"}`; state remains unchanged and retry is allowed.
+  5. In one atomic transaction upon gateway success:
+     - `delivery.status` -> `'failed'` (if active).
+     - `driver.is_available` -> `True` (driver freed).
+     - `application.status` -> `'cancelled'`.
+     - `pet.status` -> `'available'` (pet made available for new adoptions; competing applications stay rejected).
+     - `payment.status`, `application.payment_status`, `delivery.payment_status` -> `'refunded'`.
+     - Email and in-app notifications dispatched to adopter via `transaction.on_commit`.
+- **Known Manual Path**: Deliveries where cash was already physically collected by driver (`cash_collected > 0`) stay blocked (`409 {"code": "cash_collected"}`). Digital refund cannot process physical cash; shelter must reconcile directly with driver.
+
+### 4.5 Late Capture Auto-Refund & Webhooks
+- If a customer's online payment is captured *after* their application was already cancelled/rejected or delivery failed/cancelled:
+  - System captures payment record and automatically schedules `issue_refund(source='late_capture')` via `transaction.on_commit`.
+  - The `retry_pending_refunds` management command safely retries any pending or failed refunds older than N minutes idempotently.
+- Webhooks for `refund.processed` and `refund.failed` are handled idempotently via `POST /api/v1/payments/webhook/` (public auth, signature verified). Unknown refund IDs return 200 ignored.
+
+### 4.6 COD Cash Reconciliation & Shelter Money Flow
+- **Workflow**:
+  1. Driver collects physical cash at doorstep and verifies doorstep OTP. Delivery status transitions to `'delivered'`.
+  2. Cash remains unsettled (`is_cash_settled_with_shelter = False`).
+  3. Shelter queries unsettled deliveries via `GET /api/v1/shelter/deliveries/?cash_unsettled=true`.
+  4. Once physical cash is handed over, shelter calls `POST /api/v1/shelter/deliveries/<id>/reconcile-cash/`.
+  5. Under `select_for_update`: sets `is_cash_settled_with_shelter = True`, `cash_settled_at = now()`, `cash_settled_by = request.user`.
+  6. Repeat calls return `200 OK` idempotently with `{"code": "already_settled"}`.
 
 ---
 

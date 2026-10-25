@@ -2013,13 +2013,15 @@ paths:
   /api/v1/shelter/deliveries/:
     get:
       operationId: shelter_deliveries_list
-      description: |-
-        Endpoints for shelter admins to assign and manage deliveries.
-        - POST /api/v1/shelter/deliveries/assign/
-        - POST /api/v1/shelter/deliveries/<id>/reissue-otp/
-        - GET  /api/v1/shelter/deliveries/drivers/
-        - GET  /api/v1/shelter/deliveries/
+      description: List deliveries belonging to the shelter. Supports optional cash_unsettled
+        query parameter.
+      summary: List deliveries for shelter
       parameters:
+      - in: query
+        name: cash_unsettled
+        schema:
+          type: boolean
+        description: Filter deliveries with unsettled COD cash
       - name: ordering
         required: false
         in: query
@@ -2083,6 +2085,102 @@ paths:
           description: ''
         '403':
           description: Unauthorized or foreign shelter
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
+  /api/v1/shelter/deliveries/{public_id}/cancel-and-refund/:
+    post:
+      operationId: shelter_deliveries_cancel_and_refund_create
+      description: Owning verified shelter or platform admin cancels an active/failed
+        delivery and refunds the captured online payment. Returns 200 idempotently
+        if already refunded.
+      summary: Cancel delivery and refund captured online payment
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelAndRefundRequestRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CancelAndRefundRequestRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CancelAndRefundRequestRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelAndRefundResponse'
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
+        '403':
+          description: Unauthorized, foreign shelter, or unverified shelter
+        '404':
+          description: Delivery not found
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
+        '502':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: ''
+  /api/v1/shelter/deliveries/{public_id}/reconcile-cash/:
+    post:
+      operationId: shelter_deliveries_reconcile_cash_create
+      description: Owning verified shelter or platform admin marks collected cash
+        for a delivered COD delivery as settled with the shelter. Returns 200 idempotently
+        on repeat calls.
+      summary: Reconcile and settle collected COD cash with shelter
+      parameters:
+      - in: path
+        name: public_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - shelter
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryCashReconciliationResponse'
+          description: ''
+        '403':
+          description: Unauthorized, foreign shelter, or unverified shelter
+        '404':
+          description: Delivery not found
         '409':
           content:
             application/json:
@@ -3206,6 +3304,42 @@ components:
         * `rejected` - Rejected
         * `cancelled` - Cancelled
         * `completed` - Completed
+    CancelAndRefundRequestRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+      required:
+      - reason
+    CancelAndRefundResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        code:
+          type: string
+        detail:
+          type: string
+        refund_id:
+          type: string
+          nullable: true
+        delivery_id:
+          type: string
+        application_id:
+          type: string
+          nullable: true
+        amount_refunded_paise:
+          type: integer
+      required:
+      - amount_refunded_paise
+      - application_id
+      - code
+      - delivery_id
+      - detail
+      - refund_id
+      - status
     CollectCashRequestRequest:
       type: object
       properties:
@@ -3559,6 +3693,23 @@ components:
           pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
           readOnly: true
           nullable: true
+        cash_collected:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          readOnly: true
+        is_cash_settled_with_shelter:
+          type: boolean
+          readOnly: true
+        cash_settled_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        cash_settled_by:
+          type: integer
+          readOnly: true
+          nullable: true
         created_at:
           type: string
           format: date-time
@@ -3569,6 +3720,9 @@ components:
             to shelter.
       required:
       - application_public_id
+      - cash_collected
+      - cash_settled_at
+      - cash_settled_by
       - created_at
       - current_latitude
       - current_longitude
@@ -3581,6 +3735,7 @@ components:
       - driver_name
       - driver_public_id
       - expires_at
+      - is_cash_settled_with_shelter
       - pet_name
       - pickup_otp_attempts
       - public_id
@@ -3599,6 +3754,37 @@ components:
       required:
       - delivery_id
       - detail
+      - status
+    DeliveryCashReconciliationResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        code:
+          type: string
+        detail:
+          type: string
+        delivery_id:
+          type: string
+        is_cash_settled_with_shelter:
+          type: boolean
+        cash_settled_at:
+          type: string
+          format: date-time
+          nullable: true
+        cash_settled_by:
+          type: integer
+          nullable: true
+        cash_collected:
+          type: string
+      required:
+      - cash_collected
+      - cash_settled_at
+      - cash_settled_by
+      - code
+      - delivery_id
+      - detail
+      - is_cash_settled_with_shelter
       - status
     DeliveryDoorstepResponse:
       type: object
@@ -5649,12 +5835,32 @@ components:
           pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
           readOnly: true
           nullable: true
+        cash_collected:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+          readOnly: true
+        is_cash_settled_with_shelter:
+          type: boolean
+          readOnly: true
+        cash_settled_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        cash_settled_by:
+          type: integer
+          readOnly: true
+          nullable: true
         created_at:
           type: string
           format: date-time
           readOnly: true
       required:
       - application_public_id
+      - cash_collected
+      - cash_settled_at
+      - cash_settled_by
       - created_at
       - current_latitude
       - current_longitude
@@ -5667,6 +5873,7 @@ components:
       - driver_name
       - driver_public_id
       - expires_at
+      - is_cash_settled_with_shelter
       - pet_name
       - pickup_otp_attempts
       - public_id

@@ -397,13 +397,24 @@ This document specifies the canonical and legacy API contracts for the pet deliv
     - Transitions payment to `'captured'`, `application.payment_status = 'paid'`, `delivery.payment_status = 'paid'`.
   - **`payment.failed`**:
     - Never overwrites an already captured payment.
-  - **Unknown Orders**:
-    - Returns `200 OK` ignored with no changes.
+  - **`refund.processed`**:
+    - Matches active `Refund` record by `razorpay_refund_id`.
+    - Validates payload `amount` against `refund.amount_in_paise` (amount mismatch is logged and ignored with 200 OK).
+    - Idempotent: repeat events return 200 OK without double side-effects.
+    - Transitions `Refund.status` -> `'processed'`, `Payment.status` -> `'refunded'`, `application.payment_status` -> `'refunded'`, `delivery.payment_status` -> `'refunded'`.
+    - Dispatches refund confirmation notice and email to adopter via `transaction.on_commit`.
+  - **`refund.failed`**:
+    - Matches active `Refund` record by `razorpay_refund_id`.
+    - Flags refund as `status = 'failed'` with `failure_reason` for retry command.
+  - **Unknown Orders or Refunds**:
+    - Returns `200 OK` ignored (`{"status": "ignored", "detail": "Refund not found."}`) with no changes.
 - **Headers**:
   `X-Razorpay-Signature: <hmac_sha256_hex>`
 - **Responses**:
   - `200 OK`: Event processed or safely ignored.
   - `400 Bad Request`: Invalid signature or malformed payload.
+
+---
 
 ### 1.1 Cancel Delivery Task
 - **URL**: `POST /api/v1/shelter/deliveries/{id}/cancel/` (Legacy alias: `POST /api/deliveries/{id}/cancel/`)
@@ -436,6 +447,97 @@ This document specifies the canonical and legacy API contracts for the pet deliv
   - `409 Conflict`:
     - Cash has already been collected by driver (`{"code": "cash_collected"}`).
     - Online payment has already been captured for this application (`{"code": "refund_required"}`).
+
+---
+
+### 1.2 Cancel and Refund Delivery Task (Exit Path for Paid Applications)
+- **URL**: `POST /api/v1/shelter/deliveries/{id}/cancel-and-refund/`
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: Owning verified shelter staff or platform administrator
+- **Rate Limit**: 10 requests / minute (`refund`)
+- **Request Body**:
+  ```json
+  {
+    "reason": "Adopter requested cancellation due to sudden relocation."
+  }
+  ```
+  *(Note: `reason` is required, trimmed, and cannot exceed 500 characters).*
+- **Preconditions & Rules**:
+  - Allowed from delivery status `assigned`, `out_for_delivery`, or `failed`, with a captured online payment.
+  - Full refunds only: no partial amount parameter exists.
+  - Blocked if delivery is `delivered`: returns `409 Conflict` `{"code": "delivery_completed", "detail": "Cannot cancel completed delivery."}`.
+  - Blocked if cash has already been collected: returns `409 Conflict` `{"code": "cash_collected", "detail": "Cannot cancel delivery after cash has been collected. Please reconcile with driver."}`.
+  - Idempotency: If the payment was already refunded, returns `200 OK` with `{"code": "already_refunded"}`.
+  - Atomic Execution:
+    1. Row-lock Payment and create `Refund` in `'created'`.
+    2. Release locks, then call Razorpay refund API (`client.payment.refund`) for the full captured amount with idempotency key.
+    3. If gateway call fails, returns `502 Bad Gateway` `{"code": "refund_failed"}`; state remains untouched and retry is allowed.
+    4. Upon gateway success, atomically: delivery transitions to `'failed'` (if active), driver is freed (`is_available = True`), application is `'cancelled'`, pet is reset to `'available'` (competing applications stay rejected), payment/application/delivery payment status becomes `'refunded'`.
+    5. Dispatches email and in-app notifications to adopter via `transaction.on_commit`.
+- **Responses**:
+  - `200 OK`: Cancelled and refund issued successfully (or already refunded).
+    ```json
+    {
+      "status": "refunded",
+      "code": "success",
+      "detail": "Delivery cancelled and refund processed successfully.",
+      "refund_id": "7fa85f64-5717-4562-b3fc-2c963f66afa9",
+      "delivery_id": "5fa85f64-5717-4562-b3fc-2c963f66afa8",
+      "application_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "amount_refunded_paise": 25000
+    }
+    ```
+  - `400 Bad Request`: Missing or invalid reason (`{"code": "validation_error"}`).
+  - `403 Forbidden`: Non-owner shelter, unverified shelter, or adopter.
+  - `404 Not Found`: Delivery not found.
+  - `409 Conflict`:
+    - `{"code": "delivery_completed"}`: Delivery is already delivered.
+    - `{"code": "no_captured_payment"}`: No captured online payment found.
+    - `{"code": "cash_collected"}`: Cash collected on COD; reconcile manually.
+    - `{"code": "refund_in_progress"}`: Another refund call is currently in flight.
+  - `502 Bad Gateway`:
+    - `{"code": "refund_failed"}`: Gateway call failed; retry allowed.
+
+---
+
+### 1.3 Reconcile COD Cash with Shelter
+- **URL**: `POST /api/v1/shelter/deliveries/{id}/reconcile-cash/`
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: Owning verified shelter staff or platform administrator
+- **Preconditions & Rules**:
+  - Requires `payment_method == 'cod'`, status `delivered`, and `cash_collected > 0`.
+  - Idempotent: Repeat calls return `200 OK` with `{"code": "already_settled"}`.
+  - Under `select_for_update`: sets `is_cash_settled_with_shelter = True`, `cash_settled_at = now()`, `cash_settled_by = request.user`.
+- **Responses**:
+  - `200 OK`: Cash reconciled successfully.
+    ```json
+    {
+      "status": "reconciled",
+      "code": "success",
+      "detail": "Cash collected reconciled and settled with shelter successfully.",
+      "delivery_id": "5fa85f64-5717-4562-b3fc-2c963f66afa8",
+      "is_cash_settled_with_shelter": true,
+      "cash_settled_at": "2026-10-25T12:00:00Z",
+      "cash_settled_by": 12,
+      "cash_collected": "150.00"
+    }
+    ```
+  - `403 Forbidden`: Other shelter or non-verified shelter.
+  - `404 Not Found`: Delivery not found.
+  - `409 Conflict`:
+    - `{"code": "cash_not_collected"}`: No cash collected (`cash_collected <= 0`).
+    - `{"code": "invalid_state"}`: Delivery is not delivered or not a COD task.
+
+---
+
+### 1.4 List Shelter Deliveries
+- **URL**: `GET /api/v1/shelter/deliveries/?cash_unsettled=true`
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Permissions**: Owning verified shelter staff or platform administrator
+- **Query Parameters**:
+  - `cash_unsettled` (`true` | `false`, optional): Filters deliveries by `is_cash_settled_with_shelter`.
+- **Responses**:
+  - `200 OK`: Array of `ShelterDeliverySerializer` objects including `cash_collected`, `is_cash_settled_with_shelter`, `cash_settled_at`, and `cash_settled_by`.
 
 ---
 

@@ -17,6 +17,7 @@ from django.conf import settings
 from django.core import mail
 import threading
 from django.test import TestCase, TransactionTestCase
+from django.db import transaction
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 from rest_framework import status
