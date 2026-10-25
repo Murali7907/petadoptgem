@@ -468,12 +468,11 @@ This document specifies the canonical and legacy API contracts for the pet deliv
   - Blocked if delivery is `delivered`: returns `409 Conflict` `{"code": "delivery_completed", "detail": "Cannot cancel completed delivery."}`.
   - Blocked if cash has already been collected: returns `409 Conflict` `{"code": "cash_collected", "detail": "Cannot cancel delivery after cash has been collected. Please reconcile with driver."}`.
   - Idempotency: If the payment was already refunded, returns `200 OK` with `{"code": "already_refunded"}`.
-  - Atomic Execution:
-    1. Row-lock Payment and create `Refund` in `'created'`.
-    2. Release locks, then call Razorpay refund API (`client.payment.refund`) for the full captured amount with idempotency key.
-    3. If gateway call fails, returns `502 Bad Gateway` `{"code": "refund_failed"}`; state remains untouched and retry is allowed.
-    4. Upon gateway success, atomically: delivery transitions to `'failed'` (if active), driver is freed (`is_available = True`), application is `'cancelled'`, pet is reset to `'available'` (competing applications stay rejected), payment/application/delivery payment status becomes `'refunded'`.
-    5. Dispatches email and in-app notifications to adopter via `transaction.on_commit`.
+  - Execution Order and Locking Hierarchy:
+    1. **Phase 1 (One transaction under `select_for_update`)**: Lock the delivery row (`PetDelivery`) and Payment row (`Payment`). Validate state: if already delivered, return `409 Conflict` `{"code": "delivery_completed"}` BEFORE any Razorpay call; if COD cash collected, return `409 Conflict` `{"code": "cash_collected"}`; if already refunded, return `200 OK` idempotently; if no captured online payment or refund already in progress, return `409 Conflict`. Set delivery to `'failed'` (if active), free the assigned driver (`is_available = True`), keep pet in `'pending'`, schedule driver cancellation notification on commit, and COMMIT. *Guarantee*: Immediately blocks concurrent pickup and doorstep OTP verification gates because delivery is now `'failed'`.
+    2. **Phase 2 (Gateway Call with NO locks held)**: Invoke `issue_refund(payment, ...)` via Razorpay gateway. If the refund API fails: return `502 Bad Gateway` `{"code": "refund_failed"}`; delivery stays `'failed'`, driver remains freed, application stays `'approved'`, pet stays `'pending'`. Calling the endpoint again from `'failed'` completes the flow with exactly one refund.
+    3. **Phase 3 (One transaction under `select_for_update`)**: Lock the application (`AdoptionApplication`) and pet (`Pet`). Re-check application is still `'approved'`. Set application `'cancelled'` and pet `'available'`. COMMIT.
+    4. Adopter notification dispatched once per refund via `transaction.on_commit` inside refund service; driver notification dispatched on commit if active delivery was cancelled.
 - **Responses**:
   - `200 OK`: Cancelled and refund issued successfully (or already refunded).
     ```json

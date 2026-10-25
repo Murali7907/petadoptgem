@@ -15,8 +15,10 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
+from django.db.models import Q
 from rest_framework.exceptions import ValidationError, APIException
-from .models import PetDelivery, Payment, PaymentStatus
+from .models import PetDelivery, Payment, PaymentStatus, Refund, RefundStatus, RefundSource
+from apps.pets.models import Pet
 
 
 class ConflictError(APIException):
@@ -27,6 +29,7 @@ class ConflictError(APIException):
 from .otp import generate_otp, check_otp, hash_otp, issue_otp
 from apps.accounts.models import DeliveryProfile
 from apps.adoptions.models import AdoptionApplication
+from .payment_services import issue_refund, RefundFailedError
 
 from dataclasses import dataclass
 from enum import Enum
@@ -906,4 +909,158 @@ def cancel_delivery_by_shelter(delivery: PetDelivery, user) -> dict:
         }
 
 
+def cancel_and_refund_service(delivery: PetDelivery, user, reason: str) -> dict:
+    """
+    Authoritative service to cancel a delivery and issue a full refund for online payment.
 
+    Rows locked at each step and timing of Razorpay call:
+    - Step 1 (Transaction 1):
+      * PetDelivery (select_for_update)
+      * Payment (select_for_update)
+      * DeliveryProfile (driver) (select_for_update, if driver assigned)
+      * Pet (update to 'pending' if not already, keeping it reserved during failure phase)
+      (Driver is freed, delivery marked 'failed', transaction committed).
+      --> Immediately blocks concurrent pickup and doorstep OTP verification gates!
+    - Step 2:
+      * NO database row locks held.
+      * Razorpay API call: issue_refund(payment, reason=reason, initiated_by=user, source=RefundSource.MANUAL).
+      * If gateway fails: raises RefundFailedError. Delivery stays 'failed', application stays 'approved', pet stays 'pending'.
+    - Step 3 (Transaction 2):
+      * AdoptionApplication (select_for_update)
+      * Pet (select_for_update)
+      (Re-checks application is still 'approved', transitions application to 'cancelled' and pet to 'available').
+    """
+    # Step 1: In one transaction, lock delivery row and Payment row, validate state, fail delivery, free driver, commit
+    driver_user_to_notify = None
+    with transaction.atomic():
+        locked_deliv = PetDelivery.objects.select_for_update().get(id=delivery.id)
+
+        # Pre-check: If already delivered, return 409 delivery_completed BEFORE any Razorpay call
+        if locked_deliv.status == 'delivered':
+            raise ConflictError({
+                "code": "delivery_completed",
+                "detail": "Cannot cancel completed delivery."
+            })
+
+        # COD with cash collected stays blocked
+        if locked_deliv.cash_collected and locked_deliv.cash_collected > Decimal('0.00'):
+            raise ConflictError({
+                "code": "cash_collected",
+                "detail": "Cannot cancel delivery after cash has been collected. Please reconcile with driver."
+            })
+
+        # Find and lock online payment
+        payment = Payment.objects.select_for_update().filter(
+            Q(delivery=locked_deliv) | Q(application=locked_deliv.application)
+        ).exclude(payment_method='cod').order_by('-created_at').first()
+
+        if not payment or payment.status not in (PaymentStatus.CAPTURED, PaymentStatus.PAID, PaymentStatus.REFUNDED, 'captured', 'paid', 'refunded'):
+            raise ConflictError({
+                "code": "no_captured_payment",
+                "detail": "No captured online payment found for this delivery."
+            })
+
+        # Idempotency check: if already refunded
+        if payment.status in (PaymentStatus.REFUNDED, 'refunded'):
+            refund = Refund.objects.filter(payment=payment, status=RefundStatus.PROCESSED).first()
+            return {
+                "status": "refunded",
+                "code": "already_refunded",
+                "detail": "Delivery payment has already been refunded.",
+                "refund_id": str(refund.public_id) if refund else None,
+                "delivery_id": str(locked_deliv.public_id),
+                "application_id": str(locked_deliv.application.public_id) if locked_deliv.application else None,
+                "amount_refunded_paise": refund.amount_in_paise if refund else payment.amount_in_paise,
+            }
+
+        # Check delivery status allowed: assigned, out_for_delivery, failed
+        if locked_deliv.status not in ['assigned', 'out_for_delivery', 'failed']:
+            raise ConflictError({
+                "code": "invalid_state",
+                "detail": f"Cannot cancel and refund delivery in '{locked_deliv.status}' status. Only assigned, out_for_delivery, or failed deliveries are allowed."
+            })
+
+        # Check existing active refund
+        existing_active_refund = Refund.objects.filter(payment=payment).exclude(status=RefundStatus.FAILED).first()
+        if existing_active_refund:
+            if existing_active_refund.status == RefundStatus.PROCESSED:
+                return {
+                    "status": "refunded",
+                    "code": "already_refunded",
+                    "detail": "Delivery payment has already been refunded.",
+                    "refund_id": str(existing_active_refund.public_id),
+                    "delivery_id": str(locked_deliv.public_id),
+                    "application_id": str(locked_deliv.application.public_id) if locked_deliv.application else None,
+                    "amount_refunded_paise": existing_active_refund.amount_in_paise,
+                }
+            elif existing_active_refund.status in [RefundStatus.CREATED, RefundStatus.PROCESSING]:
+                raise ConflictError({
+                    "code": "refund_in_progress",
+                    "detail": "A refund is already in progress for this payment."
+                })
+
+        # Set delivery 'failed' (if active) and free driver
+        if locked_deliv.status in ['assigned', 'out_for_delivery']:
+            locked_deliv.status = 'failed'
+            locked_deliv.save(update_fields=['status'])
+
+            if locked_deliv.driver_id:
+                driver = DeliveryProfile.objects.select_for_update().get(id=locked_deliv.driver_id)
+                driver.is_available = True
+                driver.save(update_fields=['is_available'])
+                if driver.user:
+                    driver_user_to_notify = driver.user
+
+        # Keep pet status pending during failure phase
+        if locked_deliv.application and locked_deliv.application.pet:
+            pet = locked_deliv.application.pet
+            if pet.status != 'pending':
+                pet.status = 'pending'
+                pet.save(update_fields=['status'])
+
+        if driver_user_to_notify:
+            def notify_driver():
+                from apps.accounts.models import Notification
+                try:
+                    Notification.objects.create(
+                        recipient=driver_user_to_notify,
+                        title="Delivery Cancelled",
+                        message="Your active delivery assignment has been cancelled by the shelter.",
+                        notification_type='delivery'
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to create driver cancellation notice: {e}")
+            transaction.on_commit(notify_driver)
+
+    # Step 2: Call issue_refund with NO locks held
+    refund = issue_refund(payment, reason=reason, initiated_by=user, source=RefundSource.MANUAL)
+
+    if refund.status in [RefundStatus.CREATED, RefundStatus.PROCESSING]:
+        raise ConflictError({
+            "code": "refund_in_progress",
+            "detail": "A refund is already in progress for this payment."
+        })
+
+    # Step 3: In one transaction: lock the application and pet, re-check approved, set cancelled & available
+    with transaction.atomic():
+        app_id = delivery.application_id
+        if app_id:
+            locked_app = AdoptionApplication.objects.select_for_update().get(id=app_id)
+            if locked_app.status == 'approved':
+                locked_app.status = 'cancelled'
+                locked_app.save(update_fields=['status', 'updated_at'])
+
+                if locked_app.pet_id:
+                    locked_pet = Pet.objects.select_for_update().get(id=locked_app.pet_id)
+                    locked_pet.status = 'available'
+                    locked_pet.save(update_fields=['status'])
+
+    return {
+        "status": "refunded",
+        "code": "success",
+        "detail": "Delivery cancelled and refund processed successfully.",
+        "refund_id": str(refund.public_id),
+        "delivery_id": str(delivery.public_id),
+        "application_id": str(delivery.application.public_id) if delivery.application else None,
+        "amount_refunded_paise": refund.amount_in_paise,
+    }

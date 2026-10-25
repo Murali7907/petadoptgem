@@ -1038,7 +1038,62 @@ Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medic
 
 ---
 
+## 16. Milestone 9b — Cancellation Race Protection, Gateway Reconciliation, Admin Retry & Evidence
+
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Spec approved and finalized.
+
+### 16.1 Task 1: Cancel-and-Refund Race & Exact Locking Order
+- **Required Order**:
+  1. **Phase 1 (Lock & Invalidate In-Flight Delivery)**:
+     - In one transaction under `select_for_update`: lock delivery and payment rows.
+     - Validate state: if already delivered, return 409 `delivery_completed` BEFORE any Razorpay call.
+     - If cash collected: return 409 `cash_collected`.
+     - If already refunded: return 200 idempotently.
+     - If payment not captured: return 409 `no_captured_payment`.
+     - Set delivery `status = 'failed'` (if active), free the driver (`is_available = True`), and commit.
+     - *Guarantee*: Immediately blocks concurrent pickup and doorstep OTP verification gates since delivery is now `'failed'`.
+  2. **Phase 2 (Gateway Refund Call)**:
+     - With NO database row locks held, invoke `issue_refund(payment, ...)`.
+     - Uses idempotency and pre-reconciliation with Razorpay.
+     - If the refund API fails: return HTTP 502 `{"code": "refund_failed"}`; delivery stays `failed`, application stays `approved`, pet stays `pending`.
+     - Calling the endpoint again from `failed` completes the flow with exactly one refund.
+  3. **Phase 3 (Lock Application & Release Pet)**:
+     - In one transaction under `select_for_update`: lock application and pet rows.
+     - Re-check application is still `'approved'`.
+     - Set application `'cancelled'` and pet `'available'`.
+- **Concurrency Guarantees**:
+  - Doorstep verify racing cancel-and-refund on an `out_for_delivery` task results in strictly one outcome: delivered with zero refund calls, or cancelled/refunded with verify returning 409.
+  - Two simultaneous cancel-and-refund calls result in exactly one Razorpay refund call.
+  - Assert `call_count` on mocked refund method in all race tests.
+
+### 16.2 Task 2: Gateway Reconcile & Webhook Payment Matching
+- **Razorpay SDK Idempotency & Header Analysis**:
+  - Inspect installed `razorpay` SDK for native idempotency support.
+- **Gateway Pre-Reconciliation**:
+  - Before calling refund for a `Refund` row in `'created'` or `'failed'` without a `razorpay_refund_id` (retry endpoint, retry_pending_refunds, late capture), query Razorpay for existing refunds for that payment using the SDK list method (`client.payment.refund.all(payment_id)` or `client.payment.all_refunds(payment_id)`).
+  - If a full refund already exists, adopt its ID and status and do not call refund again.
+- **Webhook Payment Fallback Matching**:
+  - For `refund.processed` and `refund.failed`, if `razorpay_refund_id` is unknown: match by `payment_id` in the payload entity to platform `Payment`.
+  - If exactly one active/non-failed `Refund` row exists without a `razorpay_refund_id`, attach the ID and apply the event. Otherwise log and return 200 with no change.
+
+### 16.3 Task 3: Retry Scheduling & Admin Action
+- **Config**: `REFUND_RETRY_AFTER_MINUTES` environment variable (default 10) utilized by `retry_pending_refunds`.
+- **Django Admin Action**: "Retry selected refunds" on `RefundAdmin` (platform admin only, calls idempotent refund service). Shows `status`, `reason`, `source`, `failure_reason`, and `age` in list.
+- **Documentation**: Document in `docs/backend_handoff.md` that retry is manual/scheduled, with cron, systemd timer, and Windows Task Scheduler examples at a 5-minute interval.
+- **Admin Stats Audit (Report Only)**: Identify integration points for failed/old-created refund metrics in admin dashboard stats without altering the endpoint.
+
+### 16.4 Task 4: Evidence & Audit
+- **Git Diff Audit**: Inspect `git diff --numstat befaf72 HEAD` for all test files, detailing modifications/deletions.
+- **Application Status Guard**: Comprehensive tests verifying that cancelling/rejecting/status-patching an application with a `'refunded'` payment is allowed, while `'captured'` and processing refunds remain blocked (409 `refund_required`).
+- **403/404 Permission Matrix**: Explicit tests verifying 403/404 responses for foreign shelters, unverified shelters, adopters, drivers, and anonymous users across cancel-and-refund and reconcile-cash.
+- **Notifications**: Adopter notified once per refund; driver notified on commit when their active delivery task is cancelled by cancel-and-refund.
+
+---
+
 *Last updated: 2026-10-25*
+
 
 
 

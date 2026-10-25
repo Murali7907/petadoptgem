@@ -3660,7 +3660,7 @@ class CancelAndRefundEndpointTests(TestCase):
 
     @patch('apps.logistics.payment_services.get_razorpay_client')
     def test_cancel_and_refund_gateway_failure_and_retry(self, mock_get_client):
-        """Gateway failure aborts state changes and returns 502, subsequent retry succeeds."""
+        """Gateway failure sets delivery 'failed', frees driver, keeps app approved and pet pending; retry succeeds."""
         mock_client = mock_get_client.return_value
         mock_client.payment.refund.side_effect = Exception("Gateway connection error")
 
@@ -3669,21 +3669,23 @@ class CancelAndRefundEndpointTests(TestCase):
 
         self.assertEqual(res.status_code, status.HTTP_502_BAD_GATEWAY)
         self.assertEqual(res.data['code'], 'refund_failed')
+        self.assertEqual(mock_client.payment.refund.call_count, 1)
 
-        # Verify nothing was mutated
+        # Under Milestone 9b: Phase 1 commits delivery 'failed' and frees driver before Phase 2 gateway call
         self.delivery.refresh_from_db()
-        self.assertEqual(self.delivery.status, 'assigned')
+        self.assertEqual(self.delivery.status, 'failed')
 
         self.driver.refresh_from_db()
-        self.assertFalse(self.driver.is_available)
+        self.assertTrue(self.driver.is_available)
 
+        # Application and pet remain untouched (approved and pending)
         self.application.refresh_from_db()
         self.assertEqual(self.application.status, 'approved')
 
         self.pet.refresh_from_db()
         self.assertEqual(self.pet.status, 'pending')
 
-        # Now mock gateway succeeding on retry
+        # Now mock gateway succeeding on retry from 'failed' status
         mock_client.payment.refund.side_effect = None
         mock_client.payment.refund.return_value = {
             'id': 'rfnd_retry_after_fail_789',
@@ -3694,6 +3696,7 @@ class CancelAndRefundEndpointTests(TestCase):
         res_retry = self.client.post(self.url, {'reason': 'Retry after gateway error'}, format='json')
         self.assertEqual(res_retry.status_code, status.HTTP_200_OK)
         self.assertEqual(res_retry.data['code'], 'success')
+        self.assertEqual(mock_client.payment.refund.call_count, 2)
 
         # Verify mutated on successful retry
         self.delivery.refresh_from_db()
@@ -3797,6 +3800,99 @@ class CancelAndRefundConcurrencyTests(TransactionTestCase):
         self.assertEqual(len(results), 2)
         status_codes = [r.status_code for r in results]
         self.assertIn(status.HTTP_200_OK, status_codes)
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_doorstep_verify_racing_cancel_and_refund(self, mock_get_client):
+        """
+        Doorstep verify racing cancel-and-refund on an out_for_delivery delivery gives
+        strictly one outcome:
+        - either delivered with zero refund calls,
+        - or cancelled and refunded with verify returning 409,
+        never both.
+        """
+        import threading
+        from django.db import connection
+        from apps.logistics.otp import issue_otp
+
+        # Set delivery to 'out_for_delivery'
+        self.delivery.status = 'out_for_delivery'
+        self.delivery.save(update_fields=['status'])
+
+        raw_otp = issue_otp(self.delivery, 'doorstep')
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_race_doorstep_cancel',
+            'amount': 15000,
+            'status': 'processed'
+        }
+
+        verify_url = f'/api/v1/deliveries/{self.delivery.public_id}/verify-doorstep/'
+        cancel_url = self.url
+
+        barrier = threading.Barrier(2)
+        results = {}
+        lock = threading.Lock()
+
+        def verify_worker():
+            try:
+                client = APIClient()
+                client.force_authenticate(user=self.driver_user)
+                barrier.wait(timeout=5)
+                res = client.post(verify_url, {'otp': raw_otp}, format='json')
+                with lock:
+                    results['verify'] = res
+            finally:
+                connection.close()
+
+        def cancel_worker():
+            try:
+                client = APIClient()
+                client.force_authenticate(user=self.shelter_user)
+                barrier.wait(timeout=5)
+                res = client.post(cancel_url, {'reason': 'Racing cancellation'}, format='json')
+                with lock:
+                    results['cancel'] = res
+            finally:
+                connection.close()
+
+        t1 = threading.Thread(target=verify_worker)
+        t2 = threading.Thread(target=cancel_worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        verify_res = results['verify']
+        cancel_res = results['cancel']
+
+        # Exactly one outcome, never both
+        if verify_res.status_code == status.HTTP_200_OK:
+            # Doorstep verification won the race
+            self.assertEqual(cancel_res.status_code, status.HTTP_409_CONFLICT)
+            self.assertEqual(cancel_res.data.get('code'), 'delivery_completed')
+            # ZERO refund calls must have been made
+            self.assertEqual(mock_client.payment.refund.call_count, 0)
+            self.delivery.refresh_from_db()
+            self.assertEqual(self.delivery.status, 'delivered')
+            self.application.refresh_from_db()
+            self.assertEqual(self.application.status, 'completed')
+            self.pet.refresh_from_db()
+            self.assertEqual(self.pet.status, 'adopted')
+        else:
+            # Cancel-and-refund won the race
+            self.assertEqual(cancel_res.status_code, status.HTTP_200_OK)
+            self.assertEqual(verify_res.status_code, status.HTTP_409_CONFLICT)
+            self.assertEqual(verify_res.data.get('code'), 'invalid_state')
+            # EXACTLY ONE refund call must have been made
+            self.assertEqual(mock_client.payment.refund.call_count, 1)
+            self.delivery.refresh_from_db()
+            self.assertEqual(self.delivery.status, 'failed')
+            self.application.refresh_from_db()
+            self.assertEqual(self.application.status, 'cancelled')
+            self.pet.refresh_from_db()
+            self.assertEqual(self.pet.status, 'available')
+
 
 
 class LateCaptureAndRefundCommandTests(TestCase):

@@ -73,6 +73,7 @@ from .services import (
     send_delivery_completed_notice,
     resolve_delivery_payment_status,
     cancel_delivery_by_shelter,
+    cancel_and_refund_service,
     ConflictError,
 )
 from .payment_services import (
@@ -332,123 +333,26 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
         reason = serializer.validated_data['reason']
 
-        # Blocked if delivery is completed
-        if delivery.status == 'delivered':
-            return Response({
-                "code": "delivery_completed",
-                "detail": "Cannot cancel completed delivery."
-            }, status=status.HTTP_409_CONFLICT)
-
-        # COD with cash collected stays blocked
-        if delivery.cash_collected and delivery.cash_collected > Decimal('0.00'):
-            return Response({
-                "code": "cash_collected",
-                "detail": "Cannot cancel delivery after cash has been collected. Please reconcile with driver."
-            }, status=status.HTTP_409_CONFLICT)
-
-        # Find online payment
-        payment = Payment.objects.filter(
-            Q(delivery=delivery) | Q(application=delivery.application)
-        ).exclude(payment_method='cod').order_by('-created_at').first()
-
-        # Check if already refunded (idempotency check)
-        if payment and (payment.status in (PaymentStatus.REFUNDED, 'refunded')):
-            refund = Refund.objects.filter(payment=payment, status=RefundStatus.PROCESSED).first()
-            return Response({
-                "status": "refunded",
-                "code": "already_refunded",
-                "detail": "Delivery payment has already been refunded.",
-                "refund_id": str(refund.public_id) if refund else None,
-                "delivery_id": str(delivery.public_id),
-                "application_id": str(delivery.application.public_id) if delivery.application else None,
-                "amount_refunded_paise": refund.amount_in_paise if refund else payment.amount_in_paise,
-            }, status=status.HTTP_200_OK)
-
-        # Check delivery status allowed: assigned, out_for_delivery, failed
-        if delivery.status not in ['assigned', 'out_for_delivery', 'failed']:
-            return Response({
-                "code": "invalid_state",
-                "detail": f"Cannot cancel and refund delivery in '{delivery.status}' status. Only assigned, out_for_delivery, or failed deliveries are allowed."
-            }, status=status.HTTP_409_CONFLICT)
-
-        if not payment or payment.status not in (PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid'):
-            return Response({
-                "code": "no_captured_payment",
-                "detail": "No captured online payment found for this delivery."
-            }, status=status.HTTP_409_CONFLICT)
-
-        # Check if refund already in progress
-        existing_active_refund = Refund.objects.filter(payment=payment).exclude(status=RefundStatus.FAILED).first()
-        if existing_active_refund:
-            if existing_active_refund.status == RefundStatus.PROCESSED:
-                return Response({
-                    "status": "refunded",
-                    "code": "already_refunded",
-                    "detail": "Delivery payment has already been refunded.",
-                    "refund_id": str(existing_active_refund.public_id),
-                    "delivery_id": str(delivery.public_id),
-                    "application_id": str(delivery.application.public_id) if delivery.application else None,
-                    "amount_refunded_paise": existing_active_refund.amount_in_paise,
-                }, status=status.HTTP_200_OK)
-            elif existing_active_refund.status in [RefundStatus.CREATED, RefundStatus.PROCESSING]:
-                return Response({
-                    "code": "refund_in_progress",
-                    "detail": "A refund is already in progress for this payment."
-                }, status=status.HTTP_409_CONFLICT)
-
-        # Issue refund via gateway
         try:
-            refund = issue_refund(payment, reason=reason, initiated_by=user, source=RefundSource.MANUAL)
-        except RefundFailedError:
+            result = cancel_and_refund_service(delivery, user, reason)
+            return Response(result, status=status.HTTP_200_OK)
+        except ConflictError as e:
+            if isinstance(e.detail, dict):
+                if "code" not in e.detail:
+                    e.detail["code"] = "invalid_state"
+                return Response(e.detail, status=status.HTTP_409_CONFLICT)
+            return Response({"code": "invalid_state", "detail": str(e.detail)}, status=status.HTTP_409_CONFLICT)
+        except RefundFailedError as e:
+            detail_msg = e.detail.get("detail", "Refund call to payment gateway failed.") if isinstance(e.detail, dict) else str(e.detail)
             return Response({
                 "code": "refund_failed",
-                "detail": "Refund call to payment gateway failed."
+                "detail": detail_msg
             }, status=status.HTTP_502_BAD_GATEWAY)
         except Exception as exc:
             return Response({
                 "code": "refund_failed",
                 "detail": f"Refund failed: {str(exc)}"
             }, status=status.HTTP_502_BAD_GATEWAY)
-
-        # If refund returned is still in progress (e.g. concurrent thread won Phase 1 lock)
-        if refund.status in [RefundStatus.CREATED, RefundStatus.PROCESSING]:
-            return Response({
-                "code": "refund_in_progress",
-                "detail": "A refund is already in progress for this payment."
-            }, status=status.HTTP_409_CONFLICT)
-
-        # In one transaction: delivery failed (if active), driver freed, application cancelled, pet 'available'
-        with transaction.atomic():
-            locked_deliv = PetDelivery.objects.select_for_update().get(id=delivery.id)
-            if locked_deliv.status in ['assigned', 'out_for_delivery']:
-                locked_deliv.status = 'failed'
-                locked_deliv.save(update_fields=['status'])
-
-            if locked_deliv.driver_id:
-                driver = DeliveryProfile.objects.select_for_update().get(id=locked_deliv.driver_id)
-                driver.is_available = True
-                driver.save(update_fields=['is_available'])
-
-            app = locked_deliv.application
-            if app:
-                locked_app = AdoptionApplication.objects.select_for_update().get(id=app.id)
-                locked_app.status = 'cancelled'
-                locked_app.save(update_fields=['status', 'updated_at'])
-
-                if locked_app.pet_id:
-                    locked_pet = Pet.objects.select_for_update().get(id=locked_app.pet_id)
-                    locked_pet.status = 'available'
-                    locked_pet.save(update_fields=['status'])
-
-        return Response({
-            "status": "refunded",
-            "code": "success",
-            "detail": "Delivery cancelled and refund processed successfully.",
-            "refund_id": str(refund.public_id),
-            "delivery_id": str(delivery.public_id),
-            "application_id": str(delivery.application.public_id) if delivery.application else None,
-            "amount_refunded_paise": refund.amount_in_paise,
-        }, status=status.HTTP_200_OK)
 
     @extend_schema(
         summary="Reconcile and settle collected COD cash with shelter",
