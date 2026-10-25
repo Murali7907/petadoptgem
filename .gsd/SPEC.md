@@ -995,6 +995,8 @@ Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medic
        - Set `application.status = 'cancelled'`.
        - Revert `pet.status = 'available'` (competing applications stay rejected).
     5. Return HTTP 200 with refund and delivery payload.
+  - **COD Cash Collected Manual Path**: If physical cash has already been collected by the driver (`cash_collected > 0`), automated cancel-and-refund is permanently blocked with HTTP 409 `{"code": "cash_collected"}`. Physical cash must be settled and refunded offline through direct manual shelter-driver-adopter coordination; programmatic refund does not reverse physical currency exchange.
+
 
 ### 15.3 Task 3: Late Capture Recovery & Management Command
 - **Late Capture Hook in `mark_payment_captured`**:

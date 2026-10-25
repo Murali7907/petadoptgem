@@ -136,6 +136,7 @@ REST_FRAMEWORK = {
         'auth_register': os.getenv('AUTH_REGISTER_THROTTLE_RATE', '5/min'),
         'auth_refresh': os.getenv('AUTH_REFRESH_THROTTLE_RATE', '30/min'),
         'pets_geo': os.getenv('PETS_GEO_THROTTLE_RATE', '30/min'),
+        'refund': os.getenv('REFUND_THROTTLE_RATE', '10/min'),
     },
 }
 

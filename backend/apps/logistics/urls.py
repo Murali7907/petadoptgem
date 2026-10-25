@@ -72,5 +72,8 @@ urlpatterns = [
     path('shelter/deliveries/<uuid:public_id>/cancel/', ShelterDeliveryViewSet.as_view({'post': 'cancel'}), name='delivery-cancel-uuid'),
     path('<str:id>/cancel/', ShelterDeliveryViewSet.as_view({'post': 'cancel'}), name='delivery-cancel-legacy'),
     path('<uuid:public_id>/cancel/', ShelterDeliveryViewSet.as_view({'post': 'cancel'}), name='delivery-cancel-legacy-uuid'),
+    # POST /api/v1/shelter/deliveries/<id>/cancel-and-refund/
+    path('shelter/deliveries/<str:id>/cancel-and-refund/', ShelterDeliveryViewSet.as_view({'post': 'cancel_and_refund'}), name='delivery-cancel-and-refund'),
+    path('shelter/deliveries/<uuid:public_id>/cancel-and-refund/', ShelterDeliveryViewSet.as_view({'post': 'cancel_and_refund'}), name='delivery-cancel-and-refund-uuid'),
     path('', include(router.urls)),
 ]

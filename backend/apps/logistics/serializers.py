@@ -465,5 +465,20 @@ class OTPInvalidErrorResponseSerializer(serializers.Serializer):
     attempts_remaining = serializers.IntegerField(help_text="Remaining failed attempts before lockout")
 
 
+class CancelAndRefundRequestSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=500, required=True, allow_blank=False, trim_whitespace=True)
+
+
+class CancelAndRefundResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    code = serializers.CharField()
+    detail = serializers.CharField()
+    refund_id = serializers.CharField(allow_null=True)
+    delivery_id = serializers.CharField()
+    application_id = serializers.CharField(allow_null=True)
+    amount_refunded_paise = serializers.IntegerField()
+
+
+
 
 

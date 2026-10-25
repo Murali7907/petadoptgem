@@ -3393,6 +3393,411 @@ class RefundLedgerAndServiceTests(APITestCase):
         self.assertNotEqual(success_refund.id, failed_refund.id)
 
 
+class CancelAndRefundEndpointTests(TestCase):
+    """Milestone 9 Task 2: Shelter Delivery Cancel and Refund Endpoint Tests."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.shelter_user = User.objects.create_user(
+            username='owning_shelter_mgr',
+            email='owning_shelter@test.com',
+            role='shelter'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.shelter_user,
+            organization_name='Happy Paws Shelter',
+            pickup_address='123 Shelter Way',
+            is_verified=True
+        )
+
+        self.unverified_shelter_user = User.objects.create_user(
+            username='unverified_shelter_mgr',
+            email='unverified_shelter@test.com',
+            role='shelter'
+        )
+        self.unverified_shelter = ShelterProfile.objects.create(
+            user=self.unverified_shelter_user,
+            organization_name='Unverified Paws Shelter',
+            pickup_address='456 Unverified Way',
+            is_verified=False
+        )
+
+        self.other_shelter_user = User.objects.create_user(
+            username='other_shelter_mgr',
+            email='other_shelter@test.com',
+            role='shelter'
+        )
+        self.other_shelter = ShelterProfile.objects.create(
+            user=self.other_shelter_user,
+            organization_name='Other Paws Shelter',
+            pickup_address='789 Other Way',
+            is_verified=True
+        )
+
+        self.admin_user = User.objects.create_user(
+            username='admin_boss',
+            email='admin@test.com',
+            role='admin',
+            is_staff=True
+        )
+
+        self.adopter = User.objects.create_user(
+            username='adopter_john',
+            email='john@test.com',
+            role='adopter'
+        )
+
+        self.driver_user = User.objects.create_user(
+            username='speedy_driver',
+            email='driver@test.com',
+            role='delivery'
+        )
+        self.driver = DeliveryProfile.objects.create(
+            user=self.driver_user,
+            shelter=self.shelter,
+            is_available=False,
+            vehicle_type='two_wheeler',
+            vehicle_number='KA01AB1234'
+        )
+
+        self.pet = Pet.objects.create(
+            shelter=self.shelter,
+            name='Buddy',
+            species='dog',
+            breed='Golden Retriever',
+            age_months=12,
+            status='pending'
+        )
+
+        self.application = AdoptionApplication.objects.create(
+            pet=self.pet,
+            applicant=self.adopter,
+            living_situation='House with yard',
+            contact_phone='9998887776',
+            status='approved',
+            total_amount=Decimal('250.00'),
+            payment_status='paid'
+        )
+
+        self.competing_app = AdoptionApplication.objects.create(
+            pet=self.pet,
+            applicant=self.other_shelter_user,
+            living_situation='Apartment',
+            contact_phone='9998887775',
+            status='rejected',
+            total_amount=Decimal('250.00'),
+            payment_status='unpaid'
+        )
+
+        self.delivery = PetDelivery.objects.create(
+            application=self.application,
+            driver=self.driver,
+            status='assigned',
+            payment_status='paid'
+        )
+
+        self.payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount=Decimal('250.00'),
+            amount_in_paise=25000,
+            status=PaymentStatus.CAPTURED,
+            payment_method='razorpay',
+            razorpay_order_id='order_cr_test_123',
+            razorpay_payment_id='pay_cr_test_456'
+        )
+        self.url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel-and-refund/'
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_cancel_and_refund_success_flow(self, mock_get_client):
+        """Owning verified shelter cancels and refunds active delivery, updating state and freeing resources."""
+        mock_client = mock_get_client.return_value
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_cr_flow_123',
+            'amount': 25000,
+            'status': 'processed'
+        }
+
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(self.url, {'reason': 'Adopter requested immediate cancellation'}, format='json')
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['code'], 'success')
+        self.assertEqual(res.data['status'], 'refunded')
+        self.assertEqual(res.data['amount_refunded_paise'], 25000)
+
+        # Verify state changes
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'failed')
+
+        self.driver.refresh_from_db()
+        self.assertTrue(self.driver.is_available)
+
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.status, 'cancelled')
+        self.assertEqual(self.application.payment_status, 'refunded')
+
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'available')
+
+        self.competing_app.refresh_from_db()
+        self.assertEqual(self.competing_app.status, 'rejected')
+
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, PaymentStatus.REFUNDED)
+
+        from apps.logistics.models import Refund, RefundStatus
+        refund = Refund.objects.filter(payment=self.payment).first()
+        self.assertIsNotNone(refund)
+        self.assertEqual(refund.status, RefundStatus.PROCESSED)
+        self.assertEqual(refund.amount_in_paise, 25000)
+        self.assertEqual(refund.razorpay_refund_id, 'rfnd_cr_flow_123')
+
+        # Idempotency: repeat call returns 200 with code already_refunded
+        res_repeat = self.client.post(self.url, {'reason': 'Repeat call'}, format='json')
+        self.assertEqual(res_repeat.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_repeat.data['code'], 'already_refunded')
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_cancel_and_refund_admin_allowed(self, mock_get_client):
+        """Platform admin can cancel and refund deliveries across any shelter."""
+        mock_client = mock_get_client.return_value
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_admin_flow_456',
+            'amount': 25000,
+            'status': 'processed'
+        }
+
+        self.client.force_authenticate(user=self.admin_user)
+        res = self.client.post(self.url, {'reason': 'Admin policy cancellation'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['code'], 'success')
+
+    def test_cancel_and_refund_permissions_enforcement(self):
+        """Only owning verified shelter or admin can cancel-and-refund; others rejected."""
+        # 1. Foreign shelter
+        self.client.force_authenticate(user=self.other_shelter_user)
+        res_foreign = self.client.post(self.url, {'reason': 'Wrong shelter'}, format='json')
+        self.assertEqual(res_foreign.status_code, status.HTTP_403_FORBIDDEN)
+
+        # 2. Unverified shelter
+        self.client.force_authenticate(user=self.unverified_shelter_user)
+        res_unverified = self.client.post(self.url, {'reason': 'Unverified'}, format='json')
+        self.assertEqual(res_unverified.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_unverified.data.get('code'), 'shelter_not_verified')
+
+        # 3. Adopter
+        self.client.force_authenticate(user=self.adopter)
+        res_adopter = self.client.post(self.url, {'reason': 'Adopter attempt'}, format='json')
+        self.assertEqual(res_adopter.status_code, status.HTTP_403_FORBIDDEN)
+
+        # 4. Anonymous
+        self.client.force_authenticate(user=None)
+        res_anon = self.client.post(self.url, {'reason': 'Anon attempt'}, format='json')
+        self.assertEqual(res_anon.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_cancel_and_refund_validation_errors(self):
+        """Missing or oversized reason returns 400 validation error."""
+        self.client.force_authenticate(user=self.shelter_user)
+
+        # Empty reason
+        res_empty = self.client.post(self.url, {'reason': ''}, format='json')
+        self.assertEqual(res_empty.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Reason > 500 chars
+        res_long = self.client.post(self.url, {'reason': 'A' * 501}, format='json')
+        self.assertEqual(res_long.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cancel_and_refund_blocks_delivered_status(self):
+        """Cannot cancel completed (delivered) delivery."""
+        self.delivery.status = 'delivered'
+        self.delivery.delivered_at = timezone.now()
+        self.delivery.save()
+
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(self.url, {'reason': 'Delivery completed already'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data['code'], 'delivery_completed')
+
+    def test_cancel_and_refund_blocks_cash_collected(self):
+        """Cannot cancel delivery after cash has been collected."""
+        self.delivery.cash_collected = Decimal('250.00')
+        self.delivery.save()
+
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(self.url, {'reason': 'Cash collected already'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data['code'], 'cash_collected')
+
+    def test_cancel_and_refund_blocks_no_captured_payment(self):
+        """Cannot refund when payment is not captured."""
+        self.payment.status = 'created'
+        self.payment.save()
+
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(self.url, {'reason': 'Payment not captured'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data['code'], 'no_captured_payment')
+
+    def test_cancel_and_refund_blocks_refund_in_progress(self):
+        """Returns 409 refund_in_progress when an active non-failed refund already exists."""
+        from apps.logistics.models import Refund, RefundStatus
+        Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=25000,
+            status=RefundStatus.CREATED,
+            reason="In progress refund"
+        )
+
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(self.url, {'reason': 'Parallel request'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data['code'], 'refund_in_progress')
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_cancel_and_refund_gateway_failure_and_retry(self, mock_get_client):
+        """Gateway failure aborts state changes and returns 502, subsequent retry succeeds."""
+        mock_client = mock_get_client.return_value
+        mock_client.payment.refund.side_effect = Exception("Gateway connection error")
+
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(self.url, {'reason': 'Test gateway failure'}, format='json')
+
+        self.assertEqual(res.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertEqual(res.data['code'], 'refund_failed')
+
+        # Verify nothing was mutated
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'assigned')
+
+        self.driver.refresh_from_db()
+        self.assertFalse(self.driver.is_available)
+
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.status, 'approved')
+
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'pending')
+
+        # Now mock gateway succeeding on retry
+        mock_client.payment.refund.side_effect = None
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_retry_after_fail_789',
+            'amount': 25000,
+            'status': 'processed'
+        }
+
+        res_retry = self.client.post(self.url, {'reason': 'Retry after gateway error'}, format='json')
+        self.assertEqual(res_retry.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_retry.data['code'], 'success')
+
+        # Verify mutated on successful retry
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'failed')
+        self.driver.refresh_from_db()
+        self.assertTrue(self.driver.is_available)
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.status, 'cancelled')
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'available')
+
+
+class CancelAndRefundConcurrencyTests(TransactionTestCase):
+    """Milestone 9: Concurrency test ensuring simultaneous cancel-and-refund makes exactly 1 Razorpay call."""
+
+    def setUp(self):
+        super().setUp()
+        self.shelter_user = User.objects.create_user(
+            username='conc_refund_shelter', email='crs@test.com', role='shelter'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.shelter_user, organization_name='CRS Shelter', pickup_address='100 Conc St', is_verified=True
+        )
+        self.driver_user = User.objects.create_user(
+            username='conc_refund_driver', email='crd@test.com', role='delivery'
+        )
+        self.driver = DeliveryProfile.objects.create(
+            user=self.driver_user, shelter=self.shelter, is_available=False, vehicle_type='two_wheeler', vehicle_number='KA-02-C-1111'
+        )
+        self.adopter = User.objects.create_user(
+            username='conc_refund_adopter', email='cra@test.com', role='adopter'
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter, name='ConcPet', species='dog', breed='Pug', age_months=6, status='pending'
+        )
+        self.application = AdoptionApplication.objects.create(
+            pet=self.pet,
+            applicant=self.adopter,
+            living_situation='Apartment',
+            contact_phone='9888877777',
+            status='approved',
+            total_amount=Decimal('150.00'),
+            payment_status='paid'
+        )
+        self.delivery = PetDelivery.objects.create(
+            application=self.application,
+            driver=self.driver,
+            status='assigned',
+            payment_status='paid'
+        )
+        self.payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount=Decimal('150.00'),
+            amount_in_paise=15000,
+            status=PaymentStatus.CAPTURED,
+            payment_method='razorpay',
+            razorpay_order_id='order_conc_rfnd_1',
+            razorpay_payment_id='pay_conc_rfnd_1'
+        )
+        self.url = f'/api/v1/shelter/deliveries/{self.delivery.public_id}/cancel-and-refund/'
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_two_simultaneous_cancel_and_refund_makes_exactly_one_gateway_call(self, mock_get_client):
+        import threading
+        from django.db import connection
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_conc_single_call',
+            'amount': 15000,
+            'status': 'processed'
+        }
+
+        barrier = threading.Barrier(2)
+        results = []
+        lock = threading.Lock()
+
+        def worker():
+            try:
+                client = APIClient()
+                client.force_authenticate(user=self.shelter_user)
+                barrier.wait(timeout=5)
+                res = client.post(self.url, {'reason': 'Simultaneous cancellation'}, format='json')
+                with lock:
+                    results.append(res)
+            finally:
+                connection.close()
+
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        # Assert exactly one call was made to Razorpay
+        self.assertEqual(mock_client.payment.refund.call_count, 1)
+
+        # Both returned valid responses
+        self.assertEqual(len(results), 2)
+        status_codes = [r.status_code for r in results]
+        self.assertIn(status.HTTP_200_OK, status_codes)
+
+
+
+
 
 
 

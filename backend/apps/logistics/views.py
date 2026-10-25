@@ -17,13 +17,17 @@ from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from django.db.models import Q
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import ValidationError, NotFound
 from rest_framework.throttling import ScopedRateThrottle
 
 from drf_spectacular.utils import extend_schema, OpenApiTypes, OpenApiResponse
 
-from .models import PetDelivery, DeliveryLocationPing, Payment, PaymentStatus
+from .models import (
+    PetDelivery, DeliveryLocationPing, Payment, PaymentStatus,
+    Refund, RefundStatus, RefundSource
+)
 from .permissions import IsShelterForDelivery, IsAssignedDeliveryDriver, IsDeliveryParticipant
 from apps.accounts.permissions import IsVerifiedShelter
 from .serializers import (
@@ -49,7 +53,9 @@ from .serializers import (
     CollectCashResponseSerializer,
     DeliveryCancelResponseSerializer,
     ErrorResponseSerializer,
-    OTPInvalidErrorResponseSerializer
+    OTPInvalidErrorResponseSerializer,
+    CancelAndRefundRequestSerializer,
+    CancelAndRefundResponseSerializer,
 )
 from .otp import check_otp, issue_otp
 from .services import (
@@ -71,10 +77,13 @@ from .services import (
 from .payment_services import (
     create_razorpay_order,
     verify_razorpay_payment,
-    process_razorpay_webhook
+    process_razorpay_webhook,
+    issue_refund,
+    RefundFailedError,
 )
 from apps.accounts.models import DeliveryProfile, ShelterProfile
 from apps.adoptions.models import AdoptionApplication
+from apps.pets.models import Pet
 
 logger = logging.getLogger(__name__)
 
@@ -99,13 +108,15 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
     lookup_field = 'public_id'
 
     def get_permissions(self):
-        if self.action in ['assign', 'reissue_otp', 'cancel']:
+        if self.action in ['assign', 'reissue_otp', 'cancel', 'cancel_and_refund', 'reconcile_cash']:
             return [IsAuthenticated(), IsVerifiedShelter()]
         return [IsAuthenticated()]
 
     def get_throttles(self):
         if self.action == 'cancel':
             self.throttle_scope = 'shelter_cancel'
+        elif self.action == 'cancel_and_refund':
+            self.throttle_scope = 'refund'
         return super().get_throttles()
 
     def get_shelter_profile(self):
@@ -265,6 +276,155 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
                     e.detail["code"] = "validation_error"
                 return Response(e.detail, status=status.HTTP_400_BAD_REQUEST)
             return Response({"code": "validation_error", "detail": str(e.detail)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @extend_schema(
+        summary="Cancel delivery and refund captured online payment",
+        description="Owning verified shelter or platform admin cancels an active/failed delivery and refunds the captured online payment. Returns 200 idempotently if already refunded.",
+        request=CancelAndRefundRequestSerializer,
+        responses={
+            200: CancelAndRefundResponseSerializer,
+            400: ErrorResponseSerializer,
+            403: OpenApiResponse(description="Unauthorized, foreign shelter, or unverified shelter"),
+            404: OpenApiResponse(description="Delivery not found"),
+            409: ErrorResponseSerializer,
+            502: ErrorResponseSerializer,
+        }
+    )
+    @action(detail=True, methods=['post'], url_path='cancel-and-refund')
+    def cancel_and_refund(self, request, *args, **kwargs):
+        delivery = self.get_object()
+        user = request.user
+        if not (user.is_staff or user.is_superuser or getattr(user, 'role', None) == 'admin'):
+            shelter = self.get_shelter_profile()
+            if not delivery.application or not delivery.application.pet or delivery.application.pet.shelter_id != shelter.id:
+                return Response({"detail": "Delivery belongs to a different shelter."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = CancelAndRefundRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "code": "validation_error",
+                "detail": serializer.errors.get("reason", ["Reason is required and cannot exceed 500 characters."])[0]
+            }, status=status.HTTP_400_BAD_REQUEST)
+        reason = serializer.validated_data['reason']
+
+        # Blocked if delivery is completed
+        if delivery.status == 'delivered':
+            return Response({
+                "code": "delivery_completed",
+                "detail": "Cannot cancel completed delivery."
+            }, status=status.HTTP_409_CONFLICT)
+
+        # COD with cash collected stays blocked
+        if delivery.cash_collected and delivery.cash_collected > Decimal('0.00'):
+            return Response({
+                "code": "cash_collected",
+                "detail": "Cannot cancel delivery after cash has been collected. Please reconcile with driver."
+            }, status=status.HTTP_409_CONFLICT)
+
+        # Find online payment
+        payment = Payment.objects.filter(
+            Q(delivery=delivery) | Q(application=delivery.application)
+        ).exclude(payment_method='cod').order_by('-created_at').first()
+
+        # Check if already refunded (idempotency check)
+        if payment and (payment.status in (PaymentStatus.REFUNDED, 'refunded')):
+            refund = Refund.objects.filter(payment=payment, status=RefundStatus.PROCESSED).first()
+            return Response({
+                "status": "refunded",
+                "code": "already_refunded",
+                "detail": "Delivery payment has already been refunded.",
+                "refund_id": str(refund.public_id) if refund else None,
+                "delivery_id": str(delivery.public_id),
+                "application_id": str(delivery.application.public_id) if delivery.application else None,
+                "amount_refunded_paise": refund.amount_in_paise if refund else payment.amount_in_paise,
+            }, status=status.HTTP_200_OK)
+
+        # Check delivery status allowed: assigned, out_for_delivery, failed
+        if delivery.status not in ['assigned', 'out_for_delivery', 'failed']:
+            return Response({
+                "code": "invalid_state",
+                "detail": f"Cannot cancel and refund delivery in '{delivery.status}' status. Only assigned, out_for_delivery, or failed deliveries are allowed."
+            }, status=status.HTTP_409_CONFLICT)
+
+        if not payment or payment.status not in (PaymentStatus.CAPTURED, PaymentStatus.PAID, 'captured', 'paid'):
+            return Response({
+                "code": "no_captured_payment",
+                "detail": "No captured online payment found for this delivery."
+            }, status=status.HTTP_409_CONFLICT)
+
+        # Check if refund already in progress
+        existing_active_refund = Refund.objects.filter(payment=payment).exclude(status=RefundStatus.FAILED).first()
+        if existing_active_refund:
+            if existing_active_refund.status == RefundStatus.PROCESSED:
+                return Response({
+                    "status": "refunded",
+                    "code": "already_refunded",
+                    "detail": "Delivery payment has already been refunded.",
+                    "refund_id": str(existing_active_refund.public_id),
+                    "delivery_id": str(delivery.public_id),
+                    "application_id": str(delivery.application.public_id) if delivery.application else None,
+                    "amount_refunded_paise": existing_active_refund.amount_in_paise,
+                }, status=status.HTTP_200_OK)
+            elif existing_active_refund.status in [RefundStatus.CREATED, RefundStatus.PROCESSING]:
+                return Response({
+                    "code": "refund_in_progress",
+                    "detail": "A refund is already in progress for this payment."
+                }, status=status.HTTP_409_CONFLICT)
+
+        # Issue refund via gateway
+        try:
+            refund = issue_refund(payment, reason=reason, initiated_by=user, source=RefundSource.MANUAL)
+        except RefundFailedError:
+            return Response({
+                "code": "refund_failed",
+                "detail": "Refund call to payment gateway failed."
+            }, status=status.HTTP_502_BAD_GATEWAY)
+        except Exception as exc:
+            return Response({
+                "code": "refund_failed",
+                "detail": f"Refund failed: {str(exc)}"
+            }, status=status.HTTP_502_BAD_GATEWAY)
+
+        # If refund returned is still in progress (e.g. concurrent thread won Phase 1 lock)
+        if refund.status in [RefundStatus.CREATED, RefundStatus.PROCESSING]:
+            return Response({
+                "code": "refund_in_progress",
+                "detail": "A refund is already in progress for this payment."
+            }, status=status.HTTP_409_CONFLICT)
+
+        # In one transaction: delivery failed (if active), driver freed, application cancelled, pet 'available'
+        with transaction.atomic():
+            locked_deliv = PetDelivery.objects.select_for_update().get(id=delivery.id)
+            if locked_deliv.status in ['assigned', 'out_for_delivery']:
+                locked_deliv.status = 'failed'
+                locked_deliv.save(update_fields=['status'])
+
+            if locked_deliv.driver_id:
+                driver = DeliveryProfile.objects.select_for_update().get(id=locked_deliv.driver_id)
+                driver.is_available = True
+                driver.save(update_fields=['is_available'])
+
+            app = locked_deliv.application
+            if app:
+                locked_app = AdoptionApplication.objects.select_for_update().get(id=app.id)
+                locked_app.status = 'cancelled'
+                locked_app.save(update_fields=['status', 'updated_at'])
+
+                if locked_app.pet_id:
+                    locked_pet = Pet.objects.select_for_update().get(id=locked_app.pet_id)
+                    locked_pet.status = 'available'
+                    locked_pet.save(update_fields=['status'])
+
+        return Response({
+            "status": "refunded",
+            "code": "success",
+            "detail": "Delivery cancelled and refund processed successfully.",
+            "refund_id": str(refund.public_id),
+            "delivery_id": str(delivery.public_id),
+            "application_id": str(delivery.application.public_id) if delivery.application else None,
+            "amount_refunded_paise": refund.amount_in_paise,
+        }, status=status.HTTP_200_OK)
+
 
     @extend_schema(responses={200: DriverListSerializer(many=True)})
     @action(detail=False, methods=['get'], url_path='drivers')
