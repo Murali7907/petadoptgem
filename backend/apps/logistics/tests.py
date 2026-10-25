@@ -24,8 +24,10 @@ from rest_framework import status
 from apps.accounts.models import User, ShelterProfile, DeliveryProfile, Notification
 from apps.pets.models import Pet
 from apps.adoptions.models import AdoptionApplication
-from django.db import transaction
-from apps.logistics.models import PetDelivery, DeliveryLocationPing, Payment, PaymentStatus
+from apps.logistics.models import (
+    PetDelivery, DeliveryLocationPing, Payment, PaymentStatus,
+    Refund, RefundStatus, RefundSource
+)
 from apps.logistics.serializers import (
     DeliveryDriverTaskSerializer,
     DeliveryCustomerSerializer,
@@ -4003,6 +4005,262 @@ class LateCaptureConcurrencyTests(TransactionTestCase):
         # Exactly one non-failed Refund created
         active_refunds = Refund.objects.filter(payment=self.payment).exclude(status='failed')
         self.assertEqual(active_refunds.count(), 1)
+
+
+class RefundWebhookTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.shelter_user = User.objects.create_user(
+            email='shelter_wh@example.com',
+            username='shelter_wh',
+            password='TestPassword123!',
+            role='shelter'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user,
+            organization_name='WH Shelter',
+            pickup_address='123 WH St',
+            city='Test City',
+            latitude=Decimal('12.9716'),
+            longitude=Decimal('77.5946'),
+            is_active=True,
+            is_verified=True
+        )
+        self.adopter_user = User.objects.create_user(
+            email='adopter_wh@example.com',
+            username='adopter_wh',
+            password='TestPassword123!',
+            role='adopter'
+        )
+        self.pet = Pet.objects.create(
+            name='WH Pet',
+            species='dog',
+            breed='Labrador',
+            age_months=24,
+            shelter=self.shelter_profile,
+            status='adopted'
+        )
+        self.application = AdoptionApplication.objects.create(
+            pet=self.pet,
+            applicant=self.adopter_user,
+            living_situation='House',
+            contact_phone='9990001111',
+            status='approved',
+            total_amount=Decimal('250.00'),
+            payment_status='paid'
+        )
+        self.delivery = PetDelivery.objects.create(
+            application=self.application,
+            status='out_for_delivery',
+            payment_status='paid'
+        )
+        self.payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount_in_paise=25000,
+            amount=Decimal('250.00'),
+            currency='INR',
+            status=PaymentStatus.CAPTURED,
+            razorpay_order_id='order_wh_123',
+            razorpay_payment_id='pay_wh_123'
+        )
+        self.webhook_secret = settings.RAZORPAY_WEBHOOK_SECRET
+
+    def _make_signature(self, raw_body: str) -> str:
+        return hmac.new(
+            self.webhook_secret.encode('utf-8'),
+            raw_body.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+    def test_refund_processed_webhook_success_and_idempotent(self):
+        refund = Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=25000,
+            status=RefundStatus.CREATED,
+            razorpay_refund_id='rfnd_wh_proc_123',
+            reason='Cancelled by shelter',
+            source=RefundSource.MANUAL
+        )
+
+        payload_dict = {
+            'event': 'refund.processed',
+            'payload': {
+                'refund': {
+                    'entity': {
+                        'id': 'rfnd_wh_proc_123',
+                        'amount': 25000,
+                        'status': 'processed'
+                    }
+                }
+            }
+        }
+        raw_body = json.dumps(payload_dict)
+        sig = self._make_signature(raw_body)
+
+        # Public auth, no authorization header
+        unauth_client = APIClient()
+        res1 = unauth_client.post(
+            '/api/v1/payments/webhook/',
+            data=raw_body,
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE=sig
+        )
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+        self.assertEqual(res1.data.get('status'), 'success')
+
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, RefundStatus.PROCESSED)
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, PaymentStatus.REFUNDED)
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.payment_status, 'refunded')
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.payment_status, 'refunded')
+
+        # Repeat webhook is idempotent
+        res2 = unauth_client.post(
+            '/api/v1/payments/webhook/',
+            data=raw_body,
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE=sig
+        )
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertTrue(res2.data.get('idempotent', False) or res2.data.get('status') == 'success')
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, RefundStatus.PROCESSED)
+
+    def test_refund_failed_webhook_flags_for_retry(self):
+        refund = Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=25000,
+            status=RefundStatus.CREATED,
+            razorpay_refund_id='rfnd_wh_fail_123',
+            reason='Cancelled by shelter',
+            source=RefundSource.MANUAL
+        )
+
+        payload_dict = {
+            'event': 'refund.failed',
+            'payload': {
+                'refund': {
+                    'entity': {
+                        'id': 'rfnd_wh_fail_123',
+                        'amount': 25000,
+                        'status': 'failed',
+                        'error_description': 'Customer bank account closed'
+                    }
+                }
+            }
+        }
+        raw_body = json.dumps(payload_dict)
+        sig = self._make_signature(raw_body)
+
+        unauth_client = APIClient()
+        res = unauth_client.post(
+            '/api/v1/payments/webhook/',
+            data=raw_body,
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE=sig
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, RefundStatus.FAILED)
+        self.assertIn('Customer bank account closed', refund.failure_reason)
+
+    def test_refund_webhook_amount_mismatch_ignored(self):
+        refund = Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=25000,
+            status=RefundStatus.CREATED,
+            razorpay_refund_id='rfnd_wh_mismatch_123',
+            reason='Cancelled by shelter',
+            source=RefundSource.MANUAL
+        )
+
+        payload_dict = {
+            'event': 'refund.processed',
+            'payload': {
+                'refund': {
+                    'entity': {
+                        'id': 'rfnd_wh_mismatch_123',
+                        'amount': 10000,
+                        'status': 'processed'
+                    }
+                }
+            }
+        }
+        raw_body = json.dumps(payload_dict)
+        sig = self._make_signature(raw_body)
+
+        res = self.client.post(
+            '/api/v1/payments/webhook/',
+            data=raw_body,
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE=sig
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('status'), 'ignored')
+        self.assertEqual(res.data.get('detail'), 'Amount mismatch.')
+
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, RefundStatus.CREATED)
+
+    def test_refund_webhook_unknown_id_returns_200(self):
+        payload_dict = {
+            'event': 'refund.processed',
+            'payload': {
+                'refund': {
+                    'entity': {
+                        'id': 'rfnd_unknown_999999',
+                        'amount': 25000,
+                        'status': 'processed'
+                    }
+                }
+            }
+        }
+        raw_body = json.dumps(payload_dict)
+        sig = self._make_signature(raw_body)
+
+        res = self.client.post(
+            '/api/v1/payments/webhook/',
+            data=raw_body,
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE=sig
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('status'), 'ignored')
+        self.assertEqual(res.data.get('detail'), 'Refund not found.')
+
+    def test_refund_webhook_bad_signature_returns_400(self):
+        payload_dict = {
+            'event': 'refund.processed',
+            'payload': {
+                'refund': {
+                    'entity': {
+                        'id': 'rfnd_wh_bad_sig',
+                        'amount': 25000,
+                        'status': 'processed'
+                    }
+                }
+            }
+        }
+        raw_body = json.dumps(payload_dict)
+
+        unauth_client = APIClient()
+        res = unauth_client.post(
+            '/api/v1/payments/webhook/',
+            data=raw_body,
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE='bad_signature_value'
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Invalid webhook signature", str(res.data))
+
 
 
 

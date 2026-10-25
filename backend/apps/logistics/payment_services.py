@@ -350,6 +350,63 @@ def process_razorpay_webhook(raw_body: bytes, signature: str) -> dict:
                         payment.razorpay_payment_id = payment_id
                     payment.save(update_fields=['status', 'raw_payload', 'razorpay_payment_id', 'updated_at'])
 
+    elif event_type == 'refund.processed':
+        refund_entity = event_payload.get('payload', {}).get('refund', {}).get('entity', {})
+        rzp_refund_id = refund_entity.get('id', '')
+        refund_amount = refund_entity.get('amount')
+
+        if not rzp_refund_id:
+            logger.warning("Webhook refund.processed missing refund entity id.")
+            return {'status': 'ignored', 'detail': 'Missing refund id.'}
+
+        with transaction.atomic():
+            refund = Refund.objects.select_for_update().filter(razorpay_refund_id=rzp_refund_id).first()
+            if not refund:
+                logger.warning(f"Webhook refund.processed for unknown razorpay_refund_id: {rzp_refund_id}")
+                return {'status': 'ignored', 'detail': 'Refund not found.'}
+
+            # Compare payload amount with Refund row; never trust payload alone
+            if refund_amount is not None and int(refund_amount) != refund.amount_in_paise:
+                logger.warning(f"Webhook refund amount mismatch for {rzp_refund_id}: payload={refund_amount}, db={refund.amount_in_paise}")
+                return {'status': 'ignored', 'detail': 'Amount mismatch.'}
+
+            # Idempotent check
+            if refund.status == RefundStatus.PROCESSED:
+                return {'status': 'success', 'event': event_type, 'idempotent': True}
+
+            refund.status = RefundStatus.PROCESSED
+            refund.save(update_fields=['status', 'updated_at'])
+            mark_refund_processed_state(refund)
+
+    elif event_type == 'refund.failed':
+        refund_entity = event_payload.get('payload', {}).get('refund', {}).get('entity', {})
+        rzp_refund_id = refund_entity.get('id', '')
+        refund_amount = refund_entity.get('amount')
+
+        if not rzp_refund_id:
+            logger.warning("Webhook refund.failed missing refund entity id.")
+            return {'status': 'ignored', 'detail': 'Missing refund id.'}
+
+        with transaction.atomic():
+            refund = Refund.objects.select_for_update().filter(razorpay_refund_id=rzp_refund_id).first()
+            if not refund:
+                logger.warning(f"Webhook refund.failed for unknown razorpay_refund_id: {rzp_refund_id}")
+                return {'status': 'ignored', 'detail': 'Refund not found.'}
+
+            # Compare payload amount with Refund row; never trust payload alone
+            if refund_amount is not None and int(refund_amount) != refund.amount_in_paise:
+                logger.warning(f"Webhook refund amount mismatch for {rzp_refund_id}: payload={refund_amount}, db={refund.amount_in_paise}")
+                return {'status': 'ignored', 'detail': 'Amount mismatch.'}
+
+            # If already processed, do not mark as failed
+            if refund.status == RefundStatus.PROCESSED:
+                return {'status': 'ignored', 'detail': 'Refund already processed.'}
+
+            error_desc = refund_entity.get('error_description') or refund_entity.get('error_reason') or 'Webhook received refund.failed'
+            refund.status = RefundStatus.FAILED
+            refund.failure_reason = str(error_desc)
+            refund.save(update_fields=['status', 'failure_reason', 'updated_at'])
+
     return {'status': 'success', 'event': event_type}
 
 
