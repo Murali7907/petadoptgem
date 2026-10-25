@@ -3198,6 +3198,201 @@ class DocumentationRouteRegressionTests(TestCase):
                 resolve(path)
 
 
+class RefundLedgerAndServiceTests(APITestCase):
+    """
+    Milestone 9 Task 1: Refund Ledger & issue_refund Service Tests
+    """
+    def setUp(self):
+        from apps.accounts.models import User, ShelterProfile, DeliveryProfile
+        from apps.pets.models import Pet
+        from apps.adoptions.models import AdoptionApplication
+        from apps.logistics.models import PetDelivery, Payment, PaymentStatus, Refund, RefundStatus
+
+        self.shelter_user = User.objects.create_user(
+            username='refund_shelter_owner',
+            email='owner@refundshelter.org',
+            password='password123',
+            role='shelter'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.shelter_user,
+            organization_name='Refund Shelter Paws',
+            pickup_address='100 Shelter Way',
+            city='Bangalore',
+            is_verified=True
+        )
+
+        self.adopter = User.objects.create_user(
+            username='refund_adopter',
+            email='adopter@refundexample.org',
+            password='password123',
+            role='customer'
+        )
+
+        self.pet = Pet.objects.create(
+            shelter=self.shelter,
+            name='RefundPet',
+            species='dog',
+            breed='Beagle',
+            age_months=10,
+            status='available'
+        )
+
+        self.application = AdoptionApplication.objects.create(
+            pet=self.pet,
+            applicant=self.adopter,
+            living_situation='Apartment',
+            contact_phone='9998887776',
+            status='approved',
+            total_amount=Decimal('250.00'),
+            payment_status='paid'
+        )
+
+        self.delivery = PetDelivery.objects.create(
+            application=self.application,
+            status='assigned',
+            payment_status='paid'
+        )
+
+        self.payment = Payment.objects.create(
+            delivery=self.delivery,
+            application=self.application,
+            amount=Decimal('250.00'),
+            amount_in_paise=25000,
+            status=PaymentStatus.CAPTURED,
+            razorpay_order_id='order_refund_test_123',
+            razorpay_payment_id='pay_refund_test_456'
+        )
+
+    def test_refund_model_partial_unique_constraint(self):
+        """Assert only one active non-failed refund can exist per payment."""
+        from django.db import IntegrityError
+        from apps.logistics.models import Refund, RefundStatus
+
+        # First refund created
+        r1 = Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=25000,
+            status=RefundStatus.CREATED,
+            reason="Test refund 1"
+        )
+        self.assertIsNotNone(r1.id)
+
+        # Second active refund raises IntegrityError (wrapped in atomic to handle savepoint in Postgres)
+        with transaction.atomic():
+            with self.assertRaises(IntegrityError):
+                Refund.objects.create(
+                    payment=self.payment,
+                    application=self.application,
+                    amount_in_paise=25000,
+                    status=RefundStatus.CREATED,
+                    reason="Test refund 2 duplicate"
+                )
+
+        # If r1 is failed, a new refund can be created
+        r1.status = RefundStatus.FAILED
+        r1.save()
+
+        r2 = Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=25000,
+            status=RefundStatus.CREATED,
+            reason="Test refund 3 after failure"
+        )
+        self.assertIsNotNone(r2.id)
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_issue_refund_success_and_notifications(self, mock_get_client):
+        """Test issue_refund end-to-end success transitions state and dispatches notifications."""
+        from django.core import mail
+        from apps.accounts.models import Notification
+        from apps.logistics.models import Refund, RefundStatus, PaymentStatus
+        from apps.logistics.payment_services import issue_refund
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_mock_success_123',
+            'entity': 'refund',
+            'amount': 25000,
+            'status': 'processed',
+            'payment_id': 'pay_refund_test_456'
+        }
+
+        with self.captureOnCommitCallbacks(execute=True):
+            refund = issue_refund(
+                payment=self.payment,
+                reason="Application cancelled by shelter",
+                initiated_by=self.shelter_user,
+                source='manual'
+            )
+
+        self.assertEqual(refund.status, RefundStatus.PROCESSED)
+        self.assertEqual(refund.razorpay_refund_id, 'rfnd_mock_success_123')
+        self.assertEqual(refund.amount_in_paise, 25000)
+
+        # Model states updated
+        self.payment.refresh_from_db()
+        self.application.refresh_from_db()
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.payment.status, PaymentStatus.REFUNDED)
+        self.assertEqual(self.application.payment_status, 'refunded')
+        self.assertEqual(self.delivery.payment_status, 'refunded')
+
+        # In-app notification created
+        notif = Notification.objects.filter(recipient=self.adopter, notification_type='payment').first()
+        self.assertIsNotNone(notif)
+        self.assertIn("Refund Processed", notif.title)
+        self.assertIn("250.00", notif.message)
+
+        # Email dispatched
+        self.assertTrue(len(mail.outbox) >= 1)
+        refund_email = [m for m in mail.outbox if "Refund Processed" in m.subject][0]
+        self.assertIn(self.adopter.email, refund_email.to)
+        self.assertIn("250.00", refund_email.body)
+
+        # Verify idempotency: second call returns existing refund without second gateway call
+        mock_client.payment.refund.reset_mock()
+        second_refund = issue_refund(payment=self.payment, reason="Retry")
+        self.assertEqual(second_refund.id, refund.id)
+        mock_client.payment.refund.assert_not_called()
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_issue_refund_gateway_error_allows_retry(self, mock_get_client):
+        """Test issue_refund marks refund failed on API error and allows retry."""
+        from apps.logistics.models import Refund, RefundStatus, PaymentStatus
+        from apps.logistics.payment_services import issue_refund, RefundFailedError
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.refund.side_effect = Exception("Razorpay 500 Internal Error")
+
+        with self.assertRaises(RefundFailedError):
+            issue_refund(payment=self.payment, reason="Failed test")
+
+        failed_refund = Refund.objects.filter(payment=self.payment).first()
+        self.assertIsNotNone(failed_refund)
+        self.assertEqual(failed_refund.status, RefundStatus.FAILED)
+        self.assertIn("Razorpay 500", failed_refund.failure_reason)
+
+        # Payment remains captured
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, PaymentStatus.CAPTURED)
+
+        # Retry with success
+        mock_client.payment.refund.side_effect = None
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_retry_success_999',
+            'amount': 25000,
+            'status': 'processed'
+        }
+
+        success_refund = issue_refund(payment=self.payment, reason="Retry succeeds")
+        self.assertEqual(success_refund.status, RefundStatus.PROCESSED)
+        self.assertEqual(success_refund.razorpay_refund_id, 'rfnd_retry_success_999')
+        self.assertNotEqual(success_refund.id, failed_refund.id)
+
+
 
 
 

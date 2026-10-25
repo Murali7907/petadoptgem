@@ -39,7 +39,14 @@ class PetDelivery(models.Model):
     # Doorstep COD collection
     cash_collected = models.DecimalField(max_digits=8, decimal_places=2, default=0.00)
     is_cash_settled_with_shelter = models.BooleanField(default=False)
-    payment_status = models.CharField(max_length=20, default='pending')
+
+    PAYMENT_STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('paid', 'Paid'),
+        ('failed', 'Failed'),
+        ('refunded', 'Refunded'),
+    )
+    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='pending')
 
     scheduled_date = models.DateTimeField(null=True, blank=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
@@ -89,6 +96,7 @@ class PaymentStatus:
     PENDING = 'pending'
     CAPTURED = 'captured'
     FAILED = 'failed'
+    REFUNDED = 'refunded'
     # Legacy alias
     PAID = 'paid'
 
@@ -97,6 +105,7 @@ class PaymentStatus:
         (PENDING, 'Pending'),
         (CAPTURED, 'Captured'),
         (FAILED, 'Failed'),
+        (REFUNDED, 'Refunded'),
     )
 
 
@@ -150,3 +159,57 @@ class DeliveryLocationPing(models.Model):
 
     def __str__(self):
         return f"Ping at ({self.latitude}, {self.longitude}) for Delivery #{self.delivery_id}"
+
+
+class RefundStatus:
+    CREATED = 'created'
+    PROCESSING = 'processing'
+    PROCESSED = 'processed'
+    FAILED = 'failed'
+
+    CHOICES = (
+        (CREATED, 'Created'),
+        (PROCESSING, 'Processing'),
+        (PROCESSED, 'Processed'),
+        (FAILED, 'Failed'),
+    )
+
+
+class RefundSource:
+    MANUAL = 'manual'
+    LATE_CAPTURE = 'late_capture'
+
+    CHOICES = (
+        (MANUAL, 'Manual'),
+        (LATE_CAPTURE, 'Late Capture'),
+    )
+
+
+class Refund(models.Model):
+    public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    payment = models.ForeignKey(Payment, on_delete=models.CASCADE, related_name='refunds', db_column='payment_id')
+    application = models.ForeignKey('adoptions.AdoptionApplication', on_delete=models.CASCADE, related_name='refunds', db_column='application_id')
+    amount_in_paise = models.PositiveIntegerField(help_text="Refund amount in paise")
+    status = models.CharField(max_length=20, choices=RefundStatus.CHOICES, default=RefundStatus.CREATED)
+    razorpay_refund_id = models.CharField(max_length=100, null=True, blank=True, unique=True)
+    reason = models.TextField()
+    initiated_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='initiated_refunds', db_column='initiated_by_id')
+    source = models.CharField(max_length=20, choices=RefundSource.CHOICES, default=RefundSource.MANUAL)
+    failure_reason = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'refunds'
+        managed = True
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['payment'],
+                condition=~models.Q(status='failed'),
+                name='unique_active_refund_per_payment'
+            ),
+        ]
+
+    def __str__(self):
+        return f"Refund #{self.id} for Payment #{self.payment_id} ({self.amount_in_paise} paise) - Status: {self.status}"

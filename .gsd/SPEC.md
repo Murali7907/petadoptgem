@@ -948,7 +948,95 @@ Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medic
 
 ---
 
-*Last updated: 2026-10-24*
+## 15. Milestone 9 — Automated Refund Ledger, Cancel-and-Refund Exit Path, Late Capture Recovery & COD Cash Reconciliation
+
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Milestone 9 approved and finalized.
+>
+> **Core Decisions**:
+> 1. Full refunds only (no amount parameter anywhere in APIs or services).
+> 2. Refunds are initiated strictly by the owning verified shelter or a platform administrator — never by the adopter.
+> 3. No refunds after delivery (return flows are strictly out of scope).
+> 4. COD with collected cash remains blocked from cancellation/refund (`cash_collected` validation guard) as a documented manual path.
+
+### 15.1 Task 1: Refund Ledger & `issue_refund` Service
+- **Model**: Additive `Refund` model in `apps.logistics.models`:
+  - Fields: `payment` (FK to `Payment`), `application` (FK to `AdoptionApplication`), `amount_in_paise` (PositiveIntegerField), `status` (choices: `created`, `processing`, `processed`, `failed`), `razorpay_refund_id` (CharField, nullable, unique), `reason` (TextField), `initiated_by` (FK to `User`, nullable), `source` (choices: `manual`, `late_capture`), `failure_reason` (TextField, blank=True), `created_at`, `updated_at`.
+  - Constraint: Partial unique constraint ensuring at most one refund per payment whose status is not `'failed'` (`condition=~Q(status='failed')`).
+- **Choices**: Add `'refunded'` to `PaymentStatus` (in `apps.logistics.models`), `AdoptionApplication.payment_status`, and `PetDelivery.payment_status`.
+- **Service (`issue_refund`)**:
+  - `issue_refund(payment, reason, initiated_by=None, source='manual') -> Refund`:
+    - Executes under `select_for_update()` on the `Payment` row.
+    - Idempotency check: if a non-failed `Refund` already exists for this payment, return it immediately.
+    - Create `Refund` row in `'created'` status.
+    - Release row locks before initiating network call to Razorpay (`client.payment.refund`).
+    - Pass full captured amount (`amount_in_paise`) and our internal refund public_id / receipt in notes.
+    - If Razorpay SDK supports idempotency key / options, pass it.
+    - On success: store `razorpay_refund_id`, set status to `'processing'` or `'processed'` according to Razorpay response.
+    - On API error: mark `Refund` status as `'failed'`, record `failure_reason`, raise clean domain exception; allow retry.
+    - When `processed`: transition `Payment.status = 'refunded'`, `application.payment_status = 'refunded'`, `delivery.payment_status = 'refunded'`.
+    - Trigger adopter email and in-app `Notification` inside `transaction.on_commit`.
+
+### 15.2 Task 2: Cancel and Refund Endpoint
+- **Endpoint**: `POST /api/v1/shelter/deliveries/<id>/cancel-and-refund/`
+  - Body: `{"reason": "string (max 500 chars, required)}"`.
+  - Permission: Owning verified shelter staff or platform admin only.
+  - Throttle: Per-user throttle scope `'refund'` (env-configurable, default `10/min`).
+  - Pre-conditions: Allowed when delivery status is `assigned`, `out_for_delivery`, or `failed` with captured online payment. Blocked if `delivered` (HTTP 409 `delivery_completed`), if payment not captured (HTTP 409 `no_captured_payment`), if refund already in progress (HTTP 409 `refund_in_progress`), or if COD cash collected (`cash_collected`).
+  - Idempotency: If already refunded, returns HTTP 200 idempotently.
+  - Execution sequence:
+    1. Validate pre-conditions.
+    2. Invoke `issue_refund(...)`.
+    3. If `issue_refund` fails: abort without modifying delivery, application, or pet. Return HTTP 502 `{"code": "refund_failed"}`.
+    4. Upon successful refund: in a single atomic transaction:
+       - Set delivery `status = 'failed'` (if not already failed).
+       - Free driver (`driver.is_available = True`).
+       - Set `application.status = 'cancelled'`.
+       - Revert `pet.status = 'available'` (competing applications stay rejected).
+    5. Return HTTP 200 with refund and delivery payload.
+
+### 15.3 Task 3: Late Capture Recovery & Management Command
+- **Late Capture Hook in `mark_payment_captured`**:
+  - Used uniformly by both payment verify and webhook handlers.
+  - When payment is captured but `application.status` is no longer `'approved'` (e.g. cancelled, rejected) or delivery is `failed`/`cancelled`:
+    - Record the payment capture (money was taken).
+    - Schedule `issue_refund(payment, reason="Late capture after cancellation/rejection", source='late_capture')` inside `transaction.on_commit`.
+    - Guaranteed concurrency safety: concurrent verify + webhook creates exactly one refund.
+- **Management Command**: `python manage.py retry_pending_refunds [--minutes=N]`
+  - Queries `Refund` records in `'created'` or `'failed'` status older than N minutes (default 15).
+  - Retries `issue_refund` idempotently.
+- **Django Admin**: Read-only `RefundAdmin` listing all refunds with status, amounts, source, and failure reasons.
+
+### 15.4 Task 4: Refund Webhooks
+- **Events**: Handle `refund.processed` and `refund.failed` in `PaymentViewSet.webhook`:
+  - Verified with existing Razorpay webhook secret signature check.
+  - Public endpoint, no authorization header required.
+  - Match `Refund` record by `razorpay_refund_id`.
+  - Amount integrity: verify payload amount equals `Refund.amount_in_paise`; reject tampering.
+  - On `refund.processed`: mark `Refund.status = 'processed'`, transition `Payment`, `application`, and `delivery` payment statuses to `'refunded'`. Notify adopter via `transaction.on_commit`.
+  - On `refund.failed`: mark `Refund.status = 'failed'`, record failure details, leave eligible for retry.
+  - Unknown refund IDs: acknowledge with HTTP 200 without state modifications.
+
+### 15.5 Task 5: COD Cash Reconciliation
+- **Model Additions**: Additive nullable fields on `PetDelivery`:
+  - `cash_settled_at` (DateTimeField, null=True, blank=True).
+  - `cash_settled_by` (FK to `User`, null=True, blank=True).
+- **Endpoint**: `POST /api/v1/shelter/deliveries/<id>/reconcile-cash/`:
+  - Permissions: Owning verified shelter or admin.
+  - Pre-conditions: `payment_method == 'cod'`, delivery `status == 'delivered'`, `cash_collected > 0`.
+  - Atomicity: Sets `is_cash_settled_with_shelter = True`, `cash_settled_at = timezone.now()`, `cash_settled_by = request.user` under `select_for_update()`.
+  - Idempotency: Repeat call returns HTTP 200 idempotently.
+  - Error codes: 409 `cash_not_collected` if no cash collected; 409 `invalid_state` if not delivered or not COD.
+- **Filter**: Shelter delivery list supports `?cash_unsettled=true` filter to surface deliveries where `is_cash_settled_with_shelter=False`.
+
+### 15.6 Task 6: Tests, Schema & Documentation
+- Comprehensive tests for refund lifecycle, retry idempotency, race conditions, late capture, webhooks, and cash reconciliation.
+- Complete OpenAPI schema generation with `drf-spectacular` and documentation updates.
+
+---
+
+*Last updated: 2026-10-25*
 
 
 

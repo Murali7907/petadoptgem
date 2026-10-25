@@ -23,6 +23,7 @@ class AdoptionApplication(models.Model):
         ('pending', 'Pending'),
         ('paid', 'Paid'),
         ('failed', 'Failed'),
+        ('refunded', 'Refunded'),
     )
 
     public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)

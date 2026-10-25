@@ -17,7 +17,7 @@ from django.db import transaction
 from rest_framework.exceptions import APIException, NotFound, ValidationError
 
 from apps.adoptions.models import AdoptionApplication
-from .models import Payment, PaymentStatus, PetDelivery
+from .models import Payment, PaymentStatus, PetDelivery, Refund, RefundStatus, RefundSource
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 class ConflictError(APIException):
     status_code = 409
     default_detail = "Conflict with current resource state."
+
+
+class RefundFailedError(APIException):
+    status_code = 502
+    default_code = "refund_failed"
+    default_detail = "Refund gateway call failed."
 
 
 def get_razorpay_client():
@@ -299,3 +305,152 @@ def process_razorpay_webhook(raw_body: bytes, signature: str) -> dict:
                     payment.save(update_fields=['status', 'raw_payload', 'razorpay_payment_id', 'updated_at'])
 
     return {'status': 'success', 'event': event_type}
+
+
+def mark_refund_processed_state(refund: Refund):
+    """
+    Transitions Payment, application.payment_status and delivery.payment_status to 'refunded'.
+    Dispatches adopter email and in-app notification inside transaction.on_commit.
+    """
+    with transaction.atomic():
+        payment = Payment.objects.select_for_update().get(id=refund.payment_id)
+        payment.status = PaymentStatus.REFUNDED
+        payment.save(update_fields=['status', 'updated_at'])
+
+        app = refund.application
+        if app:
+            app = AdoptionApplication.objects.select_for_update().get(id=app.id)
+            app.payment_status = 'refunded'
+            app.save(update_fields=['payment_status', 'updated_at'])
+
+        deliv = payment.delivery or getattr(app, 'delivery', None)
+        if deliv:
+            deliv = PetDelivery.objects.select_for_update().get(id=deliv.id)
+            deliv.payment_status = 'refunded'
+            deliv.save(update_fields=['payment_status'])
+
+    def _notify():
+        try:
+            adopter = getattr(refund.application, 'applicant', None)
+            pet = getattr(refund.application, 'pet', None)
+            pet_name = pet.name if pet else "your pet"
+            amount_in_rupees = Decimal(refund.amount_in_paise) / Decimal(100)
+
+            if adopter:
+                from apps.accounts.models import Notification
+                Notification.objects.create(
+                    recipient=adopter,
+                    title=f"Refund Processed for {pet_name}",
+                    message=f"A full refund of ₹{amount_in_rupees:.2f} has been processed for your adoption application for {pet_name}.",
+                    notification_type='payment'
+                )
+                if adopter.email:
+                    from django.core.mail import send_mail
+                    send_mail(
+                        subject=f"Refund Processed: Adoption Application for {pet_name}",
+                        message=(
+                            f"Hello {adopter.get_full_name() or adopter.username},\n\n"
+                            f"A full refund of ₹{amount_in_rupees:.2f} has been processed for your adoption application for {pet_name}.\n"
+                            f"Reason: {refund.reason}\n"
+                            f"Refund ID: {refund.razorpay_refund_id or refund.public_id}\n\n"
+                            f"The amount should reflect in your account within 5-7 business days.\n\n"
+                            f"Kind regards,\nPet Adoption Team"
+                        ),
+                        from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'support@kindheart.org'),
+                        recipient_list=[adopter.email],
+                        fail_silently=True,
+                    )
+        except Exception as exc:
+            logger.error(f"Failed to send refund notification for Refund #{refund.id}: {exc}", exc_info=True)
+
+    transaction.on_commit(_notify)
+
+
+def issue_refund(payment: Payment, reason: str, initiated_by=None, source: str = 'manual') -> Refund:
+    """
+    Executes a full refund for a captured payment:
+    1. Under select_for_update on the Payment row, creates the Refund in 'created'.
+       If a non-failed refund already exists, returns it idempotently.
+    2. Releases row locks before calling Razorpay API.
+    3. Calls client.payment.refund for the full captured amount with our refund id in notes/receipt.
+    4. Success: stores razorpay_refund_id and sets processing/processed per response.
+       On 'processed': marks Payment, application.payment_status and delivery.payment_status as 'refunded'.
+    5. API error: marks Refund as 'failed' with reason, raises RefundFailedError; retry allowed.
+    """
+    # Phase 1: DB row lock and creation
+    with transaction.atomic():
+        locked_payment = Payment.objects.select_for_update().get(id=payment.id)
+
+        # Idempotency check: if a non-failed refund already exists, return it
+        existing_refund = Refund.objects.filter(payment=locked_payment).exclude(status=RefundStatus.FAILED).first()
+        if existing_refund:
+            return existing_refund
+
+        if locked_payment.status not in (PaymentStatus.CAPTURED, PaymentStatus.PAID, PaymentStatus.REFUNDED):
+            raise ValidationError(f"Cannot refund payment in '{locked_payment.status}' status. Only captured payments can be refunded.")
+
+        amount_in_paise = locked_payment.amount_in_paise or int(round(Decimal(str(locked_payment.amount)) * 100))
+        if amount_in_paise <= 0:
+            raise ValidationError("Payment amount must be greater than zero to refund.")
+
+        app = locked_payment.application
+        if not app and locked_payment.delivery and locked_payment.delivery.application:
+            app = locked_payment.delivery.application
+            locked_payment.application = app
+            locked_payment.save(update_fields=['application'])
+
+        refund = Refund.objects.create(
+            payment=locked_payment,
+            application=app,
+            amount_in_paise=amount_in_paise,
+            status=RefundStatus.CREATED,
+            reason=reason,
+            initiated_by=initiated_by,
+            source=source,
+        )
+
+    # Phase 2: Call gateway with locks released
+    client = get_razorpay_client()
+    refund_data = {
+        'amount': refund.amount_in_paise,
+        'notes': {
+            'refund_id': str(refund.public_id),
+            'receipt': str(refund.public_id),
+            'reason': str(reason)[:500],
+        }
+    }
+    refund_options = {
+        'headers': {
+            'X-Razorpay-Idempotency-Key': str(refund.public_id)
+        }
+    }
+
+    try:
+        rzp_response = client.payment.refund(
+            locked_payment.razorpay_payment_id,
+            data=refund_data,
+            **refund_options
+        )
+    except Exception as exc:
+        err_msg = str(exc)
+        logger.error(f"Razorpay refund API call failed for Payment #{locked_payment.id}: {err_msg}", exc_info=True)
+        refund.status = RefundStatus.FAILED
+        refund.failure_reason = err_msg
+        refund.save(update_fields=['status', 'failure_reason', 'updated_at'])
+        raise RefundFailedError(detail={"code": "refund_failed", "detail": f"Refund gateway call failed: {err_msg}"})
+
+    rzp_refund_id = rzp_response.get('id', '')
+    rzp_status = rzp_response.get('status', 'processed')
+
+    with transaction.atomic():
+        refund.razorpay_refund_id = rzp_refund_id
+        if rzp_status == 'processed':
+            refund.status = RefundStatus.PROCESSED
+        else:
+            refund.status = RefundStatus.PROCESSING
+        refund.save(update_fields=['razorpay_refund_id', 'status', 'updated_at'])
+
+        if refund.status == RefundStatus.PROCESSED:
+            mark_refund_processed_state(refund)
+
+    return refund
