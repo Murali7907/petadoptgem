@@ -4262,6 +4262,217 @@ class RefundWebhookTests(TestCase):
         self.assertIn("Invalid webhook signature", str(res.data))
 
 
+class CODCashReconciliationTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.shelter_user = User.objects.create_user(
+            email='shelter_recon@example.com',
+            username='shelter_recon',
+            password='TestPassword123!',
+            role='shelter'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user,
+            organization_name='Recon Shelter',
+            pickup_address='123 Recon Way',
+            city='Bangalore',
+            latitude=Decimal('12.9716'),
+            longitude=Decimal('77.5946'),
+            is_active=True,
+            is_verified=True
+        )
+
+        self.other_shelter_user = User.objects.create_user(
+            email='other_recon@example.com',
+            username='other_recon',
+            password='TestPassword123!',
+            role='shelter'
+        )
+        self.other_shelter_profile = ShelterProfile.objects.create(
+            user=self.other_shelter_user,
+            organization_name='Other Shelter',
+            pickup_address='456 Other Way',
+            city='Bangalore',
+            latitude=Decimal('12.9716'),
+            longitude=Decimal('77.5946'),
+            is_active=True,
+            is_verified=True
+        )
+
+        self.admin_user = User.objects.create_user(
+            email='admin_recon@example.com',
+            username='admin_recon',
+            password='TestPassword123!',
+            role='admin'
+        )
+
+        self.adopter_user = User.objects.create_user(
+            email='adopter_recon@example.com',
+            username='adopter_recon',
+            password='TestPassword123!',
+            role='adopter'
+        )
+
+        self.pet = Pet.objects.create(
+            name='Recon Pet',
+            species='dog',
+            breed='Beagle',
+            age_months=12,
+            shelter=self.shelter_profile,
+            status='adopted'
+        )
+
+        self.application = AdoptionApplication.objects.create(
+            pet=self.pet,
+            applicant=self.adopter_user,
+            living_situation='Apartment',
+            contact_phone='9992223333',
+            status='approved',
+            total_amount=Decimal('150.00'),
+            payment_status='paid',
+            payment_method='cod'
+        )
+
+        self.delivery = PetDelivery.objects.create(
+            application=self.application,
+            status='delivered',
+            delivered_at=timezone.now(),
+            cash_collected=Decimal('150.00'),
+            is_cash_settled_with_shelter=False,
+            payment_status='paid'
+        )
+
+    def test_reconcile_cash_success_owner_shelter(self):
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('status'), 'reconciled')
+        self.assertEqual(res.data.get('code'), 'success')
+        self.assertTrue(res.data.get('is_cash_settled_with_shelter'))
+
+        self.delivery.refresh_from_db()
+        self.assertTrue(self.delivery.is_cash_settled_with_shelter)
+        self.assertIsNotNone(self.delivery.cash_settled_at)
+        self.assertEqual(self.delivery.cash_settled_by, self.shelter_user)
+
+    def test_reconcile_cash_success_admin(self):
+        self.client.force_authenticate(user=self.admin_user)
+        res = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.delivery.refresh_from_db()
+        self.assertTrue(self.delivery.is_cash_settled_with_shelter)
+        self.assertEqual(self.delivery.cash_settled_by, self.admin_user)
+
+    def test_reconcile_cash_forbidden_other_shelter(self):
+        self.client.force_authenticate(user=self.other_shelter_user)
+        res = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.delivery.refresh_from_db()
+        self.assertFalse(self.delivery.is_cash_settled_with_shelter)
+
+    def test_reconcile_cash_forbidden_unverified_shelter(self):
+        self.shelter_profile.is_verified = False
+        self.shelter_profile.save()
+
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res.data.get('code'), 'shelter_not_verified')
+
+    def test_reconcile_cash_forbidden_adopter_and_anon(self):
+        # Anonymous
+        res_anon = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
+        self.assertEqual(res_anon.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # Adopter
+        self.client.force_authenticate(user=self.adopter_user)
+        res_adopter = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
+        self.assertEqual(res_adopter.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_reconcile_cash_blocked_if_not_cod(self):
+        self.application.payment_method = 'online'
+        self.application.save()
+
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'invalid_state')
+
+    def test_reconcile_cash_blocked_if_not_delivered(self):
+        self.delivery.status = 'out_for_delivery'
+        self.delivery.save()
+
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'invalid_state')
+
+    def test_reconcile_cash_blocked_if_cash_not_collected(self):
+        self.delivery.cash_collected = Decimal('0.00')
+        self.delivery.save()
+
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'cash_not_collected')
+
+    def test_reconcile_cash_repeat_call_idempotent(self):
+        self.client.force_authenticate(user=self.shelter_user)
+        res1 = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+
+        self.delivery.refresh_from_db()
+        first_settled_at = self.delivery.cash_settled_at
+
+        # Repeat call
+        res2 = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertEqual(res2.data.get('code'), 'already_settled')
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.cash_settled_at, first_settled_at)
+
+    def test_shelter_delivery_list_cash_unsettled_filter(self):
+        # Create second delivery for same shelter, settled
+        pet2 = Pet.objects.create(
+            name='Pet 2', species='dog', breed='Pug', age_months=6,
+            shelter=self.shelter_profile, status='adopted'
+        )
+        app2 = AdoptionApplication.objects.create(
+            pet=pet2, applicant=self.adopter_user, living_situation='House',
+            contact_phone='9994445555', status='approved',
+            payment_method='cod', payment_status='paid'
+        )
+        deliv2 = PetDelivery.objects.create(
+            application=app2, status='delivered', delivered_at=timezone.now(),
+            cash_collected=Decimal('100.00'), is_cash_settled_with_shelter=True,
+            cash_settled_at=timezone.now(), cash_settled_by=self.shelter_user
+        )
+
+        self.client.force_authenticate(user=self.shelter_user)
+
+        # 1. cash_unsettled=true -> only delivery 1
+        res_unsettled = self.client.get('/api/v1/shelter/deliveries/?cash_unsettled=true')
+        self.assertEqual(res_unsettled.status_code, status.HTTP_200_OK)
+        ids_unsettled = [d['public_id'] for d in res_unsettled.data]
+        self.assertIn(str(self.delivery.public_id), ids_unsettled)
+        self.assertNotIn(str(deliv2.public_id), ids_unsettled)
+
+        # 2. cash_unsettled=false -> only delivery 2
+        res_settled = self.client.get('/api/v1/shelter/deliveries/?cash_unsettled=false')
+        self.assertEqual(res_settled.status_code, status.HTTP_200_OK)
+        ids_settled = [d['public_id'] for d in res_settled.data]
+        self.assertNotIn(str(self.delivery.public_id), ids_settled)
+        self.assertIn(str(deliv2.public_id), ids_settled)
+
+        # 3. no filter -> both
+        res_all = self.client.get('/api/v1/shelter/deliveries/')
+        self.assertEqual(res_all.status_code, status.HTTP_200_OK)
+        ids_all = [d['public_id'] for d in res_all.data]
+        self.assertIn(str(self.delivery.public_id), ids_all)
+        self.assertIn(str(deliv2.public_id), ids_all)
+
+
+
 
 
 

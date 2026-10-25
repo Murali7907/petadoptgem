@@ -22,7 +22,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import ValidationError, NotFound
 from rest_framework.throttling import ScopedRateThrottle
 
-from drf_spectacular.utils import extend_schema, OpenApiTypes, OpenApiResponse
+from drf_spectacular.utils import extend_schema, OpenApiTypes, OpenApiResponse, OpenApiParameter
 
 from .models import (
     PetDelivery, DeliveryLocationPing, Payment, PaymentStatus,
@@ -56,6 +56,7 @@ from .serializers import (
     OTPInvalidErrorResponseSerializer,
     CancelAndRefundRequestSerializer,
     CancelAndRefundResponseSerializer,
+    DeliveryCashReconciliationResponseSerializer,
 )
 from .otp import check_otp, issue_otp
 from .services import (
@@ -145,10 +146,34 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
         self.check_object_permissions(self.request, obj)
         return obj
 
-    @extend_schema(responses={200: ShelterDeliverySerializer(many=True)})
+    @extend_schema(
+        summary="List deliveries for shelter",
+        description="List deliveries belonging to the shelter. Supports optional cash_unsettled query parameter.",
+        responses={200: ShelterDeliverySerializer(many=True)},
+        parameters=[
+            OpenApiParameter('cash_unsettled', OpenApiTypes.BOOL, OpenApiParameter.QUERY, description='Filter deliveries with unsettled COD cash')
+        ]
+    )
     def list(self, request):
-        shelter = self.get_shelter_profile()
-        deliveries = PetDelivery.objects.filter(application__pet__shelter=shelter).order_by('-created_at')
+        user = request.user
+        if user.is_staff or user.is_superuser or getattr(user, 'role', None) == 'admin':
+            shelter = getattr(user, 'shelter_profile', None)
+            if shelter:
+                deliveries = PetDelivery.objects.filter(application__pet__shelter=shelter)
+            else:
+                deliveries = PetDelivery.objects.all()
+        else:
+            shelter = self.get_shelter_profile()
+            deliveries = PetDelivery.objects.filter(application__pet__shelter=shelter)
+
+        cash_unsettled = request.query_params.get('cash_unsettled')
+        if cash_unsettled is not None:
+            if str(cash_unsettled).strip().lower() in ['true', '1']:
+                deliveries = deliveries.filter(is_cash_settled_with_shelter=False)
+            elif str(cash_unsettled).strip().lower() in ['false', '0']:
+                deliveries = deliveries.filter(is_cash_settled_with_shelter=True)
+
+        deliveries = deliveries.order_by('-created_at')
         serializer = ShelterDeliverySerializer(deliveries, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -423,6 +448,96 @@ class ShelterDeliveryViewSet(viewsets.GenericViewSet):
             "delivery_id": str(delivery.public_id),
             "application_id": str(delivery.application.public_id) if delivery.application else None,
             "amount_refunded_paise": refund.amount_in_paise,
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Reconcile and settle collected COD cash with shelter",
+        description="Owning verified shelter or platform admin marks collected cash for a delivered COD delivery as settled with the shelter. Returns 200 idempotently on repeat calls.",
+        request=None,
+        responses={
+            200: DeliveryCashReconciliationResponseSerializer,
+            403: OpenApiResponse(description="Unauthorized, foreign shelter, or unverified shelter"),
+            404: OpenApiResponse(description="Delivery not found"),
+            409: ErrorResponseSerializer,
+        }
+    )
+    @action(detail=True, methods=['post'], url_path='reconcile-cash')
+    def reconcile_cash(self, request, *args, **kwargs):
+        delivery = self.get_object()
+        user = request.user
+        if not (user.is_staff or user.is_superuser or getattr(user, 'role', None) == 'admin'):
+            shelter = self.get_shelter_profile()
+            if not delivery.application or not delivery.application.pet or delivery.application.pet.shelter_id != shelter.id:
+                return Response({"detail": "Delivery belongs to a different shelter."}, status=status.HTTP_403_FORBIDDEN)
+
+        # Pre-check payment method: requires 'cod'
+        app = delivery.application
+        payment_method = getattr(app, 'payment_method', None)
+        if not payment_method:
+            payment = Payment.objects.filter(delivery=delivery).first()
+            if payment:
+                payment_method = payment.payment_method
+        if payment_method != 'cod':
+            return Response({
+                "code": "invalid_state",
+                "detail": "Cash reconciliation is only valid for COD deliveries."
+            }, status=status.HTTP_409_CONFLICT)
+
+        # Pre-check status: requires 'delivered'
+        if delivery.status != 'delivered':
+            return Response({
+                "code": "invalid_state",
+                "detail": f"Cannot reconcile cash for delivery in '{delivery.status}' status. Delivery must be delivered."
+            }, status=status.HTTP_409_CONFLICT)
+
+        # Pre-check cash collected: requires cash_collected > 0
+        if not delivery.cash_collected or delivery.cash_collected <= Decimal('0.00'):
+            return Response({
+                "code": "cash_not_collected",
+                "detail": "No cash has been collected for this delivery."
+            }, status=status.HTTP_409_CONFLICT)
+
+        # Check if already settled (idempotency check)
+        if delivery.is_cash_settled_with_shelter:
+            return Response({
+                "status": "reconciled",
+                "code": "already_settled",
+                "detail": "Cash has already been settled with the shelter.",
+                "delivery_id": str(delivery.public_id),
+                "is_cash_settled_with_shelter": True,
+                "cash_settled_at": delivery.cash_settled_at,
+                "cash_settled_by": delivery.cash_settled_by_id,
+                "cash_collected": str(delivery.cash_collected),
+            }, status=status.HTTP_200_OK)
+
+        with transaction.atomic():
+            locked_deliv = PetDelivery.objects.select_for_update().get(id=delivery.id)
+            if locked_deliv.is_cash_settled_with_shelter:
+                return Response({
+                    "status": "reconciled",
+                    "code": "already_settled",
+                    "detail": "Cash has already been settled with the shelter.",
+                    "delivery_id": str(locked_deliv.public_id),
+                    "is_cash_settled_with_shelter": True,
+                    "cash_settled_at": locked_deliv.cash_settled_at,
+                    "cash_settled_by": locked_deliv.cash_settled_by_id,
+                    "cash_collected": str(locked_deliv.cash_collected),
+                }, status=status.HTTP_200_OK)
+
+            locked_deliv.is_cash_settled_with_shelter = True
+            locked_deliv.cash_settled_at = timezone.now()
+            locked_deliv.cash_settled_by = user
+            locked_deliv.save(update_fields=['is_cash_settled_with_shelter', 'cash_settled_at', 'cash_settled_by'])
+
+        return Response({
+            "status": "reconciled",
+            "code": "success",
+            "detail": "Cash collected reconciled and settled with shelter successfully.",
+            "delivery_id": str(locked_deliv.public_id),
+            "is_cash_settled_with_shelter": True,
+            "cash_settled_at": locked_deliv.cash_settled_at,
+            "cash_settled_by": locked_deliv.cash_settled_by_id,
+            "cash_collected": str(locked_deliv.cash_collected),
         }, status=status.HTTP_200_OK)
 
 

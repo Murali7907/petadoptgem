@@ -243,6 +243,10 @@ class ShelterDeliverySerializer(serializers.ModelSerializer):
             'delivered_at',
             'current_latitude',
             'current_longitude',
+            'cash_collected',
+            'is_cash_settled_with_shelter',
+            'cash_settled_at',
+            'cash_settled_by',
             'created_at',
         ]
         read_only_fields = fields
@@ -477,6 +481,18 @@ class CancelAndRefundResponseSerializer(serializers.Serializer):
     delivery_id = serializers.CharField()
     application_id = serializers.CharField(allow_null=True)
     amount_refunded_paise = serializers.IntegerField()
+
+
+class DeliveryCashReconciliationResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    code = serializers.CharField()
+    detail = serializers.CharField()
+    delivery_id = serializers.CharField()
+    is_cash_settled_with_shelter = serializers.BooleanField()
+    cash_settled_at = serializers.DateTimeField(allow_null=True)
+    cash_settled_by = serializers.IntegerField(allow_null=True)
+    cash_collected = serializers.CharField()
+
 
 
 

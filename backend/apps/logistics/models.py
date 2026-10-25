@@ -39,6 +39,15 @@ class PetDelivery(models.Model):
     # Doorstep COD collection
     cash_collected = models.DecimalField(max_digits=8, decimal_places=2, default=0.00)
     is_cash_settled_with_shelter = models.BooleanField(default=False)
+    cash_settled_at = models.DateTimeField(null=True, blank=True)
+    cash_settled_by = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='settled_cash_deliveries',
+        db_column='cash_settled_by_id'
+    )
 
     PAYMENT_STATUS_CHOICES = (
         ('pending', 'Pending'),
