@@ -1111,6 +1111,130 @@ class ApplicationPetStatusConvergenceTests(APITestCase):
             triggers = {row[0] for row in cursor.fetchall()}
         self.assertEqual(triggers, {'trg_check_review_eligibility'})
 
+    def test_application_guard_with_refunds_lifecycle(self):
+        """
+        Milestone 9b Task 4: Tests that cancel/reject/status-patch an application whose payment is:
+        - 'refunded' (allowed)
+        - 'captured' (409 refund_required)
+        - 'captured' with a refund in processing (409 refund_required)
+        """
+        from apps.logistics.models import Payment, PaymentStatus, Refund, RefundStatus, RefundSource
+
+        # Case 1: Payment is 'captured' -> BLOCKED (409 refund_required)
+        app_captured = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='111', status='approved',
+            payment_method='online', total_amount=Decimal('100.00')
+        )
+        Payment.objects.create(
+            application=app_captured, status=PaymentStatus.CAPTURED, payment_method='razorpay',
+            amount=Decimal('100.00'), amount_in_paise=10000, razorpay_payment_id='pay_captured_guard_test'
+        )
+
+        # 1a. Adopter cancel -> 409
+        self.client.force_authenticate(user=self.adopter_1)
+        res_cancel = self.client.post(f'/api/v1/applications/{app_captured.public_id}/cancel/')
+        self.assertEqual(res_cancel.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res_cancel.data.get('code'), 'refund_required')
+
+        # 1b. Shelter reject -> 409
+        self.client.force_authenticate(user=self.shelter_user)
+        res_reject = self.client.post(f'/api/v1/shelter/applications/{app_captured.public_id}/reject/', {'notes': 'Rejecting'})
+        self.assertEqual(res_reject.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res_reject.data.get('code'), 'refund_required')
+
+        # 1c. Shelter status patch -> 409
+        res_patch = self.client.patch(f'/api/v1/adoptions/{app_captured.public_id}/status/', {'status': 'rejected', 'notes': 'Rejecting'})
+        self.assertEqual(res_patch.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res_patch.data.get('code'), 'refund_required')
+
+        # Case 2: Payment is 'captured' with a refund in PROCESSING -> BLOCKED (409 refund_required)
+        app_processing = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='222', status='approved',
+            payment_method='online', total_amount=Decimal('100.00')
+        )
+        pay_proc = Payment.objects.create(
+            application=app_processing, status=PaymentStatus.CAPTURED, payment_method='razorpay',
+            amount=Decimal('100.00'), amount_in_paise=10000, razorpay_payment_id='pay_proc_guard_test'
+        )
+        Refund.objects.create(
+            payment=pay_proc, application=app_processing, amount_in_paise=10000,
+            status=RefundStatus.PROCESSING, razorpay_refund_id='rfnd_proc_123', source=RefundSource.MANUAL
+        )
+
+        # 2a. Adopter cancel -> 409
+        self.client.force_authenticate(user=self.adopter_1)
+        res_cancel2 = self.client.post(f'/api/v1/applications/{app_processing.public_id}/cancel/')
+        self.assertEqual(res_cancel2.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res_cancel2.data.get('code'), 'refund_required')
+
+        # 2b. Shelter reject -> 409
+        self.client.force_authenticate(user=self.shelter_user)
+        res_reject2 = self.client.post(f'/api/v1/shelter/applications/{app_processing.public_id}/reject/', {'notes': 'Rejecting'})
+        self.assertEqual(res_reject2.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res_reject2.data.get('code'), 'refund_required')
+
+        # 2c. Shelter status patch -> 409
+        res_patch2 = self.client.patch(f'/api/v1/adoptions/{app_processing.public_id}/status/', {'status': 'rejected', 'notes': 'Rejecting'})
+        self.assertEqual(res_patch2.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res_patch2.data.get('code'), 'refund_required')
+
+        # Case 3: Payment is 'refunded' -> ALLOWED (200 OK)
+        # 3a. Adopter cancel
+        app_refunded_1 = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='333', status='approved',
+            payment_method='online', payment_status='refunded', total_amount=Decimal('100.00')
+        )
+        pay_ref1 = Payment.objects.create(
+            application=app_refunded_1, status=PaymentStatus.REFUNDED, payment_method='razorpay',
+            amount=Decimal('100.00'), amount_in_paise=10000, razorpay_payment_id='pay_ref1_test'
+        )
+        Refund.objects.create(
+            payment=pay_ref1, application=app_refunded_1, amount_in_paise=10000,
+            status=RefundStatus.PROCESSED, razorpay_refund_id='rfnd_processed_1', source=RefundSource.MANUAL
+        )
+        self.client.force_authenticate(user=self.adopter_1)
+        res_cancel3 = self.client.post(f'/api/v1/applications/{app_refunded_1.public_id}/cancel/')
+        self.assertEqual(res_cancel3.status_code, status.HTTP_200_OK)
+        app_refunded_1.refresh_from_db()
+        self.assertEqual(app_refunded_1.status, 'cancelled')
+
+        # 3b. Shelter reject
+        app_refunded_2 = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='444', status='approved',
+            payment_method='online', payment_status='refunded', total_amount=Decimal('100.00')
+        )
+        pay_ref2 = Payment.objects.create(
+            application=app_refunded_2, status=PaymentStatus.REFUNDED, payment_method='razorpay',
+            amount=Decimal('100.00'), amount_in_paise=10000, razorpay_payment_id='pay_ref2_test'
+        )
+        Refund.objects.create(
+            payment=pay_ref2, application=app_refunded_2, amount_in_paise=10000,
+            status=RefundStatus.PROCESSED, razorpay_refund_id='rfnd_processed_2', source=RefundSource.MANUAL
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        res_reject3 = self.client.post(f'/api/v1/shelter/applications/{app_refunded_2.public_id}/reject/', {'notes': 'Rejecting refunded app'})
+        self.assertEqual(res_reject3.status_code, status.HTTP_200_OK)
+        app_refunded_2.refresh_from_db()
+        self.assertEqual(app_refunded_2.status, 'rejected')
+
+        # 3c. Shelter status patch
+        app_refunded_3 = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.adopter_1, living_situation='House', contact_phone='555', status='approved',
+            payment_method='online', payment_status='refunded', total_amount=Decimal('100.00')
+        )
+        pay_ref3 = Payment.objects.create(
+            application=app_refunded_3, status=PaymentStatus.REFUNDED, payment_method='razorpay',
+            amount=Decimal('100.00'), amount_in_paise=10000, razorpay_payment_id='pay_ref3_test'
+        )
+        Refund.objects.create(
+            payment=pay_ref3, application=app_refunded_3, amount_in_paise=10000,
+            status=RefundStatus.PROCESSED, razorpay_refund_id='rfnd_processed_3', source=RefundSource.MANUAL
+        )
+        res_patch3 = self.client.patch(f'/api/v1/adoptions/{app_refunded_3.public_id}/status/', {'status': 'rejected', 'notes': 'Patching refunded app'})
+        self.assertEqual(res_patch3.status_code, status.HTTP_200_OK)
+        app_refunded_3.refresh_from_db()
+        self.assertEqual(app_refunded_3.status, 'rejected')
+
 
 
 

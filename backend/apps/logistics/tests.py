@@ -3569,7 +3569,9 @@ class CancelAndRefundEndpointTests(TestCase):
         }
 
         self.client.force_authenticate(user=self.shelter_user)
-        res = self.client.post(self.url, {'reason': 'Adopter requested immediate cancellation'}, format='json')
+        from apps.accounts.models import Notification
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.post(self.url, {'reason': 'Adopter requested immediate cancellation'}, format='json')
 
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data['code'], 'success')
@@ -3603,6 +3605,15 @@ class CancelAndRefundEndpointTests(TestCase):
         self.assertEqual(refund.amount_in_paise, 25000)
         self.assertEqual(refund.razorpay_refund_id, 'rfnd_cr_flow_123')
 
+        # Notifications: exactly one adopter notice per refund, one driver notice when active delivery cancelled
+        driver_notices = Notification.objects.filter(recipient=self.driver_user, notification_type='delivery')
+        self.assertEqual(driver_notices.count(), 1)
+        self.assertIn("Delivery Cancelled", driver_notices.first().title)
+
+        adopter_notices = Notification.objects.filter(recipient=self.adopter, notification_type='payment')
+        self.assertEqual(adopter_notices.count(), 1)
+        self.assertIn("Refund Processed", adopter_notices.first().title)
+
         # Idempotency: repeat call returns 200 with code already_refunded
         res_repeat = self.client.post(self.url, {'reason': 'Repeat call'}, format='json')
         self.assertEqual(res_repeat.status_code, status.HTTP_200_OK)
@@ -3624,27 +3635,37 @@ class CancelAndRefundEndpointTests(TestCase):
         self.assertEqual(res.data['code'], 'success')
 
     def test_cancel_and_refund_permissions_enforcement(self):
-        """Only owning verified shelter or admin can cancel-and-refund; others rejected."""
-        # 1. Foreign shelter
+        """Only owning verified shelter or admin can cancel-and-refund; others rejected with 403 or 401, 404 for missing."""
+        # 1. Foreign shelter -> 403
         self.client.force_authenticate(user=self.other_shelter_user)
         res_foreign = self.client.post(self.url, {'reason': 'Wrong shelter'}, format='json')
         self.assertEqual(res_foreign.status_code, status.HTTP_403_FORBIDDEN)
 
-        # 2. Unverified shelter
+        # 2. Unverified shelter -> 403
         self.client.force_authenticate(user=self.unverified_shelter_user)
         res_unverified = self.client.post(self.url, {'reason': 'Unverified'}, format='json')
         self.assertEqual(res_unverified.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(res_unverified.data.get('code'), 'shelter_not_verified')
 
-        # 3. Adopter
+        # 3. Adopter -> 403
         self.client.force_authenticate(user=self.adopter)
         res_adopter = self.client.post(self.url, {'reason': 'Adopter attempt'}, format='json')
         self.assertEqual(res_adopter.status_code, status.HTTP_403_FORBIDDEN)
 
-        # 4. Anonymous
+        # 4. Driver -> 403
+        self.client.force_authenticate(user=self.driver_user)
+        res_driver = self.client.post(self.url, {'reason': 'Driver attempt'}, format='json')
+        self.assertEqual(res_driver.status_code, status.HTTP_403_FORBIDDEN)
+
+        # 5. Anonymous -> 401
         self.client.force_authenticate(user=None)
         res_anon = self.client.post(self.url, {'reason': 'Anon attempt'}, format='json')
         self.assertEqual(res_anon.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # 6. Non-existent delivery -> 404
+        self.client.force_authenticate(user=self.shelter_user)
+        res_404 = self.client.post('/api/v1/shelter/deliveries/00000000-0000-0000-0000-000000000000/cancel-and-refund/', {'reason': 'Missing'}, format='json')
+        self.assertEqual(res_404.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_cancel_and_refund_validation_errors(self):
         """Missing or oversized reason returns 400 validation error."""
@@ -4709,6 +4730,13 @@ class CODCashReconciliationTests(TestCase):
             role='adopter'
         )
 
+        self.driver_user = User.objects.create_user(
+            email='driver_recon@example.com',
+            username='driver_recon',
+            password='TestPassword123!',
+            role='delivery'
+        )
+
         self.pet = Pet.objects.create(
             name='Recon Pet',
             species='dog',
@@ -4776,14 +4804,24 @@ class CODCashReconciliationTests(TestCase):
         self.assertEqual(res.data.get('code'), 'shelter_not_verified')
 
     def test_reconcile_cash_forbidden_adopter_and_anon(self):
-        # Anonymous
+        # Anonymous -> 401
         res_anon = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
         self.assertEqual(res_anon.status_code, status.HTTP_401_UNAUTHORIZED)
 
-        # Adopter
+        # Adopter -> 403
         self.client.force_authenticate(user=self.adopter_user)
         res_adopter = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
         self.assertEqual(res_adopter.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Driver -> 403
+        self.client.force_authenticate(user=self.driver_user)
+        res_driver = self.client.post(f'/api/v1/shelter/deliveries/{self.delivery.public_id}/reconcile-cash/')
+        self.assertEqual(res_driver.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Non-existent delivery -> 404
+        self.client.force_authenticate(user=self.shelter_user)
+        res_404 = self.client.post('/api/v1/shelter/deliveries/00000000-0000-0000-0000-000000000000/reconcile-cash/')
+        self.assertEqual(res_404.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_reconcile_cash_blocked_if_not_cod(self):
         self.application.payment_method = 'online'
