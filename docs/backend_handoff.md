@@ -421,5 +421,30 @@ schtasks /create /tn "PetAdopt_Refund_Retry" /tr "C:\petadopt\backend\.venv\Scri
 
 ---
 
+## 7. Production Email Infrastructure & Delivery Safety
+
+KindHeart uses standard Django SMTP (`django.core.mail.backends.smtp.EmailBackend`) without external heavy worker dependencies. Celery is intentionally deferred to protect user OTPs from plaintext exposure in message broker queues.
+
+### 7.1 Environment Variables
+| Variable | Development Default | Production Invariant (DEBUG=False) |
+|---|---|---|
+| `EMAIL_BACKEND` | `django.core.mail.backends.console.EmailBackend` | Must NOT be `console`, `locmem`, `dummy`, or `filebased`. Fails closed (`ImproperlyConfigured`). |
+| `EMAIL_HOST` | `localhost` | Required; cannot be empty or contain `mock`. |
+| `EMAIL_PORT` | `587` | Standard SMTP TLS port (or `465` for SSL). |
+| `EMAIL_HOST_USER` | `""` | SMTP provider username or API identifier. |
+| `EMAIL_HOST_PASSWORD` | `""` | SMTP provider password or API secret. |
+| `EMAIL_USE_TLS` | `True` | Recommended for port 587. |
+| `EMAIL_USE_SSL` | `False` | Set `True` if using port 465. |
+| `EMAIL_TIMEOUT` | `10` | Socket timeout in seconds (prevents request threads from hanging). |
+| `DEFAULT_FROM_EMAIL` | `KindHeart Pet Adoption <no-reply@kindheart.org>` | Required; cannot be empty or contain `mock`. |
+
+### 7.2 Transactional & Fail-Safe Architecture
+To prevent slow SMTP servers from blocking requests or rolling back database changes:
+1. **Post-Commit Execution**: Every email dispatch (`send_driver_assigned_notice`, `dispatch_doorstep_otp`, `send_delivery_completed_notice`, cancellation notice, and refund notice) executes inside `transaction.on_commit(...)`.
+2. **Fail-Safe Exception Handling**: Every `send_mail` call is wrapped in a `try...except Exception` block with structured error logging. An SMTP timeout or failure will never rollback an approved adoption, payment capture, or delivery state, and will never return a `500 Internal Server Error` to the user.
+
+---
+
 *KindHeart Engineering Team — Production Backend API Specifications*
+
 

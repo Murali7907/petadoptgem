@@ -743,6 +743,9 @@ class ProductionCredentialFailClosedTests(APITestCase):
             'CLOUDINARY_CLOUD_NAME': 'real_cloud_kindheart',
             'CLOUDINARY_API_KEY': '987654321098765',
             'CLOUDINARY_API_SECRET': 'realCloudinarySecretKeyXyZ',
+            'EMAIL_BACKEND': 'django.core.mail.backends.smtp.EmailBackend',
+            'EMAIL_HOST': 'smtp.sendgrid.net',
+            'DEFAULT_FROM_EMAIL': 'KindHeart Pet Adoption <no-reply@kindheart.org>',
         }
 
     def test_dev_mode_debug_true_unaffected(self):
@@ -758,6 +761,9 @@ class ProductionCredentialFailClosedTests(APITestCase):
             'CLOUDINARY_CLOUD_NAME': 'mock_cloud',
             'CLOUDINARY_API_KEY': 'mock_key',
             'CLOUDINARY_API_SECRET': 'mock_secret',
+            'EMAIL_BACKEND': 'django.core.mail.backends.console.EmailBackend',
+            'EMAIL_HOST': 'mock_host',
+            'DEFAULT_FROM_EMAIL': 'mock_email@test.com',
         }
         with mock.patch.dict('os.environ', dev_env):
             # Should succeed silently
@@ -849,6 +855,48 @@ class ProductionCredentialFailClosedTests(APITestCase):
         with mock.patch.dict('os.environ', env):
             # Should not raise because Cloudinary is disabled
             self.validator()
+
+    def test_production_email_backend_insecure_fails(self):
+        """When DEBUG is False, console, locmem, dummy, or filebased EMAIL_BACKEND raises ImproperlyConfigured."""
+        from unittest import mock
+        from django.core.exceptions import ImproperlyConfigured
+
+        invalid_backends = [
+            'django.core.mail.backends.console.EmailBackend',
+            'django.core.mail.backends.locmem.EmailBackend',
+            'django.core.mail.backends.dummy.EmailBackend',
+            'django.core.mail.backends.filebased.EmailBackend',
+        ]
+        for backend in invalid_backends:
+            bad_env = dict(self.valid_prod_env, EMAIL_BACKEND=backend)
+            with mock.patch.dict('os.environ', bad_env):
+                with self.assertRaises(ImproperlyConfigured) as ctx:
+                    self.validator()
+                self.assertIn("EMAIL_BACKEND", str(ctx.exception))
+
+    def test_production_email_host_empty_or_mock_fails(self):
+        """When DEBUG is False, empty or mock EMAIL_HOST raises ImproperlyConfigured."""
+        from unittest import mock
+        from django.core.exceptions import ImproperlyConfigured
+
+        for bad_host in ['', 'mock_smtp_host']:
+            bad_env = dict(self.valid_prod_env, EMAIL_HOST=bad_host)
+            with mock.patch.dict('os.environ', bad_env):
+                with self.assertRaises(ImproperlyConfigured) as ctx:
+                    self.validator()
+                self.assertIn("EMAIL_HOST", str(ctx.exception))
+
+    def test_production_default_from_email_empty_or_mock_fails(self):
+        """When DEBUG is False, empty or mock DEFAULT_FROM_EMAIL raises ImproperlyConfigured."""
+        from unittest import mock
+        from django.core.exceptions import ImproperlyConfigured
+
+        for bad_email in ['', 'mock@kindheart.org']:
+            bad_env = dict(self.valid_prod_env, DEFAULT_FROM_EMAIL=bad_email)
+            with mock.patch.dict('os.environ', bad_env):
+                with self.assertRaises(ImproperlyConfigured) as ctx:
+                    self.validator()
+                self.assertIn("DEFAULT_FROM_EMAIL", str(ctx.exception))
 
 
 class SeedPlatformCommandSafetyTests(APITestCase):

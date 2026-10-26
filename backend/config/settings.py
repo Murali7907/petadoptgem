@@ -274,8 +274,20 @@ else:
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Email Configuration
-EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'KindHeart Pet Adoption <no-reply@kindheart.org>')
+if DEBUG:
+    default_email_backend = 'django.core.mail.backends.console.EmailBackend'
+else:
+    default_email_backend = 'django.core.mail.backends.smtp.EmailBackend'
+
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', default_email_backend).strip()
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'localhost' if DEBUG else '').strip()
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '').strip()
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '').strip()
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() in ('true', '1', 't', 'yes', 'y')
+EMAIL_USE_SSL = os.getenv('EMAIL_USE_SSL', 'False').lower() in ('true', '1', 't', 'yes', 'y')
+EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '10'))
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'KindHeart Pet Adoption <no-reply@kindheart.org>').strip()
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
 # Razorpay Payment Gateway Configuration (fail-closed in production)
@@ -457,6 +469,9 @@ def validate_production_credentials(
     cloudinary_cloud_name=None,
     cloudinary_api_key=None,
     cloudinary_api_secret=None,
+    email_backend=None,
+    email_host=None,
+    default_from_email=None,
 ):
     """
     Validates security constraints for production deployment.
@@ -464,6 +479,9 @@ def validate_production_credentials(
       - SECRET_KEY must not be empty or start with 'django-insecure'.
       - RAZORPAY_* credentials must not be empty or contain 'mock'.
       - When USE_CLOUDINARY is True, CLOUDINARY_* credentials must not be empty or start with 'mock'.
+      - EMAIL_BACKEND cannot be console, locmem, dummy, or filebased.
+      - EMAIL_HOST cannot be empty or contain 'mock'.
+      - DEFAULT_FROM_EMAIL cannot be empty or contain 'mock'.
     Raises ImproperlyConfigured if any invariant is violated.
     """
     if debug is None:
@@ -525,4 +543,46 @@ def validate_production_credentials(
             raise ImproperlyConfigured(
                 f"Mock Cloudinary credentials are forbidden when DEBUG is False: {', '.join(mock_c)}"
             )
+
+    # 4. EMAIL_* checks
+    if email_backend is None:
+        email_backend = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend').strip()
+    if email_host is None:
+        email_host = os.getenv('EMAIL_HOST', '').strip()
+    if default_from_email is None:
+        default_from_email = os.getenv('DEFAULT_FROM_EMAIL', '').strip()
+
+    invalid_backends = ['console', 'locmem', 'dummy', 'filebased']
+    if any(ib in email_backend.lower() for ib in invalid_backends):
+        raise ImproperlyConfigured(
+            f"Production EMAIL_BACKEND cannot be console, locmem, dummy, or filebased when DEBUG is False: {email_backend}"
+        )
+
+    if not email_host:
+        raise ImproperlyConfigured("EMAIL_HOST is required and cannot be empty when DEBUG is False.")
+    if 'mock' in email_host.lower():
+        raise ImproperlyConfigured(f"Mock EMAIL_HOST is forbidden when DEBUG is False: {email_host}")
+
+    if not default_from_email:
+        raise ImproperlyConfigured("DEFAULT_FROM_EMAIL is required and cannot be empty when DEBUG is False.")
+    if 'mock' in default_from_email.lower():
+        raise ImproperlyConfigured(f"Mock DEFAULT_FROM_EMAIL is forbidden when DEBUG is False: {default_from_email}")
+
+
+# Run production validation when running with DEBUG=False (outside test runner where test settings apply)
+if not DEBUG and 'test' not in sys.argv:
+    validate_production_credentials(
+        debug=DEBUG,
+        secret_key=SECRET_KEY,
+        razorpay_key_id=RAZORPAY_KEY_ID,
+        razorpay_key_secret=RAZORPAY_KEY_SECRET,
+        razorpay_webhook_secret=RAZORPAY_WEBHOOK_SECRET,
+        use_cloudinary=USE_CLOUDINARY,
+        cloudinary_cloud_name=CLOUDINARY_CLOUD_NAME,
+        cloudinary_api_key=CLOUDINARY_API_KEY,
+        cloudinary_api_secret=CLOUDINARY_API_SECRET,
+        email_backend=EMAIL_BACKEND,
+        email_host=EMAIL_HOST,
+        default_from_email=DEFAULT_FROM_EMAIL,
+    )
 
