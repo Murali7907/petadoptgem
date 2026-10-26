@@ -74,11 +74,8 @@ def cleanup_pet_medical_record_file(sender, instance, **kwargs):
 
     def _delete():
         try:
-            from django.core.files.storage import storages, default_storage
-            try:
-                storage = storages['raw_documents']
-            except Exception:
-                storage = default_storage
+            from apps.pets.storage import get_document_storage
+            storage = get_document_storage()
 
             storage.delete(storage_name)
             logger.info(f"Deleted PetMedicalRecord file from storage: {storage_name}")

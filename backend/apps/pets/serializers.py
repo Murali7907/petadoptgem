@@ -10,6 +10,7 @@ from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_field, OpenApiTypes
 from .models import Pet, PetImage, PetMedicalRecord, FavoritePet
 from apps.accounts.serializers import ShelterProfileSerializer
+from .storage import get_document_storage
 
 
 class MedicalOverviewRecordSerializer(serializers.Serializer):
@@ -136,11 +137,12 @@ class PetMedicalRecordSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         doc_file = validated_data.pop('document', None)
         if doc_file:
-            from django.core.files.storage import default_storage
+            from apps.pets.storage import get_document_storage
+            doc_storage = get_document_storage()
             pet = validated_data.get('pet')
             prefix = f"medical/{pet.id if pet else 'records'}"
-            saved_path = default_storage.save(f"{prefix}/{doc_file.name}", doc_file)
-            doc_url = default_storage.url(saved_path)
+            saved_path = doc_storage.save(f"{prefix}/{doc_file.name}", doc_file)
+            doc_url = doc_storage.url(saved_path)
             desc = validated_data.get('description', '')
             if desc:
                 validated_data['description'] = f"{desc}\nDocument: {doc_url}"
@@ -151,11 +153,12 @@ class PetMedicalRecordSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         doc_file = validated_data.pop('document', None)
         if doc_file:
-            from django.core.files.storage import default_storage
+            from apps.pets.storage import get_document_storage
+            doc_storage = get_document_storage()
             pet = instance.pet
             prefix = f"medical/{pet.id if pet else 'records'}"
-            saved_path = default_storage.save(f"{prefix}/{doc_file.name}", doc_file)
-            doc_url = default_storage.url(saved_path)
+            saved_path = doc_storage.save(f"{prefix}/{doc_file.name}", doc_file)
+            doc_url = doc_storage.url(saved_path)
             desc = validated_data.get('description', instance.clinical_description)
             validated_data['description'] = f"{desc}\nDocument: {doc_url}".strip() if desc else f"Document: {doc_url}"
         elif 'description' in validated_data and instance.document:

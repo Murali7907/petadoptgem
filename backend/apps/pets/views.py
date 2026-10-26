@@ -35,6 +35,7 @@ from .serializers import (
 )
 from apps.accounts.permissions import IsShelterRole, IsAdminRole, IsVerifiedShelter
 from apps.accounts.models import ShelterProfile
+from .storage import get_document_storage
 
 class Point:
     """
@@ -243,9 +244,10 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
             if doc_file:
                 from .validators import validate_medical_document
                 validate_medical_document(doc_file)
-                from django.core.files.storage import default_storage
-                saved_path = default_storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
-                doc_url = default_storage.url(saved_path)
+                from .storage import get_document_storage
+                doc_storage = get_document_storage()
+                saved_path = doc_storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
+                doc_url = doc_storage.url(saved_path)
                 curr_desc = data.get('description', '')
                 if not curr_desc and medical_record:
                     curr_desc = medical_record.clinical_description
@@ -429,9 +431,10 @@ class PetMedicalRecordListCreateView(generics.ListCreateAPIView):
         if doc_file and 'document' not in serializer.validated_data:
             from .validators import validate_medical_document
             validate_medical_document(doc_file)
-            from django.core.files.storage import default_storage
-            saved_path = default_storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
-            doc_url = default_storage.url(saved_path)
+            from .storage import get_document_storage
+            doc_storage = get_document_storage()
+            saved_path = doc_storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
+            doc_url = doc_storage.url(saved_path)
             desc = serializer.validated_data.get('description', '')
             desc_with_doc = f"{desc}\nDocument: {doc_url}".strip() if desc else f"Document: {doc_url}"
             serializer.save(pet=pet, description=desc_with_doc)

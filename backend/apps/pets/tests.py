@@ -1633,6 +1633,112 @@ class FileCleanupOnDeleteTests(APITestCase):
         self.assertFalse(PetImage.objects.filter(id=img.id).exists())
 
 
+class CloudinaryRawStorageForMedicalDocumentsTests(APITestCase):
+    """
+    Milestone 10a Task 5: Cloudinary Raw Storage for Medical Documents.
+    Asserts:
+      - Raw storage configuration in settings uses RawMediaCloudinaryStorage with RESOURCE_TYPE='raw'
+      - Local storage resolves to FileSystemStorage
+      - Medical record creation uses raw document storage, not image storage
+      - All storage operations patched with zero network calls
+    """
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='vet_shelter',
+            email='vet@example.com',
+            password='pass',
+            role='shelter'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.user,
+            organization_name='Vet Shelter',
+            is_verified=True
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter,
+            name='Luna',
+            species='cat',
+            age_months=8,
+            status='available'
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def test_cloudinary_raw_storage_backend_and_resource_type(self):
+        """When USE_CLOUDINARY is True, named storage raw_documents uses RawMediaCloudinaryStorage (RESOURCE_TYPE='raw')."""
+        from cloudinary_storage.storage import RawMediaCloudinaryStorage, MediaCloudinaryStorage
+        from django.core.files.storage import StorageHandler
+
+        custom_storages = {
+            'default': {
+                'BACKEND': 'cloudinary_storage.storage.MediaCloudinaryStorage',
+            },
+            'raw_documents': {
+                'BACKEND': 'cloudinary_storage.storage.RawMediaCloudinaryStorage',
+            },
+            'staticfiles': {
+                'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+            },
+        }
+        with override_settings(STORAGES=custom_storages, USE_CLOUDINARY=True):
+            handler = StorageHandler()
+            raw_storage = handler['raw_documents']
+            default_img_storage = handler['default']
+
+            self.assertIsInstance(raw_storage, RawMediaCloudinaryStorage)
+            self.assertEqual(raw_storage.RESOURCE_TYPE, 'raw')
+            self.assertIsInstance(default_img_storage, MediaCloudinaryStorage)
+            self.assertEqual(default_img_storage.RESOURCE_TYPE, 'image')
+
+    def test_local_storage_mode_uses_filesystem_storage(self):
+        """In local development (USE_CLOUDINARY=False), raw_documents resolves to FileSystemStorage."""
+        from django.core.files.storage import StorageHandler, FileSystemStorage
+
+        custom_storages = {
+            'default': {
+                'BACKEND': 'django.core.files.storage.FileSystemStorage',
+            },
+            'raw_documents': {
+                'BACKEND': 'django.core.files.storage.FileSystemStorage',
+            },
+        }
+        with override_settings(STORAGES=custom_storages, USE_CLOUDINARY=False):
+            handler = StorageHandler()
+            self.assertIsInstance(handler['raw_documents'], FileSystemStorage)
+
+    def test_medical_record_upload_calls_raw_document_storage_not_image_storage(self):
+        """Uploading a PDF/DOCX routes through get_document_storage (mocked raw storage), not image storage."""
+        from unittest.mock import MagicMock, patch
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        mock_raw_storage = MagicMock()
+        mock_raw_storage.save.return_value = 'medical/1/cert.pdf'
+        mock_raw_storage.url.return_value = 'https://res.cloudinary.com/cloud/raw/upload/v12345/medical/1/cert.pdf'
+
+        pdf_content = b"%PDF-1.4 sample pdf content for medical test"
+        uploaded_doc = SimpleUploadedFile("cert.pdf", pdf_content, content_type="application/pdf")
+
+        with patch('apps.pets.storage.get_document_storage', return_value=mock_raw_storage), \
+             patch('apps.pets.serializers.get_document_storage', return_value=mock_raw_storage), \
+             patch('apps.pets.views.get_document_storage', return_value=mock_raw_storage):
+            with patch('django.core.files.storage.default_storage.save') as mock_default_save:
+                url = reverse('pet_medical_records', kwargs={'pet_public_id': self.pet.public_id})
+                data = {
+                    'title': 'Vaccination Certificate',
+                    'record_date': '2026-05-01',
+                    'description': 'Annual rabies vaccination',
+                    'document': uploaded_doc,
+                }
+                response = self.client.post(url, data, format='multipart')
+
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+                # Verify raw storage was used
+                mock_raw_storage.save.assert_called_once()
+                mock_raw_storage.url.assert_called_once()
+                # Default image storage was NOT called for document save
+                mock_default_save.assert_not_called()
+
+
+
 
 
 

@@ -253,6 +253,9 @@ if USE_CLOUDINARY:
         'raw': {
             'BACKEND': 'cloudinary_storage.storage.RawMediaCloudinaryStorage',
         },
+        'raw_documents': {
+            'BACKEND': 'cloudinary_storage.storage.RawMediaCloudinaryStorage',
+        },
         'staticfiles': {
             'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
         },
@@ -264,6 +267,9 @@ else:
             'BACKEND': 'django.core.files.storage.FileSystemStorage',
         },
         'raw': {
+            'BACKEND': 'django.core.files.storage.FileSystemStorage',
+        },
+        'raw_documents': {
             'BACKEND': 'django.core.files.storage.FileSystemStorage',
         },
         'staticfiles': {
