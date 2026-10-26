@@ -1461,6 +1461,179 @@ class DistancePrivacyAndThrottlingTests(APITestCase):
             self.assertEqual(r_no_geo.status_code, status.HTTP_200_OK)
 
 
+class FileCleanupOnDeleteTests(APITestCase):
+    """
+    Milestone 10a Task 4: post_delete storage cleanup for PetImage and PetMedicalRecord.
+    Asserts:
+      - File removed after delete
+      - External URL untouched
+      - Rolled-back delete keeps the file
+      - Cascade delete removes files
+      - Queryset .delete() removes files
+      - Storage errors are logged and swallowed without raising
+    """
+    def setUp(self):
+        import tempfile
+        self.temp_media = tempfile.mkdtemp()
+        self.override = override_settings(
+            MEDIA_ROOT=self.temp_media,
+            USE_CLOUDINARY=False,
+        )
+        self.override.enable()
+
+        self.user = User.objects.create_user(
+            username='cleanup_shelter',
+            email='cleanup@example.com',
+            password='pass',
+            role='shelter'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.user,
+            organization_name='Cleanup Shelter',
+            is_verified=True
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter,
+            name='CleanupPet',
+            species='dog',
+            age_months=12,
+            status='available'
+        )
+
+    def tearDown(self):
+        import shutil
+        self.override.disable()
+        shutil.rmtree(self.temp_media, ignore_errors=True)
+
+    def test_file_removed_after_delete_for_image_and_medical(self):
+        """Stored files are deleted via default_storage on transaction commit."""
+        from django.core.files.storage import default_storage
+        from django.core.files.base import ContentFile
+
+        img_path = default_storage.save('pets/test_img.jpg', ContentFile(b'test image bytes'))
+        doc_path = default_storage.save('medical/test_doc.pdf', ContentFile(b'%PDF-1.4 test bytes'))
+
+        img = PetImage.objects.create(pet=self.pet, image_url=img_path)
+        med = PetMedicalRecord.objects.create(
+            pet=self.pet,
+            title='Rabies Vaccine',
+            record_date='2026-01-01',
+            description=f'Document: {doc_path}'
+        )
+
+        self.assertTrue(default_storage.exists(img_path))
+        self.assertTrue(default_storage.exists(doc_path))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            img.delete()
+            med.delete()
+
+        self.assertFalse(default_storage.exists(img_path))
+        self.assertFalse(default_storage.exists(doc_path))
+
+    def test_external_url_untouched_on_delete(self):
+        """External image URLs and document URLs are never passed to storage.delete."""
+        from django.core.files.storage import default_storage
+        from unittest.mock import patch
+
+        img = PetImage.objects.create(pet=self.pet, image_url='https://images.unsplash.com/photo-sample-dog')
+        med = PetMedicalRecord.objects.create(
+            pet=self.pet,
+            title='External Certificate',
+            record_date='2026-01-01',
+            description='Document: https://external-docs.example.com/record.pdf'
+        )
+
+        with patch.object(default_storage, 'delete') as mock_delete:
+            with self.captureOnCommitCallbacks(execute=True):
+                img.delete()
+                med.delete()
+
+        mock_delete.assert_not_called()
+
+    def test_rolled_back_delete_keeps_file(self):
+        """When a deletion transaction is rolled back, the storage file is preserved."""
+        from django.core.files.storage import default_storage
+        from django.core.files.base import ContentFile
+        from django.db import transaction
+
+        img_path = default_storage.save('pets/keep_me.jpg', ContentFile(b'preserve this file'))
+        img = PetImage.objects.create(pet=self.pet, image_url=img_path)
+        img_id = img.id
+
+        try:
+            with transaction.atomic():
+                img.delete()
+                raise RuntimeError("Simulated transaction failure")
+        except RuntimeError:
+            pass
+
+        # File must still exist because on_commit callbacks were discarded
+        self.assertTrue(default_storage.exists(img_path))
+        self.assertTrue(PetImage.objects.filter(id=img_id).exists())
+
+    def test_cascade_delete_removes_files(self):
+        """Deleting a parent Pet cascades to PetImage and PetMedicalRecord and deletes files."""
+        from django.core.files.storage import default_storage
+        from django.core.files.base import ContentFile
+
+        img_path = default_storage.save('pets/cascade_img.jpg', ContentFile(b'cascade image'))
+        doc_path = default_storage.save('medical/cascade_doc.pdf', ContentFile(b'cascade doc'))
+
+        PetImage.objects.create(pet=self.pet, image_url=img_path)
+        PetMedicalRecord.objects.create(
+            pet=self.pet,
+            title='Checkup Record',
+            record_date='2026-01-01',
+            description=f'Document: {doc_path}'
+        )
+
+        self.assertTrue(default_storage.exists(img_path))
+        self.assertTrue(default_storage.exists(doc_path))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.pet.delete()
+
+        self.assertFalse(default_storage.exists(img_path))
+        self.assertFalse(default_storage.exists(doc_path))
+
+    def test_queryset_delete_removes_files(self):
+        """Bulk queryset .delete() fires signals and deletes all associated files."""
+        from django.core.files.storage import default_storage
+        from django.core.files.base import ContentFile
+
+        img1_path = default_storage.save('pets/qs1.jpg', ContentFile(b'image 1'))
+        img2_path = default_storage.save('pets/qs2.jpg', ContentFile(b'image 2'))
+
+        PetImage.objects.create(pet=self.pet, image_url=img1_path)
+        PetImage.objects.create(pet=self.pet, image_url=img2_path)
+
+        self.assertTrue(default_storage.exists(img1_path))
+        self.assertTrue(default_storage.exists(img2_path))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            PetImage.objects.filter(pet=self.pet).delete()
+
+        self.assertFalse(default_storage.exists(img1_path))
+        self.assertFalse(default_storage.exists(img2_path))
+
+    def test_storage_error_does_not_raise(self):
+        """Storage exceptions during deletion are logged and swallowed without breaking request."""
+        from django.core.files.storage import default_storage
+        from django.core.files.base import ContentFile
+        from unittest.mock import patch
+
+        img_path = default_storage.save('pets/error_test.jpg', ContentFile(b'test bytes'))
+        img = PetImage.objects.create(pet=self.pet, image_url=img_path)
+
+        with patch.object(default_storage, 'delete', side_effect=IOError("Simulated filesystem error")):
+            with self.captureOnCommitCallbacks(execute=True):
+                img.delete()  # Must not raise IOError
+
+        self.assertFalse(PetImage.objects.filter(id=img.id).exists())
+
+
+
 
 
 
