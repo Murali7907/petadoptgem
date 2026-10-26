@@ -360,5 +360,66 @@ The shelter profile is serialized as the nested `shelter_profile` object (`Shelt
 
 ---
 
+## 9. Operational Maintenance & Automated Refund Schedulers
+
+### 9.1 Background Execution Notice
+> [!IMPORTANT]
+> **Nothing runs `retry_pending_refunds` automatically within the Django web application process.**
+>
+> In production and staging deployments, an external operating system scheduler (such as Linux cron, systemd timer, or Windows Task Scheduler) **MUST** be configured to execute `python manage.py retry_pending_refunds` at regular intervals (recommended: 5 minutes) to ensure failed or unconfirmed refunds are safely reconciled and retried.
+
+The command scans for `Refund` rows in `created` or `failed` status older than `REFUND_RETRY_AFTER_MINUTES` (configured via environment variable, defaulting to 10 minutes), checks the Razorpay API gateway for any existing processed refunds via `fetch_multiple_refund` to avoid duplicate payouts, and idempotently finishes the refund flow.
+
+### 9.2 Scheduler Configuration Examples (5-Minute Interval)
+
+#### Linux cron
+Add the following line to the crontab of the deployment user (`crontab -e`):
+```cron
+*/5 * * * * cd /opt/petadopt/backend && /opt/petadopt/backend/.venv/bin/python manage.py retry_pending_refunds >> /var/log/petadopt/refund_retry.log 2>&1
+```
+
+#### Linux systemd Timer
+Create the service unit file `/etc/systemd/system/petadopt-refund-retry.service`:
+```ini
+[Unit]
+Description=PetAdopt Pending Refund Reconciler and Retry
+After=network.target
+
+[Service]
+Type=oneshot
+User=www-data
+WorkingDirectory=/opt/petadopt/backend
+ExecStart=/opt/petadopt/backend/.venv/bin/python manage.py retry_pending_refunds
+StandardOutput=journal
+StandardError=journal
+```
+
+Create the timer unit file `/etc/systemd/system/petadopt-refund-retry.timer`:
+```ini
+[Unit]
+Description=Run PetAdopt Refund Retry every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+Enable and start the timer:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now petadopt-refund-retry.timer
+```
+
+#### Windows Task Scheduler (PowerShell / cmd)
+Register a scheduled task running every 5 minutes:
+```powershell
+schtasks /create /tn "PetAdopt_Refund_Retry" /tr "C:\petadopt\backend\.venv\Scripts\python.exe C:\petadopt\backend\manage.py retry_pending_refunds" /sc minute /mo 5 /ru "SYSTEM"
+```
+
+---
+
 *KindHeart Engineering Team — Production Backend API Specifications*
 

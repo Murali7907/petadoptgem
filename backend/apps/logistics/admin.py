@@ -1,5 +1,7 @@
-from django.contrib import admin
-from .models import PetDelivery, Payment, DeliveryLocationPing, Refund
+from django.contrib import admin, messages
+from django.utils.timesince import timesince
+from .models import PetDelivery, Payment, DeliveryLocationPing, Refund, RefundStatus, PaymentStatus
+from .payment_services import issue_refund
 
 @admin.register(PetDelivery)
 class PetDeliveryAdmin(admin.ModelAdmin):
@@ -41,22 +43,23 @@ class DeliveryLocationPingAdmin(admin.ModelAdmin):
 
 @admin.register(Refund)
 class RefundAdmin(admin.ModelAdmin):
-    """Read-only Django admin interface for inspecting payment refunds."""
+    """Read-only Django admin interface for inspecting payment refunds with admin retry action."""
     list_display = (
         'id',
+        'status',
+        'reason',
+        'source',
+        'failure_reason',
+        'age',
         'public_id',
         'payment',
         'application',
         'amount_in_paise',
-        'status',
         'razorpay_refund_id',
-        'source',
-        'initiated_by',
         'created_at',
-        'updated_at',
     )
     list_filter = ('status', 'source', 'created_at')
-    search_fields = ('razorpay_refund_id', 'payment__transaction_id', 'application__applicant__username', 'reason')
+    search_fields = ('razorpay_refund_id', 'payment__transaction_id', 'application__applicant__username', 'reason', 'failure_reason')
     readonly_fields = (
         'public_id',
         'payment',
@@ -71,6 +74,55 @@ class RefundAdmin(admin.ModelAdmin):
         'created_at',
         'updated_at',
     )
+    actions = ['retry_selected_refunds']
+
+    @admin.display(description="Age", ordering="created_at")
+    def age(self, obj):
+        return timesince(obj.created_at)
+
+    @admin.action(description="Retry selected refunds")
+    def retry_selected_refunds(self, request, queryset):
+        """Platform admin only: retries selected pending or failed refunds using idempotent issue_refund."""
+        if not (request.user.is_authenticated and (request.user.is_superuser or getattr(request.user, 'role', None) == 'admin')):
+            self.message_user(request, "Permission denied: Platform admin only.", level=messages.ERROR)
+            return
+
+        success_count = 0
+        failed_count = 0
+        skipped_count = 0
+
+        for refund in queryset:
+            payment = refund.payment
+            if refund.status == RefundStatus.PROCESSED or payment.status == PaymentStatus.REFUNDED:
+                skipped_count += 1
+                continue
+
+            try:
+                result = issue_refund(
+                    payment=payment,
+                    reason=refund.reason or "Admin triggered refund retry",
+                    initiated_by=request.user,
+                    source=refund.source or 'admin_retry',
+                    refund_obj=refund,
+                )
+                if result.status == RefundStatus.PROCESSED:
+                    success_count += 1
+                else:
+                    failed_count += 1
+            except Exception as e:
+                failed_count += 1
+
+        msg = f"Refund retry completed: {success_count} succeeded, {failed_count} failed, {skipped_count} skipped."
+        if failed_count > 0:
+            self.message_user(request, msg, level=messages.WARNING)
+        else:
+            self.message_user(request, msg, level=messages.SUCCESS)
+
+    def get_actions(self, request):
+        actions = super().get_actions(request)
+        if not (request.user.is_authenticated and (request.user.is_superuser or getattr(request.user, 'role', None) == 'admin')):
+            actions.pop('retry_selected_refunds', None)
+        return actions
 
     def has_add_permission(self, request):
         return False

@@ -1,5 +1,6 @@
 import logging
 from datetime import timedelta
+from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 from apps.logistics.models import Refund, RefundStatus, PaymentStatus
@@ -12,15 +13,18 @@ class Command(BaseCommand):
     help = "Retries failed or stuck created refunds older than N minutes (idempotent)."
 
     def add_arguments(self, parser):
+        default_minutes = getattr(settings, 'REFUND_RETRY_AFTER_MINUTES', 10)
         parser.add_argument(
             '--minutes',
             type=int,
-            default=15,
-            help="Age threshold in minutes for pending or failed refunds to retry (default: 15)."
+            default=default_minutes,
+            help=f"Age threshold in minutes for pending or failed refunds to retry (default: {default_minutes})."
         )
 
     def handle(self, *args, **options):
-        minutes = options.get('minutes', 15)
+        minutes = options.get('minutes')
+        if minutes is None:
+            minutes = getattr(settings, 'REFUND_RETRY_AFTER_MINUTES', 10)
         cutoff = timezone.now() - timedelta(minutes=minutes)
 
         self.stdout.write(f"Searching for pending/failed refunds created on or before {cutoff} ({minutes}m cutoff)...")
@@ -62,7 +66,8 @@ class Command(BaseCommand):
                     payment=payment,
                     reason=refund.reason or "Retried by retry_pending_refunds",
                     initiated_by=refund.initiated_by,
-                    source=refund.source
+                    source=refund.source,
+                    refund_obj=refund,
                 )
                 if result.status == RefundStatus.PROCESSED:
                     success_count += 1

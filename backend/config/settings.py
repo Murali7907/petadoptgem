@@ -443,6 +443,9 @@ else:
     SECURE_REFERRER_POLICY = 'same-origin'
     SECURE_PROXY_SSL_HEADER = None
 
+# Refund Retry Configuration
+REFUND_RETRY_AFTER_MINUTES = int(os.getenv('REFUND_RETRY_AFTER_MINUTES', '10'))
+
 
 def validate_production_credentials(
     debug=None,

@@ -4069,6 +4069,165 @@ class LateCaptureAndRefundCommandTests(TestCase):
         self.assertFalse(admin_instance.has_delete_permission(None))
         self.assertFalse(admin_instance.has_change_permission(None))
 
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_retry_pending_refunds_uses_refund_retry_after_minutes_setting(self, mock_get_client):
+        """Milestone 9b Task 3: retry_pending_refunds honors REFUND_RETRY_AFTER_MINUTES setting."""
+        from datetime import timedelta
+        from django.conf import settings
+        from django.core.management import call_command
+        from django.test import override_settings
+        from django.utils import timezone
+        from io import StringIO
+        from apps.logistics.models import Refund, RefundStatus
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_env_test_999',
+            'amount': 20000,
+            'status': 'processed'
+        }
+
+        self.payment.status = PaymentStatus.CAPTURED
+        self.payment.save()
+
+        # Create refund 8 minutes ago (less than default 10 minutes)
+        refund = Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=20000,
+            status=RefundStatus.FAILED,
+            reason="Recent failure",
+            failure_reason="Temporary network failure"
+        )
+        Refund.objects.filter(id=refund.id).update(created_at=timezone.now() - timedelta(minutes=8))
+
+        # Default is 10 minutes: 8-minute-old refund should NOT be retried
+        out = StringIO()
+        call_command('retry_pending_refunds', stdout=out)
+        self.assertIn("No pending or failed refunds found", out.getvalue())
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, RefundStatus.FAILED)
+
+        # Override setting to 5 minutes: now 8-minute-old refund SHOULD be retried
+        with override_settings(REFUND_RETRY_AFTER_MINUTES=5):
+            out2 = StringIO()
+            call_command('retry_pending_refunds', stdout=out2)
+            self.assertIn("Completed refund retries: 1 retried, 1 succeeded", out2.getvalue())
+            refund.refresh_from_db()
+            self.assertEqual(refund.status, RefundStatus.PROCESSED)
+            self.assertEqual(refund.razorpay_refund_id, 'rfnd_env_test_999')
+
+    def test_refund_admin_list_display_and_age(self):
+        """Milestone 9b Task 3: RefundAdmin shows status, reason, source, failure_reason and age."""
+        from django.contrib.admin.sites import AdminSite
+        from apps.logistics.admin import RefundAdmin
+        from apps.logistics.models import Refund, RefundStatus, RefundSource
+
+        admin_instance = RefundAdmin(Refund, AdminSite())
+        for field in ['status', 'reason', 'source', 'failure_reason', 'age']:
+            self.assertIn(field, admin_instance.list_display)
+
+        refund = Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=20000,
+            status=RefundStatus.FAILED,
+            reason="Test failure",
+            source=RefundSource.MANUAL,
+            failure_reason="Gateway rejected"
+        )
+        age_str = admin_instance.age(refund)
+        self.assertIsInstance(age_str, str)
+        self.assertTrue(len(age_str) > 0)
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_refund_admin_retry_selected_refunds_action_platform_admin(self, mock_get_client):
+        """Milestone 9b Task 3: Platform admin can trigger 'Retry selected refunds' action."""
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from apps.logistics.admin import RefundAdmin
+        from apps.logistics.models import Refund, RefundStatus
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_admin_action_success_1',
+            'amount': 20000,
+            'status': 'processed'
+        }
+
+        self.payment.status = PaymentStatus.CAPTURED
+        self.payment.save()
+
+        refund = Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=20000,
+            status=RefundStatus.FAILED,
+            reason="Test admin retry",
+            failure_reason="Network error"
+        )
+
+        admin_user = User.objects.create_superuser(
+            username='platform_admin_refund', email='admin_ref@test.com', password='password123'
+        )
+
+        rf = RequestFactory()
+        request = rf.post('/admin/logistics/refund/')
+        request.user = admin_user
+        request.session = 'session'
+        request._messages = FallbackStorage(request)
+
+        admin_instance = RefundAdmin(Refund, AdminSite())
+        actions = admin_instance.get_actions(request)
+        self.assertIn('retry_selected_refunds', actions)
+
+        # Execute action
+        admin_instance.retry_selected_refunds(request, Refund.objects.filter(id=refund.id))
+
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, RefundStatus.PROCESSED)
+        self.assertEqual(refund.razorpay_refund_id, 'rfnd_admin_action_success_1')
+
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, PaymentStatus.REFUNDED)
+
+    def test_refund_admin_retry_selected_refunds_denied_for_non_platform_admin(self):
+        """Milestone 9b Task 3: Non-platform admin is denied retry action."""
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from apps.logistics.admin import RefundAdmin
+        from apps.logistics.models import Refund, RefundStatus
+
+        self.payment.status = PaymentStatus.CAPTURED
+        self.payment.save()
+
+        refund = Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=20000,
+            status=RefundStatus.FAILED,
+            reason="Cannot retry by shelter",
+            failure_reason="Initial fail"
+        )
+
+        rf = RequestFactory()
+        request = rf.post('/admin/logistics/refund/')
+        request.user = self.shelter_user  # shelter role, not admin
+        request.session = 'session'
+        request._messages = FallbackStorage(request)
+
+        admin_instance = RefundAdmin(Refund, AdminSite())
+        actions = admin_instance.get_actions(request)
+        self.assertNotIn('retry_selected_refunds', actions)
+
+        # Direct invocation must be blocked
+        admin_instance.retry_selected_refunds(request, Refund.objects.filter(id=refund.id))
+
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, RefundStatus.FAILED)
+
 
 class LateCaptureConcurrencyTests(TransactionTestCase):
     """Milestone 9: Concurrent verify + webhook on cancelled application creates exactly one refund."""
