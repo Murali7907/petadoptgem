@@ -3442,6 +3442,109 @@ class RefundLedgerAndServiceTests(APITestCase):
         self.payment.refresh_from_db()
         self.assertEqual(self.payment.status, PaymentStatus.REFUNDED)
 
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_refund_idempotency_header_and_deterministic_keys(self, mock_get_client):
+        """
+        Milestone 10a Task 2: Assert exact X-Refund-Idempotency header,
+        that retries of one Refund row send the same key, and a new row sends a different key.
+        """
+        import re
+        from apps.logistics.models import Refund, RefundStatus
+        from apps.logistics.payment_services import issue_refund
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.fetch_multiple_refund.return_value = {'items': []}
+
+        # Step 1: Initial refund call fails at gateway (so row remains FAILED and retryable)
+        mock_client.payment.refund.side_effect = Exception("Gateway connection error")
+        from apps.logistics.payment_services import RefundFailedError
+        with self.assertRaises(RefundFailedError):
+            issue_refund(payment=self.payment, reason="Initial attempt")
+
+        first_call_args = mock_client.payment.refund.call_args
+        first_headers = first_call_args.kwargs.get('headers', {})
+        self.assertIn('X-Refund-Idempotency', first_headers)
+        first_key = first_headers['X-Refund-Idempotency']
+
+        refund_row_1 = Refund.objects.filter(payment=self.payment).order_by('-created_at').first()
+        self.assertIsNotNone(refund_row_1)
+        expected_key_1 = f"kh-refund-{refund_row_1.id}"
+        self.assertEqual(first_key, expected_key_1)
+        # Key must be at least 10 chars and contain only letters, digits, hyphens, and underscores
+        self.assertGreaterEqual(len(first_key), 10)
+        self.assertTrue(re.match(r'^[A-Za-z0-9_-]+$', first_key))
+
+        # Step 2: Retry of the same Refund row reuses the same deterministic key
+        mock_client.payment.refund.reset_mock()
+        mock_client.payment.refund.side_effect = None
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_retry_row1',
+            'amount': 25000,
+            'status': 'processed'
+        }
+        retried_refund = issue_refund(payment=self.payment, reason="Retry of row 1", refund_obj=refund_row_1)
+        self.assertEqual(retried_refund.id, refund_row_1.id)
+
+        retry_call_args = mock_client.payment.refund.call_args
+        retry_headers = retry_call_args.kwargs.get('headers', {})
+        self.assertEqual(retry_headers.get('X-Refund-Idempotency'), expected_key_1)
+
+        # Step 3: A new Refund row for another payment gets a distinct key
+        payment_2 = Payment.objects.create(
+            delivery=None,
+            application=self.application,
+            amount_in_paise=15000,
+            status=PaymentStatus.CAPTURED,
+            razorpay_order_id='order_distinct_pay_2',
+            razorpay_payment_id='pay_distinct_pay_2',
+            currency='INR'
+        )
+        mock_client.payment.refund.reset_mock()
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_new_row2',
+            'amount': 15000,
+            'status': 'processed'
+        }
+        new_refund = issue_refund(payment=payment_2, reason="New payment refund")
+        self.assertNotEqual(new_refund.id, refund_row_1.id)
+
+        new_call_args = mock_client.payment.refund.call_args
+        new_headers = new_call_args.kwargs.get('headers', {})
+        new_key = new_headers.get('X-Refund-Idempotency')
+        expected_key_2 = f"kh-refund-{new_refund.id}"
+        self.assertEqual(new_key, expected_key_2)
+        self.assertNotEqual(new_key, first_key)
+        self.assertGreaterEqual(len(new_key), 10)
+        self.assertTrue(re.match(r'^[A-Za-z0-9_-]+$', new_key))
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_refund_409_response_handled_as_in_progress_without_crash_or_state_change(self, mock_get_client):
+        """
+        Milestone 10a Task 2: Razorpay 409 response for idempotency header is treated
+        as 'refund_in_progress' (retryable): no state change, clear log line, no crash.
+        """
+        from apps.logistics.models import Refund, RefundStatus
+        from apps.logistics.payment_services import issue_refund
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.fetch_multiple_refund.return_value = {'items': []}
+
+        # Simulate Razorpay 409 exception
+        conflict_err = Exception("409 Client Error: Conflict for url: https://api.razorpay.com/v1/payments/.../refund")
+        conflict_err.status_code = 409
+        mock_client.payment.refund.side_effect = conflict_err
+
+        # Should not raise RefundFailedError or crash
+        refund = issue_refund(payment=self.payment, reason="Testing 409 handling")
+
+        # No state change: status must NOT be FAILED, remains CREATED
+        self.assertEqual(refund.status, RefundStatus.CREATED)
+        self.assertEqual(refund.failure_reason, '')
+
+        # Payment remains captured
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, PaymentStatus.CAPTURED)
+
 
 class CancelAndRefundEndpointTests(TestCase):
     """Milestone 9 Task 2: Shelter Delivery Cancel and Refund Endpoint Tests."""

@@ -588,6 +588,7 @@ def issue_refund(payment: Payment, reason: str = "", initiated_by=None, source: 
             logger.warning(f"Failed to query Razorpay refunds before issuing for Payment #{locked_payment.id}: {query_exc}")
 
     # No existing full refund found at gateway: call Razorpay refund endpoint
+    idempotency_key = f"kh-refund-{refund.id}"
     refund_data = {
         'amount': refund.amount_in_paise,
         'notes': {
@@ -598,7 +599,7 @@ def issue_refund(payment: Payment, reason: str = "", initiated_by=None, source: 
     }
     refund_options = {
         'headers': {
-            'X-Razorpay-Idempotency-Key': str(refund.public_id)
+            'X-Refund-Idempotency': idempotency_key
         }
     }
 
@@ -609,12 +610,38 @@ def issue_refund(payment: Payment, reason: str = "", initiated_by=None, source: 
             **refund_options
         )
     except Exception as exc:
+        is_409 = (
+            getattr(exc, 'status_code', None) == 409
+            or getattr(getattr(exc, 'response', None), 'status_code', None) == 409
+            or '409' in str(exc)
+            or 'in progress' in str(exc).lower()
+            or 'in_progress' in str(exc).lower()
+            or 'conflict' in str(exc).lower()
+        )
+        if is_409:
+            logger.info(
+                f"Razorpay refund is in progress (409 conflict/in_progress) for Payment #{locked_payment.id}, "
+                f"Refund #{refund.id} (key={idempotency_key}): {exc}"
+            )
+            return refund
+
         err_msg = str(exc)
         logger.error(f"Razorpay refund API call failed for Payment #{locked_payment.id}: {err_msg}", exc_info=True)
         refund.status = RefundStatus.FAILED
         refund.failure_reason = err_msg
         refund.save(update_fields=['status', 'failure_reason', 'updated_at'])
         raise RefundFailedError(detail={"code": "refund_failed", "detail": f"Refund gateway call failed: {err_msg}"})
+
+    if isinstance(rzp_response, dict) and (
+        rzp_response.get('status_code') == 409
+        or rzp_response.get('code') in ['409', 'refund_in_progress']
+        or rzp_response.get('status') == 'refund_in_progress'
+    ):
+        logger.info(
+            f"Razorpay refund returned 409/in_progress for Payment #{locked_payment.id}, "
+            f"Refund #{refund.id} (key={idempotency_key}): {rzp_response}"
+        )
+        return refund
 
     rzp_refund_id = rzp_response.get('id', '')
     rzp_status = rzp_response.get('status', 'processed')
