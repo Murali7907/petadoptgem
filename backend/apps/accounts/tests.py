@@ -8,6 +8,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 import jwt
 from django.conf import settings
+from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -850,7 +851,27 @@ class ProductionCredentialFailClosedTests(APITestCase):
             self.validator()
 
 
+class SeedPlatformCommandSafetyTests(APITestCase):
+    """
+    Tests ensuring seed_platform refuses to run when settings.DEBUG is False,
+    raising CommandError before any database operations and producing zero DB mutations.
+    """
+    @override_settings(DEBUG=False)
+    def test_seed_platform_refuses_when_debug_false(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+        from apps.accounts.models import User
+        from apps.pets.models import Pet
 
+        initial_user_count = User.objects.count()
+        initial_pet_count = Pet.objects.count()
 
+        with self.assertRaises(CommandError) as ctx:
+            call_command('seed_platform')
+
+        self.assertIn("strictly forbidden when DEBUG is False", str(ctx.exception))
+        # Ensure zero rows were created
+        self.assertEqual(User.objects.count(), initial_user_count)
+        self.assertEqual(Pet.objects.count(), initial_pet_count)
 
 

@@ -2,7 +2,7 @@ import uuid
 from decimal import Decimal
 from datetime import timedelta
 from django.conf import settings
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 from django.db import transaction
 
@@ -18,6 +18,9 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def handle(self, *args, **options):
+        if not getattr(settings, 'DEBUG', False):
+            raise CommandError("seed_platform creates demo credentials and is strictly forbidden when DEBUG is False.")
+
         self.stdout.write(self.style.MIGRATE_HEADING("Seeding KindHeart Pet Adoption & Logistics Platform..."))
 
         # -------------------------------------------------------------------------
@@ -554,23 +557,24 @@ class Command(BaseCommand):
         )
 
         # -------------------------------------------------------------------------
-        # Clean Terminal Summary (Secrets/Passwords are NOT displayed raw)
+        # Clean Terminal Summary (Displayed only in DEBUG mode)
         # -------------------------------------------------------------------------
-        self.stdout.write(self.style.SUCCESS("\n" + "=" * 70))
-        self.stdout.write(self.style.SUCCESS("  KindHeart Pet Adoption Platform - Database Seeding Complete"))
-        self.stdout.write(self.style.SUCCESS("=" * 70))
-        self.stdout.write(self.style.NOTICE("[1] System Administrator:"))
-        self.stdout.write(f"    - Email: {admin_user.email} (Role: {admin_user.role}) [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(self.style.NOTICE("[2] Shelters (2 profiles):"))
-        self.stdout.write(f"    - {shelter_kochi.organization_name} ({shelter_kochi.city}) -> {kochi_user.email} [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(f"    - {shelter_blr.organization_name} ({shelter_blr.city}) -> {blr_user.email} [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(self.style.NOTICE("[3] Delivery Partners (3 fleet drivers):"))
-        self.stdout.write(f"    - {driver1_user.email} (KL-07-CD-1234, Car) [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(f"    - {driver2_user.email} (KA-03-AB-5678, Two-Wheeler) [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(f"    - {driver3_user.email} (KA-01-EF-9012, Van) [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(self.style.NOTICE("[4] Customers (2 users):"))
-        self.stdout.write(f"    - {customer1.email} ({customer1.phone}) [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(f"    - {customer2.email} ({customer2.phone}) [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(self.style.NOTICE(f"[5] Pets Catalog: {len(seeded_pets)} pets populated with images and health records."))
-        self.stdout.write(self.style.NOTICE(f"[6] Active Delivery Task: 1 delivery 'out_for_delivery' with 3 GPS pings."))
-        self.stdout.write(self.style.SUCCESS("=" * 70 + "\n"))
+        if getattr(settings, 'DEBUG', False):
+            self.stdout.write(self.style.SUCCESS("\n" + "=" * 70))
+            self.stdout.write(self.style.SUCCESS("  KindHeart Pet Adoption Platform - Database Seeding Complete"))
+            self.stdout.write(self.style.SUCCESS("=" * 70))
+            self.stdout.write(self.style.NOTICE("[1] System Administrator:"))
+            self.stdout.write(f"    - Email: {admin_user.email} (Role: {admin_user.role}) [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(self.style.NOTICE("[2] Shelters (2 profiles):"))
+            self.stdout.write(f"    - {shelter_kochi.organization_name} ({shelter_kochi.city}) -> {kochi_user.email} [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(f"    - {shelter_blr.organization_name} ({shelter_blr.city}) -> {blr_user.email} [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(self.style.NOTICE("[3] Delivery Partners (3 fleet drivers):"))
+            self.stdout.write(f"    - {driver1_user.email} (KL-07-CD-1234, Car) [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(f"    - {driver2_user.email} (KA-03-AB-5678, Two-Wheeler) [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(f"    - {driver3_user.email} (KA-01-EF-9012, Van) [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(self.style.NOTICE("[4] Customers (2 users):"))
+            self.stdout.write(f"    - {customer1.email} ({customer1.phone}) [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(f"    - {customer2.email} ({customer2.phone}) [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(self.style.NOTICE(f"[5] Pets Catalog: {len(seeded_pets)} pets populated with images and health records."))
+            self.stdout.write(self.style.NOTICE(f"[6] Active Delivery Task: 1 delivery 'out_for_delivery' with 3 GPS pings."))
+            self.stdout.write(self.style.SUCCESS("=" * 70 + "\n"))

@@ -1092,12 +1092,56 @@ Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medic
 
 ---
 
-*Last updated: 2026-10-25*
+## 17. Milestone 10a — Production Readiness, Seed Guard, Refund Idempotency, Production Email, File Cleanup & Deploy Basics
 
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Milestone 10a approved and finalized.
+>
+> **Architectural Decisions**:
+> 1. **Celery Deferral**: Celery + Redis background worker is deferred to a future milestone. Passing OTPs as task arguments would result in unhashed plaintext OTPs persisting in message broker queues (Redis/RabbitMQ). Transactional emails and notifications are safely dispatched inside `transaction.on_commit` callbacks with network timeouts and error suppression. Refund retries are scheduled via operating system schedulers (cron, systemd timer, or Windows Task Scheduler).
+> 2. **Seed Safety Guard**: `seed_platform` (the sole management command creating users, credentials, and demo data) fails closed with `CommandError` at the very start of `handle()` before any DB operations if `settings.DEBUG` is `False`.
+> 3. **Refund Idempotency**: Use Razorpay's documented `X-Refund-Idempotency` header with deterministic per-Refund keys (`f"kh-refund-{refund.id}"`). Handle 409 conflicts as retryable `refund_in_progress` without crashing or corrupting state.
+> 4. **Production SMTP Validation**: Enforce that production `DEBUG=False` mandates an active SMTP configuration (`EMAIL_BACKEND` not console/locmem/dummy/filebased, `EMAIL_HOST` and `DEFAULT_FROM_EMAIL` non-empty and non-mock). Wrap all `send_mail` calls in error handlers to prevent transaction rollbacks.
+> 5. **Storage Cleanup on Delete**: Implement `post_delete` signal handlers for `PetImage` and `PetMedicalRecord` to remove managed files from disk/Cloudinary on commit, while ignoring external non-managed URLs and swallowing deletion exceptions.
+> 6. **Cloudinary Raw Documents Storage**: Configure `STORAGES['raw_documents']` using `django_cloudinary_storage.storage.RawMediaCloudinaryStorage` for PDF/DOCX medical documents when `USE_CLOUDINARY=True`.
+> 7. **Production Deployment Baseline**: Add `gunicorn` and `redis` to requirements, integrate WhiteNoise for production static file serving if missing, and document all production deployment steps in `docs/backend_handoff.md`.
 
+### 17.1 Task 1: Seed Guard
+- `seed_platform.py`: Check `if not getattr(settings, 'DEBUG', False): raise CommandError(...)` at line 1 of `handle()`.
+- Condition demo password and OTP terminal printing on `DEBUG=True`.
+- Automated test in `apps/accounts/tests.py` using `override_settings(DEBUG=False)` verifying `CommandError` and zero database mutations.
 
+### 17.2 Task 2: Refund Idempotency Header & 409 Handling
+- Inspect and document current refund header (`X-Razorpay-Idempotency-Key` at `payment_services.py:601`).
+- Switch to Razorpay's documented header `X-Refund-Idempotency` with key `f"kh-refund-{refund.id}"`.
+- Ensure deterministic keys across retries of the same row, and unique keys across distinct rows.
+- Catch HTTP 409 responses from Razorpay for idempotency conflicts and treat them as retryable `refund_in_progress` without state alterations.
+- Comprehensive tests asserting headers, key consistency, and 409 handling.
 
+### 17.3 Task 3: Email in Production
+- Configure environment-driven SMTP variables in `settings.py` (`EMAIL_BACKEND`, `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS`, `EMAIL_USE_SSL`, `EMAIL_TIMEOUT`, `DEFAULT_FROM_EMAIL`).
+- Extend `validate_production_credentials` to reject console/locmem/mock email configs when `DEBUG=False`.
+- Audit all `send_mail` call sites to guarantee zero uncaught exceptions can abort transactions.
+- Update `backend/.env.example` and `docs/backend_handoff.md`.
 
+### 17.4 Task 4: File Cleanup on Delete
+- Add `post_delete` signal handlers for `PetImage` and `PetMedicalRecord`.
+- Delete underlying files via storage API scheduled inside `transaction.on_commit`.
+- Only delete files living in managed storage; ignore external URLs.
+- Handle cascade deletions and `.delete()` calls safely without throwing unhandled exceptions.
+- Test cleanup on temporary `MEDIA_ROOT`.
 
+### 17.5 Task 5: Cloudinary Raw Storage for Documents
+- Configure named raw storage `STORAGES['raw_documents']` for Cloudinary.
+- Ensure medical PDFs use raw storage when `USE_CLOUDINARY=True`.
+- Local mode remains unchanged.
 
+### 17.6 Task 6: Deploy Basics
+- Add pinned `redis` and `gunicorn` to `requirements.txt` and `requirements.lock.txt`.
+- Configure WhiteNoise for production static serving.
+- Add comprehensive Deployment section to `docs/backend_handoff.md`.
 
+---
+
+*Last updated: 2026-10-27*
