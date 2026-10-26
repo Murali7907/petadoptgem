@@ -14,6 +14,7 @@ if str(BACKEND_DIR) not in sys.path:
 import razorpay
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from rest_framework.exceptions import APIException, NotFound, ValidationError
 
 from apps.adoptions.models import AdoptionApplication
@@ -350,19 +351,42 @@ def process_razorpay_webhook(raw_body: bytes, signature: str) -> dict:
                         payment.razorpay_payment_id = payment_id
                     payment.save(update_fields=['status', 'raw_payload', 'razorpay_payment_id', 'updated_at'])
 
-    elif event_type == 'refund.processed':
+    elif event_type in ('refund.processed', 'refund.failed'):
         refund_entity = event_payload.get('payload', {}).get('refund', {}).get('entity', {})
         rzp_refund_id = refund_entity.get('id', '')
         refund_amount = refund_entity.get('amount')
+        rzp_payment_id = refund_entity.get('payment_id', '')
 
         if not rzp_refund_id:
-            logger.warning("Webhook refund.processed missing refund entity id.")
+            logger.warning(f"Webhook {event_type} missing refund entity id.")
             return {'status': 'ignored', 'detail': 'Missing refund id.'}
 
         with transaction.atomic():
             refund = Refund.objects.select_for_update().filter(razorpay_refund_id=rzp_refund_id).first()
+            if not refund and rzp_payment_id:
+                # Match by payment id if refund id is unknown
+                payment = Payment.objects.filter(razorpay_payment_id=rzp_payment_id).first()
+                if payment:
+                    candidates = Refund.objects.select_for_update().filter(
+                        payment=payment
+                    ).filter(
+                        Q(razorpay_refund_id__isnull=True) | Q(razorpay_refund_id='')
+                    ).exclude(
+                        status=RefundStatus.FAILED
+                    )
+                    if candidates.count() == 1:
+                        refund = candidates.first()
+                        refund.razorpay_refund_id = rzp_refund_id
+                        refund.save(update_fields=['razorpay_refund_id', 'updated_at'])
+                        logger.info(f"Webhook {event_type} matched unlinked Refund #{refund.id} via payment {rzp_payment_id} to {rzp_refund_id}")
+                    else:
+                        logger.warning(
+                            f"Webhook {event_type} unknown refund {rzp_refund_id} matched payment {rzp_payment_id} with {candidates.count()} unlinked non-failed refund rows (expected 1)."
+                        )
+                        return {'status': 'ignored', 'detail': 'Multiple or zero candidate refunds found for payment.'}
+
             if not refund:
-                logger.warning(f"Webhook refund.processed for unknown razorpay_refund_id: {rzp_refund_id}")
+                logger.warning(f"Webhook {event_type} for unknown razorpay_refund_id: {rzp_refund_id}")
                 return {'status': 'ignored', 'detail': 'Refund not found.'}
 
             # Compare payload amount with Refund row; never trust payload alone
@@ -370,44 +394,26 @@ def process_razorpay_webhook(raw_body: bytes, signature: str) -> dict:
                 logger.warning(f"Webhook refund amount mismatch for {rzp_refund_id}: payload={refund_amount}, db={refund.amount_in_paise}")
                 return {'status': 'ignored', 'detail': 'Amount mismatch.'}
 
-            # Idempotent check
-            if refund.status == RefundStatus.PROCESSED:
-                return {'status': 'success', 'event': event_type, 'idempotent': True}
+            if event_type == 'refund.processed':
+                # Idempotent check
+                if refund.status == RefundStatus.PROCESSED:
+                    return {'status': 'success', 'event': event_type, 'idempotent': True}
 
-            refund.status = RefundStatus.PROCESSED
-            refund.save(update_fields=['status', 'updated_at'])
-            mark_refund_processed_state(refund)
+                refund.status = RefundStatus.PROCESSED
+                refund.save(update_fields=['status', 'updated_at'])
+                mark_refund_processed_state(refund)
 
-    elif event_type == 'refund.failed':
-        refund_entity = event_payload.get('payload', {}).get('refund', {}).get('entity', {})
-        rzp_refund_id = refund_entity.get('id', '')
-        refund_amount = refund_entity.get('amount')
+            elif event_type == 'refund.failed':
+                # If already processed, do not mark as failed
+                if refund.status == RefundStatus.PROCESSED:
+                    return {'status': 'ignored', 'detail': 'Refund already processed.'}
 
-        if not rzp_refund_id:
-            logger.warning("Webhook refund.failed missing refund entity id.")
-            return {'status': 'ignored', 'detail': 'Missing refund id.'}
+                error_desc = refund_entity.get('error_description') or refund_entity.get('error_reason') or 'Webhook received refund.failed'
+                refund.status = RefundStatus.FAILED
+                refund.failure_reason = str(error_desc)
+                refund.save(update_fields=['status', 'failure_reason', 'updated_at'])
 
-        with transaction.atomic():
-            refund = Refund.objects.select_for_update().filter(razorpay_refund_id=rzp_refund_id).first()
-            if not refund:
-                logger.warning(f"Webhook refund.failed for unknown razorpay_refund_id: {rzp_refund_id}")
-                return {'status': 'ignored', 'detail': 'Refund not found.'}
-
-            # Compare payload amount with Refund row; never trust payload alone
-            if refund_amount is not None and int(refund_amount) != refund.amount_in_paise:
-                logger.warning(f"Webhook refund amount mismatch for {rzp_refund_id}: payload={refund_amount}, db={refund.amount_in_paise}")
-                return {'status': 'ignored', 'detail': 'Amount mismatch.'}
-
-            # If already processed, do not mark as failed
-            if refund.status == RefundStatus.PROCESSED:
-                return {'status': 'ignored', 'detail': 'Refund already processed.'}
-
-            error_desc = refund_entity.get('error_description') or refund_entity.get('error_reason') or 'Webhook received refund.failed'
-            refund.status = RefundStatus.FAILED
-            refund.failure_reason = str(error_desc)
-            refund.save(update_fields=['status', 'failure_reason', 'updated_at'])
-
-    return {'status': 'success', 'event': event_type}
+        return {'status': 'success', 'event': event_type}
 
 
 def mark_refund_processed_state(refund: Refund):
@@ -469,25 +475,29 @@ def mark_refund_processed_state(refund: Refund):
     transaction.on_commit(_notify)
 
 
-def issue_refund(payment: Payment, reason: str, initiated_by=None, source: str = 'manual') -> Refund:
+def issue_refund(payment: Payment, reason: str = "", initiated_by=None, source: str = 'manual', refund_obj: Refund = None) -> Refund:
     """
     Executes a full refund for a captured payment:
-    1. Under select_for_update on the Payment row, creates the Refund in 'created'.
-       If a non-failed refund already exists, returns it idempotently.
+    1. Under select_for_update on the Payment row, finds or creates the Refund row in 'created'.
+       If a processed refund already exists, returns it idempotently.
     2. Releases row locks before calling Razorpay API.
-    3. Calls client.payment.refund for the full captured amount with our refund id in notes/receipt.
-    4. Success: stores razorpay_refund_id and sets processing/processed per response.
+    3. Pre-reconciliation: queries Razorpay for existing refunds for this payment using
+       the installed SDK method `client.payment.fetch_multiple_refund(payment_id)`.
+       If a full refund already exists, adopts its id and status and does not call refund again.
+    4. Calls client.payment.refund for the full captured amount with our refund id in notes/receipt
+       and X-Razorpay-Idempotency-Key.
+    5. Success: stores razorpay_refund_id and sets processing/processed per response.
        On 'processed': marks Payment, application.payment_status and delivery.payment_status as 'refunded'.
-    5. API error: marks Refund as 'failed' with reason, raises RefundFailedError; retry allowed.
+    6. API error: marks Refund as 'failed' with reason, raises RefundFailedError; retry allowed.
     """
-    # Phase 1: DB row lock and creation
+    # Phase 1: DB row lock and creation or adoption of unlinked Refund row
     with transaction.atomic():
         locked_payment = Payment.objects.select_for_update().get(id=payment.id)
 
-        # Idempotency check: if a non-failed refund already exists, return it
-        existing_refund = Refund.objects.filter(payment=locked_payment).exclude(status=RefundStatus.FAILED).first()
-        if existing_refund:
-            return existing_refund
+        # Idempotency check: if a processed refund already exists, return it
+        processed_refund = Refund.objects.filter(payment=locked_payment, status=RefundStatus.PROCESSED).first()
+        if processed_refund:
+            return processed_refund
 
         if locked_payment.status not in (PaymentStatus.CAPTURED, PaymentStatus.PAID, PaymentStatus.REFUNDED):
             raise ValidationError(f"Cannot refund payment in '{locked_payment.status}' status. Only captured payments can be refunded.")
@@ -502,18 +512,82 @@ def issue_refund(payment: Payment, reason: str, initiated_by=None, source: str =
             locked_payment.application = app
             locked_payment.save(update_fields=['application'])
 
-        refund = Refund.objects.create(
-            payment=locked_payment,
-            application=app,
-            amount_in_paise=amount_in_paise,
-            status=RefundStatus.CREATED,
-            reason=reason,
-            initiated_by=initiated_by,
-            source=source,
-        )
+        refund = refund_obj
+        if refund:
+            refund = Refund.objects.select_for_update().get(id=refund.id)
+            if refund.status == RefundStatus.FAILED:
+                refund.status = RefundStatus.CREATED
+                refund.failure_reason = ''
+                refund.save(update_fields=['status', 'failure_reason', 'updated_at'])
+        else:
+            # Check if there is an existing Refund row without razorpay_refund_id in CREATED or FAILED
+            existing_unlinked = Refund.objects.select_for_update().filter(
+                payment=locked_payment
+            ).filter(
+                Q(razorpay_refund_id__isnull=True) | Q(razorpay_refund_id='')
+            ).filter(
+                status__in=[RefundStatus.CREATED, RefundStatus.FAILED]
+            ).order_by('-created_at').first()
+
+            if existing_unlinked:
+                refund = existing_unlinked
+                if refund.status == RefundStatus.FAILED:
+                    refund.status = RefundStatus.CREATED
+                    refund.failure_reason = ''
+                    refund.save(update_fields=['status', 'failure_reason', 'updated_at'])
+            else:
+                # Check if refund already in processing
+                existing_processing = Refund.objects.filter(payment=locked_payment, status=RefundStatus.PROCESSING).first()
+                if existing_processing:
+                    return existing_processing
+
+                refund = Refund.objects.create(
+                    payment=locked_payment,
+                    application=app,
+                    amount_in_paise=amount_in_paise,
+                    status=RefundStatus.CREATED,
+                    reason=reason,
+                    initiated_by=initiated_by,
+                    source=source,
+                )
 
     # Phase 2: Call gateway with locks released
     client = get_razorpay_client()
+
+    # Pre-reconciliation with Razorpay before creating duplicate refund
+    if not refund.razorpay_refund_id:
+        try:
+            rzp_list = None
+            if hasattr(client.payment, 'fetch_multiple_refund'):
+                rzp_list = client.payment.fetch_multiple_refund(locked_payment.razorpay_payment_id)
+            elif hasattr(client, 'refund') and hasattr(client.refund, 'all'):
+                rzp_list = client.refund.all({'payment_id': locked_payment.razorpay_payment_id})
+
+            if rzp_list:
+                items = rzp_list.get('items', []) if isinstance(rzp_list, dict) else (rzp_list if isinstance(rzp_list, list) else [])
+                for item in items:
+                    item_amt = item.get('amount')
+                    item_id = item.get('id')
+                    if item_id and item_amt is not None and int(item_amt) == refund.amount_in_paise:
+                        rzp_status = item.get('status', 'processed')
+                        with transaction.atomic():
+                            refund.razorpay_refund_id = item_id
+                            if rzp_status == 'processed':
+                                refund.status = RefundStatus.PROCESSED
+                            elif rzp_status == 'failed':
+                                refund.status = RefundStatus.FAILED
+                            else:
+                                refund.status = RefundStatus.PROCESSING
+                            refund.save(update_fields=['razorpay_refund_id', 'status', 'updated_at'])
+
+                            if refund.status == RefundStatus.PROCESSED:
+                                mark_refund_processed_state(refund)
+
+                        return refund
+        except Exception as query_exc:
+            logger.warning(f"Failed to query Razorpay refunds before issuing for Payment #{locked_payment.id}: {query_exc}")
+
+    # No existing full refund found at gateway: call Razorpay refund endpoint
     refund_data = {
         'amount': refund.amount_in_paise,
         'notes': {

@@ -3393,7 +3393,54 @@ class RefundLedgerAndServiceTests(APITestCase):
         success_refund = issue_refund(payment=self.payment, reason="Retry succeeds")
         self.assertEqual(success_refund.status, RefundStatus.PROCESSED)
         self.assertEqual(success_refund.razorpay_refund_id, 'rfnd_retry_success_999')
-        self.assertNotEqual(success_refund.id, failed_refund.id)
+        self.assertEqual(success_refund.id, failed_refund.id)
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_refund_call_succeeds_then_db_write_raises_retry_adopts_existing_razorpay_refund(self, mock_get_client):
+        """
+        Milestone 9b Task 2: When a refund exists at Razorpay gateway without our DB having
+        the razorpay_refund_id, the retry adopts the existing Razorpay refund and does not call refund again.
+        """
+        mock_client = mock_get_client.return_value
+
+        # Existing unlinked refund in 'created' or 'failed' (simulating DB write crash after gateway call)
+        refund = Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=25000,
+            status=RefundStatus.FAILED,
+            failure_reason="Simulated DB write failure after gateway success",
+            reason="Original refund attempt",
+            source=RefundSource.MANUAL
+        )
+
+        # Gateway returns the existing full refund in fetch_multiple_refund
+        mock_client.payment.fetch_multiple_refund.return_value = {
+            'entity': 'collection',
+            'count': 1,
+            'items': [
+                {
+                    'id': 'rfnd_existing_gateway_adopt_888',
+                    'amount': 25000,
+                    'status': 'processed',
+                    'payment_id': self.payment.razorpay_payment_id
+                }
+            ]
+        }
+
+        # Issue refund on retry
+        from apps.logistics.payment_services import issue_refund
+        adopted_refund = issue_refund(payment=self.payment, reason="Retry adopting existing gateway refund")
+
+        self.assertEqual(adopted_refund.id, refund.id)
+        self.assertEqual(adopted_refund.status, RefundStatus.PROCESSED)
+        self.assertEqual(adopted_refund.razorpay_refund_id, 'rfnd_existing_gateway_adopt_888')
+
+        # Crucial assertion: client.payment.refund was NEVER called
+        mock_client.payment.refund.assert_not_called()
+
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, PaymentStatus.REFUNDED)
 
 
 class CancelAndRefundEndpointTests(TestCase):
@@ -4357,6 +4404,99 @@ class RefundWebhookTests(TestCase):
         )
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("Invalid webhook signature", str(res.data))
+
+    def test_unknown_refund_id_matched_by_payment_id(self):
+        """
+        Milestone 9b Task 2: When refund id is unknown, match by payment id in payload entity to our Payment.
+        If exactly one non-failed Refund row has no razorpay_refund_id, attach id and apply event.
+        """
+        # Exactly one unlinked non-failed Refund row
+        refund = Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=25000,
+            status=RefundStatus.CREATED,
+            razorpay_refund_id=None,
+            reason='Cancelled by shelter',
+            source=RefundSource.MANUAL
+        )
+
+        payload_dict = {
+            'event': 'refund.processed',
+            'payload': {
+                'refund': {
+                    'entity': {
+                        'id': 'rfnd_unknown_but_matched_by_pay_id_777',
+                        'amount': 25000,
+                        'status': 'processed',
+                        'payment_id': self.payment.razorpay_payment_id
+                    }
+                }
+            }
+        }
+        raw_body = json.dumps(payload_dict)
+        sig = self._make_signature(raw_body)
+
+        res = self.client.post(
+            '/api/v1/payments/webhook/',
+            data=raw_body,
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE=sig
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('status'), 'success')
+
+        refund.refresh_from_db()
+        self.assertEqual(refund.razorpay_refund_id, 'rfnd_unknown_but_matched_by_pay_id_777')
+        self.assertEqual(refund.status, RefundStatus.PROCESSED)
+
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, PaymentStatus.REFUNDED)
+
+    def test_unknown_refund_id_with_multiple_candidates_returns_200_no_change(self):
+        """
+        Milestone 9b Task 2: If refund id is unknown and matching by payment id finds != 1 unlinked candidate,
+        log and return 200 with no change.
+        """
+        # Two unlinked non-failed refund rows
+        r1 = Refund.objects.create(
+            payment=self.payment,
+            application=self.application,
+            amount_in_paise=25000,
+            status=RefundStatus.CREATED,
+            razorpay_refund_id=None,
+            reason='R1'
+        )
+        # Note: partial unique constraint allows only 1 non-failed per payment in DB, so candidate count is 0 if no unlinked rows
+        # Let's test candidate count == 0 when payment has no unlinked refund
+        r1.razorpay_refund_id = 'rfnd_already_linked'
+        r1.save()
+
+        payload_dict = {
+            'event': 'refund.processed',
+            'payload': {
+                'refund': {
+                    'entity': {
+                        'id': 'rfnd_unknown_unmatched_000',
+                        'amount': 25000,
+                        'status': 'processed',
+                        'payment_id': self.payment.razorpay_payment_id
+                    }
+                }
+            }
+        }
+        raw_body = json.dumps(payload_dict)
+        sig = self._make_signature(raw_body)
+
+        res = self.client.post(
+            '/api/v1/payments/webhook/',
+            data=raw_body,
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE=sig
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('status'), 'ignored')
+        self.assertEqual(res.data.get('detail'), 'Multiple or zero candidate refunds found for payment.')
 
 
 class CODCashReconciliationTests(TestCase):
