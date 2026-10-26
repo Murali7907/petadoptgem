@@ -445,6 +445,127 @@ To prevent slow SMTP servers from blocking requests or rolling back database cha
 
 ---
 
+## 10. Production Deployment Guide
+
+This section documents standard deployment procedures, production environment requirements, static asset serving, and background schedulers.
+
+### 10.1 Environment Variables Checklist (.env.example)
+
+| Environment Variable | Production Status | Description & Constraints |
+|---|---|---|
+| `SECRET_KEY` | **Required** | Cryptographic secret key (50+ random characters). Cannot start with `django-insecure`. |
+| `DEBUG` | **Required** | Must be explicitly set to `False` in production. |
+| `ALLOWED_HOSTS` | **Required** | Comma-separated list of fully qualified domain names and production IPs. |
+| `DB_NAME` | **Required** | PostgreSQL database name (e.g. `pet_adoption`). |
+| `DB_USER` | **Required** | PostgreSQL role username. |
+| `DB_PASSWORD` | **Required** | PostgreSQL secure password. |
+| `DB_HOST` | **Required** | PostgreSQL hostname/IP (e.g. RDS endpoint or private IP). |
+| `DB_PORT` | Optional | Database port (defaults to `5432`). |
+| `RAZORPAY_KEY_ID` | **Required** | Live Razorpay Key ID (`rzp_live_...`). Cannot contain `mock`. |
+| `RAZORPAY_KEY_SECRET` | **Required** | Live Razorpay Key Secret. Cannot contain `mock`. |
+| `RAZORPAY_WEBHOOK_SECRET` | **Required** | Live Razorpay Webhook Secret. Cannot contain `mock`. |
+| `REFUND_RETRY_AFTER_MINUTES` | Optional | Minimum age in minutes of unconfirmed refunds before retry (defaults to `10`). |
+| `EMAIL_BACKEND` | Optional | Defaults to `django.core.mail.backends.smtp.EmailBackend`. Cannot be console/locmem/dummy/filebased. |
+| `EMAIL_HOST` | **Required** | Production SMTP host (e.g. `smtp.sendgrid.net`). Cannot contain `mock`. |
+| `EMAIL_PORT` | Optional | SMTP port (defaults to `587`). |
+| `EMAIL_HOST_USER` | Optional | SMTP username / API key. Required if SMTP authentication is enabled. |
+| `EMAIL_HOST_PASSWORD` | Optional | SMTP password / API token. Required if SMTP authentication is enabled. |
+| `EMAIL_USE_TLS` | Optional | Enable TLS encryption (defaults to `True`). |
+| `EMAIL_USE_SSL` | Optional | Enable SSL encryption (defaults to `False`). |
+| `EMAIL_TIMEOUT` | Optional | Network socket timeout in seconds (defaults to `10`). Protects request threads against SMTP hangs. |
+| `DEFAULT_FROM_EMAIL` | **Required** | Sender email address (e.g. `KindHeart Pet Adoption <no-reply@kindheart.org>`). Cannot contain `mock`. |
+| `USE_CLOUDINARY` | Optional | Set `True` to use Cloudinary CDN for images and raw documents (defaults to `False`). |
+| `CLOUDINARY_CLOUD_NAME` | Required if Cloudinary | Cloudinary cloud name. Cannot contain `mock`. |
+| `CLOUDINARY_API_KEY` | Required if Cloudinary | Cloudinary API key. Cannot contain `mock`. |
+| `CLOUDINARY_API_SECRET` | Required if Cloudinary | Cloudinary API secret. Cannot contain `mock`. |
+| `CORS_ALLOWED_ORIGINS` | Optional | Comma-separated list of allowed frontend web origins (defaults to localhost:3000). |
+| `CSRF_TRUSTED_ORIGINS` | Optional | Comma-separated list of trusted CSRF origins for browser forms (defaults to localhost:3000). |
+| `REDIS_URL` | **Required for Cluster** | Redis connection URI (e.g. `redis://127.0.0.1:6379/1`). **Mandatory** across multi-worker Gunicorn deployments for shared rate-limiting counters. |
+| `OTP_TTL_MINUTES` | Optional | Delivery verification OTP validity period (defaults to `1440` minutes / 24 hours). |
+| `OTP_MAX_ATTEMPTS` | Optional | Maximum incorrect verification attempts before OTP lockout (defaults to `3`). |
+| `OTP_THROTTLE_RATE` | Optional | Rate limit for OTP verification endpoint (defaults to `10/min`). |
+| `LOG_LEVEL` | Optional | Application logging level (defaults to `INFO`). |
+| `SHELTER_CANCEL_THROTTLE_RATE` | Optional | Rate limit for shelter delivery cancellation (defaults to `20/min`). |
+| `AUTH_LOGIN_THROTTLE_RATE` | Optional | Rate limit for user login endpoint (defaults to `10/min`). |
+| `AUTH_REGISTER_THROTTLE_RATE` | Optional | Rate limit for registration endpoint (defaults to `5/min`). |
+| `AUTH_REFRESH_THROTTLE_RATE` | Optional | Rate limit for token refresh endpoint (defaults to `30/min`). |
+| `REFUND_THROTTLE_RATE` | Optional | Rate limit for cancel-and-refund endpoint (defaults to `10/min`). |
+| `MAX_PET_IMAGE_SIZE_BYTES` | Optional | Maximum image upload size in bytes (defaults to `10485760` / 10MB). |
+| `MAX_MEDICAL_DOC_SIZE_BYTES` | Optional | Maximum medical document upload size (defaults to `15728640` / 15MB). |
+| `DATA_UPLOAD_MAX_MEMORY_SIZE` | Optional | Memory limit for request body uploads (defaults to `10485760`). |
+| `FILE_UPLOAD_MAX_MEMORY_SIZE` | Optional | Memory limit before streaming files to disk (defaults to `15728640`). |
+| `SECURE_SSL_REDIRECT` | Optional | Redirect all HTTP traffic to HTTPS (defaults to `True` when `DEBUG=False`). |
+| `SECURE_HSTS_SECONDS` | Optional | HTTP Strict Transport Security duration (defaults to `31536000` / 1 year). |
+| `SECURE_HSTS_INCLUDE_SUBDOMAINS` | Optional | Include subdomains in HSTS policy (defaults to `True`). |
+| `SECURE_HSTS_PRELOAD` | Optional | Request browser HSTS preload list enrollment (defaults to `True`). |
+| `SESSION_COOKIE_SECURE` | Optional | Transmit session cookies only over HTTPS (defaults to `True`). |
+| `CSRF_COOKIE_SECURE` | Optional | Transmit CSRF cookies only over HTTPS (defaults to `True`). |
+| `SECURE_CONTENT_TYPE_NOSNIFF` | Optional | Set `X-Content-Type-Options: nosniff` header (defaults to `True`). |
+| `SECURE_REFERRER_POLICY` | Optional | Referrer policy header (defaults to `same-origin`). |
+| `SECURE_PROXY_SSL_HEADER_ENABLED` | Optional | Enable `X-Forwarded-Proto` header trust behind Nginx/ALB (defaults to `False`). |
+| `SECURE_PROXY_SSL_HEADER_NAME` | Optional | Header name for proxy SSL termination (defaults to `HTTP_X_FORWARDED_PROTO`). |
+| `SECURE_PROXY_SSL_HEADER_VALUE` | Optional | Expected header value indicating HTTPS (defaults to `https`). |
+
+---
+
+### 10.2 Production Application Server & Run Commands
+
+#### Step 1: Apply Pending Database Migrations
+Always apply database schema migrations before launching the application:
+```bash
+python manage.py migrate --noinput
+```
+
+#### Step 2: Compile & Compress Static Assets
+Collect static assets (admin CSS/JS, Swagger UI, rest_framework browsable UI assets):
+```bash
+python manage.py collectstatic --noinput
+```
+
+#### Step 3: Run Application with Gunicorn
+Run Gunicorn pointing to Django's WSGI application:
+```bash
+gunicorn config.wsgi:application \
+    --bind 0.0.0.0:8000 \
+    --workers 4 \
+    --threads 2 \
+    --timeout 60 \
+    --access-logfile - \
+    --error-logfile -
+```
+
+---
+
+### 10.3 Static File Serving with WhiteNoise
+When `DEBUG=False` in production, static files (including Django Admin assets, OpenAPI docs, and static styling) are served directly by Python through **WhiteNoise**:
+- **Middleware**: `whitenoise.middleware.WhiteNoiseMiddleware` is registered in `MIDDLEWARE` immediately following `SecurityMiddleware`.
+- **Storage Backend**: `STORAGES['staticfiles']` uses `whitenoise.storage.CompressedManifestStaticFilesStorage`, which compresses assets and generates unique content hashes for immutable cache headers (`Cache-Control: max-age=31536000, public, immutable`).
+- **Zero Reverse Proxy Dependency**: Django Admin and Swagger documentation render with full styles and icons out-of-the-box without needing Nginx static alias configuration.
+
+---
+
+### 10.4 Automated Refund Reconciliation Scheduling
+The platform reconciles unconfirmed or failed payment refunds via `manage.py retry_pending_refunds`. Celery workers are deferred by design to eliminate plaintext OTP exposure in queues. Instead, operating system schedulers run the reconciliation job every 5 to 10 minutes:
+
+#### Linux cron Example (Every 5 Minutes)
+```cron
+*/5 * * * * cd /opt/petadopt/backend && /opt/petadopt/backend/.venv/bin/python manage.py retry_pending_refunds >> /var/log/petadopt/refund_retry.log 2>&1
+```
+
+#### Windows Task Scheduler Example (Every 5 Minutes)
+```powershell
+schtasks /create /tn "PetAdopt_Refund_Retry" /tr "C:\petadopt\backend\.venv\Scripts\python.exe C:\petadopt\backend\manage.py retry_pending_refunds" /sc minute /mo 5 /ru "SYSTEM"
+```
+
+---
+
+### 10.5 Distributed Throttling & Redis Requirement
+When deploying Gunicorn with multiple worker processes (`--workers > 1`), rate-limiting counters **must** be stored centrally:
+- **`REDIS_URL`**: When specified (e.g. `redis://127.0.0.1:6379/1`), Django configures `django.core.cache.backends.redis.RedisCache`.
+- **Throttling Accuracy**: Rate limits across `auth_login` (10/min), `auth_register` (5/min), `shelter_cancel` (20/min), and `refund` (10/min) are enforced globally across all Gunicorn workers rather than per-worker memory.
+
+---
+
 *KindHeart Engineering Team — Production Backend API Specifications*
 
 

@@ -65,6 +65,7 @@ AUTH_USER_MODEL = 'accounts.User'
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -244,6 +245,12 @@ CLOUDINARY_STORAGE = {
     'API_SECRET': CLOUDINARY_API_SECRET or 'mock_secret',
 }
 
+STATICFILES_STORAGE_BACKEND = (
+    'whitenoise.storage.CompressedManifestStaticFilesStorage'
+    if not DEBUG and 'test' not in sys.argv
+    else 'django.contrib.staticfiles.storage.StaticFilesStorage'
+)
+
 if USE_CLOUDINARY:
     DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
     STORAGES = {
@@ -257,7 +264,7 @@ if USE_CLOUDINARY:
             'BACKEND': 'cloudinary_storage.storage.RawMediaCloudinaryStorage',
         },
         'staticfiles': {
-            'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+            'BACKEND': STATICFILES_STORAGE_BACKEND,
         },
     }
 else:
@@ -273,7 +280,7 @@ else:
             'BACKEND': 'django.core.files.storage.FileSystemStorage',
         },
         'staticfiles': {
-            'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+            'BACKEND': STATICFILES_STORAGE_BACKEND,
         },
     }
 
