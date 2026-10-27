@@ -18,6 +18,7 @@ from django.utils.encoding import force_bytes, force_str
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiTypes, OpenApiResponse
 from django.db import transaction
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 from .models import User, ShelterProfile, DeliveryProfile, Notification
@@ -37,7 +38,9 @@ from .serializers import (
     PasswordResetRequestSerializer,
     PasswordResetConfirmSerializer,
     PasswordChangeSerializer,
+    EmailVerificationSerializer,
 )
+from .email_verification import send_verification_email, verify_email_token
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     """
@@ -119,6 +122,7 @@ class RegisterView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
+        transaction.on_commit(lambda: send_verification_email(user))
         response_serializer = UserProfileSerializer(user)
         return Response(
             {
@@ -579,6 +583,87 @@ class PasswordChangeView(views.APIView):
         return Response({
             "message": "Password changed successfully. Please log in again."
         }, status=status.HTTP_200_OK)
+
+
+class EmailVerifyView(views.APIView):
+    """
+    Email verification endpoint.
+    POST /api/v1/auth/verify-email/
+    Validates token, sets email_verified and timestamp; idempotent.
+    """
+    permission_classes = [AllowAny]
+    serializer_class = EmailVerificationSerializer
+
+    @extend_schema(
+        summary="Verify user email address",
+        description="Validates email verification token and marks user email as verified. Idempotent.",
+        request=EmailVerificationSerializer,
+        responses={
+            200: OpenApiResponse(description="Email address successfully verified"),
+            400: OpenApiResponse(description="Invalid or expired verification token"),
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = EmailVerificationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        token = serializer.validated_data['token']
+
+        try:
+            payload = verify_email_token(token)
+        except ValueError:
+            return Response({
+                "code": "invalid_token",
+                "detail": "Invalid or expired email verification token."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(pk=payload.get('user_id')).first()
+        if not user or (user.email or '').strip().lower() != (payload.get('email') or '').strip().lower():
+            return Response({
+                "code": "invalid_token",
+                "detail": "The verification token does not match the user's current email address."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user.email_verified = True
+        if not user.email_verified_at:
+            user.email_verified_at = timezone.now()
+        user.save(update_fields=['email_verified', 'email_verified_at'])
+
+        return Response({
+            "message": "Email address verified successfully."
+        }, status=status.HTTP_200_OK)
+
+
+class ResendVerificationEmailView(views.APIView):
+    """
+    Resend verification email endpoint for authenticated users.
+    POST /api/v1/auth/resend-verification/
+    Throttled via auth_resend_verification scope.
+    Always returns 200 OK; only sends when not yet verified.
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_resend_verification'
+
+    @extend_schema(
+        summary="Resend email verification link",
+        description="Resends email verification link to authenticated user's email if not already verified. Always returns 200 OK.",
+        request=None,
+        responses={
+            200: OpenApiResponse(description="Verification email dispatched if unverified.")
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        user = request.user
+        if not user.email_verified:
+            transaction.on_commit(lambda: send_verification_email(user))
+            message = "Verification email dispatched."
+        else:
+            message = "Email is already verified."
+
+        return Response({
+            "message": message
+        }, status=status.HTTP_200_OK)
+
 
 
 

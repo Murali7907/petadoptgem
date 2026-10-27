@@ -1197,4 +1197,164 @@ class PasswordResetAndChangeTests(APITestCase):
         self.assertEqual(res_throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
 
+class EmailVerificationTests(APITestCase):
+    """
+    Tests for email verification workflow:
+    - Verification email sent on registration after commit
+    - Verification success and idempotency
+    - Rejection of mismatched, expired, or tampered tokens
+    - Email modification resetting verification status
+    - Resend verification behavior and throttling
+    - Inclusion of email_verified in /me/ endpoint
+    """
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        mail.outbox = []
+        self.user = User.objects.create_user(
+            username='verify_user',
+            email='verify_user@example.com',
+            password='InitialPassword123!',
+            role='customer',
+            is_active=True,
+            email_verified=False,
+        )
+
+    def test_registration_sends_exactly_one_verification_email(self):
+        url = '/api/v1/auth/register/'
+        payload = {
+            'username': 'brand_new_adopter',
+            'email': 'brand_new@example.com',
+            'password': 'StrongPassword123!',
+            'role': 'customer'
+        }
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.post(url, payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(mail.outbox), 1)
+        email = mail.outbox[0]
+        self.assertIn("brand_new@example.com", email.to)
+        self.assertIn("Verify Your Email Address", email.subject)
+        self.assertIn("http://localhost:3000/verify-email?token=", email.body)
+
+        created_user = User.objects.get(username='brand_new_adopter')
+        self.assertFalse(created_user.email_verified)
+        self.assertIsNone(created_user.email_verified_at)
+
+    def test_verify_email_success_and_idempotent(self):
+        from apps.accounts.email_verification import generate_email_verification_token
+        token = generate_email_verification_token(self.user)
+
+        url = '/api/v1/auth/verify-email/'
+        res = self.client.post(url, {'token': token}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data.get('message'), "Email address verified successfully.")
+
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.email_verified)
+        self.assertIsNotNone(self.user.email_verified_at)
+        original_verified_at = self.user.email_verified_at
+
+        # Idempotent: second call succeeds without changing timestamp
+        res2 = self.client.post(url, {'token': token}, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email_verified_at, original_verified_at)
+
+    def test_verify_email_wrong_user_or_email_mismatch_rejected(self):
+        from apps.accounts.email_verification import generate_email_verification_token
+        token = generate_email_verification_token(self.user)
+
+        # Alter user's email directly without triggering email verification reset
+        User.objects.filter(pk=self.user.pk).update(email='different@example.com')
+
+        url = '/api/v1/auth/verify-email/'
+        res = self.client.post(url, {'token': token}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'invalid_token')
+
+    @override_settings(EMAIL_VERIFY_MAX_AGE=-10)
+    def test_verify_email_expired_token_rejected(self):
+        from apps.accounts.email_verification import generate_email_verification_token
+        token = generate_email_verification_token(self.user)
+
+        url = '/api/v1/auth/verify-email/'
+        res = self.client.post(url, {'token': token}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'invalid_token')
+
+    def test_verify_email_tampered_token_rejected(self):
+        url = '/api/v1/auth/verify-email/'
+        res = self.client.post(url, {'token': 'completely.tampered.token'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'invalid_token')
+
+    def test_email_change_resets_verification_and_sends_new_link(self):
+        self.user.email_verified = True
+        self.user.email_verified_at = timezone.now()
+        self.user.save()
+
+        # Changing email address resets verification
+        with self.captureOnCommitCallbacks(execute=True):
+            self.user.email = 'new_email_address@example.com'
+            self.user.save()
+
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.email_verified)
+        self.assertIsNone(self.user.email_verified_at)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("new_email_address@example.com", mail.outbox[0].to)
+
+    def test_resend_verification_sends_only_when_unverified(self):
+        self.client.force_authenticate(user=self.user)
+        url = '/api/v1/auth/resend-verification/'
+
+        # 1. When unverified: returns 200 and sends email
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.post(url, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(res.data.get('message'), "Verification email dispatched.")
+
+        mail.outbox.clear()
+        # 2. When verified: returns 200 but sends no email
+        self.user.email_verified = True
+        self.user.save(update_fields=['email_verified'])
+
+        with self.captureOnCommitCallbacks(execute=True):
+            res_verified = self.client.post(url, format='json')
+        self.assertEqual(res_verified.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(res_verified.data.get('message'), "Email is already verified.")
+
+    def test_resend_verification_throttled(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client.force_authenticate(user=self.user)
+        url = '/api/v1/auth/resend-verification/'
+
+        for _ in range(5):
+            res = self.client.post(url, format='json')
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        # 6th request must be 429
+        res_throttled = self.client.post(url, format='json')
+        self.assertEqual(res_throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_me_profile_includes_email_verified(self):
+        self.client.force_authenticate(user=self.user)
+        res = self.client.get('/api/v1/auth/me/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('email_verified', res.data)
+        self.assertFalse(res.data['email_verified'])
+
+        self.user.email_verified = True
+        self.user.save(update_fields=['email_verified'])
+
+        res2 = self.client.get('/api/v1/auth/me/')
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertTrue(res2.data['email_verified'])
+
+
+
 

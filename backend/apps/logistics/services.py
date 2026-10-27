@@ -231,6 +231,12 @@ def assign_delivery_task(application: AdoptionApplication, driver: DeliveryProfi
                 code="adopter_email_missing"
             )
 
+        if not getattr(applicant, 'email_verified', False):
+            raise ConflictError(
+                detail={"code": "adopter_email_unverified", "detail": "Cannot assign delivery task: adopter email address is unverified."},
+                code="adopter_email_unverified"
+            )
+
         existing_delivery = PetDelivery.objects.select_for_update().filter(application=application).first()
 
         if existing_delivery and existing_delivery.status in ['out_for_delivery', 'delivered']:

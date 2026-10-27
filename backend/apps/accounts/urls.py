@@ -16,6 +16,8 @@ from .views import (
     PasswordResetView,
     PasswordResetConfirmView,
     PasswordChangeView,
+    EmailVerifyView,
+    ResendVerificationEmailView,
 )
 
 router = SimpleRouter()
@@ -31,6 +33,8 @@ urlpatterns = [
     path('password-reset/', PasswordResetView.as_view(), name='auth_password_reset'),
     path('password-reset/confirm/', PasswordResetConfirmView.as_view(), name='auth_password_reset_confirm'),
     path('password/change/', PasswordChangeView.as_view(), name='auth_password_change'),
+    path('verify-email/', EmailVerifyView.as_view(), name='auth_verify_email'),
+    path('resend-verification/', ResendVerificationEmailView.as_view(), name='auth_resend_verification'),
     path('me/', UserProfileView.as_view(), name='auth_me'),
     path('notifications/', NotificationListView.as_view(), name='notification-list'),
     path('notifications/<uuid:public_id>/read/', NotificationMarkReadView.as_view(), name='notification-mark-read'),

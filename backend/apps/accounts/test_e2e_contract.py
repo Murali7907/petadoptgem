@@ -38,6 +38,8 @@ class EndToEndContractFlowTestCase(TestCase):
         res_cust_reg = self.client.post('/api/auth/register/', data=cust_payload, format='json')
         self.assertEqual(res_cust_reg.status_code, status.HTTP_201_CREATED)
         customer_user = User.objects.get(username='e2e_customer')
+        customer_user.email_verified = True
+        customer_user.save()
 
         # 1.2 Register Shelter
         shelter_payload = {

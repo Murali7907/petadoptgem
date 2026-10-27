@@ -15,6 +15,15 @@ class User(AbstractUser):
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='customer')
     phone = models.CharField(max_length=20, blank=True, default='')
     address = models.TextField(blank=True, default='')
+    email_verified = models.BooleanField(
+        default=False,
+        help_text="Designates whether the user's email address has been verified."
+    )
+    email_verified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when the user verified their email address."
+    )
 
     class Meta:
         db_table = 'users'
@@ -30,7 +39,24 @@ class User(AbstractUser):
     def save(self, *args, **kwargs):
         if self.is_superuser:
             self.role = 'admin'
+
+        email_changed = False
+        if self.pk:
+            orig = User.objects.filter(pk=self.pk).values('email').first()
+            if orig:
+                orig_email = (orig['email'] or '').strip().lower()
+                new_email = (self.email or '').strip().lower()
+                if orig_email and new_email and orig_email != new_email:
+                    self.email_verified = False
+                    self.email_verified_at = None
+                    email_changed = True
+
         super().save(*args, **kwargs)
+
+        if email_changed and self.email and self.is_active:
+            from apps.accounts.email_verification import send_verification_email
+            from django.db import transaction
+            transaction.on_commit(lambda: send_verification_email(self))
 
     @property
     def is_admin(self):

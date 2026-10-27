@@ -28,10 +28,10 @@ class AuthorizationMatrixComprehensiveTests(TestCase):
 
         # Users
         self.customer_1 = User.objects.create_user(
-            username='auth_customer_1', email='cust1@auth.org', password='password123', role='customer'
+            username='auth_customer_1', email='cust1@auth.org', password='password123', role='customer', email_verified=True
         )
         self.customer_2 = User.objects.create_user(
-            username='auth_customer_2', email='cust2@auth.org', password='password123', role='customer'
+            username='auth_customer_2', email='cust2@auth.org', password='password123', role='customer', email_verified=True
         )
 
         # Shelter 1 (Verified)

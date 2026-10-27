@@ -41,6 +41,8 @@ class Command(BaseCommand):
         admin_user.role = 'admin'
         admin_user.is_staff = True
         admin_user.is_superuser = True
+        admin_user.email_verified = True
+        admin_user.email_verified_at = timezone.now()
         admin_user.save()
 
         # -------------------------------------------------------------------------
@@ -59,6 +61,8 @@ class Command(BaseCommand):
         )
         kochi_user.set_password('ShelterPass123!')
         kochi_user.role = 'shelter'
+        kochi_user.email_verified = True
+        kochi_user.email_verified_at = timezone.now()
         kochi_user.save()
 
         shelter_kochi, _ = ShelterProfile.objects.update_or_create(
@@ -88,6 +92,8 @@ class Command(BaseCommand):
         )
         blr_user.set_password('ShelterPass123!')
         blr_user.role = 'shelter'
+        blr_user.email_verified = True
+        blr_user.email_verified_at = timezone.now()
         blr_user.save()
 
         shelter_blr, _ = ShelterProfile.objects.update_or_create(
@@ -120,6 +126,8 @@ class Command(BaseCommand):
         )
         driver1_user.set_password('DriverPass123!')
         driver1_user.role = 'delivery'
+        driver1_user.email_verified = True
+        driver1_user.email_verified_at = timezone.now()
         driver1_user.save()
 
         driver1_profile, _ = DeliveryProfile.objects.update_or_create(
@@ -147,6 +155,8 @@ class Command(BaseCommand):
         )
         driver2_user.set_password('DriverPass123!')
         driver2_user.role = 'delivery'
+        driver2_user.email_verified = True
+        driver2_user.email_verified_at = timezone.now()
         driver2_user.save()
 
         driver2_profile, _ = DeliveryProfile.objects.update_or_create(
@@ -174,6 +184,8 @@ class Command(BaseCommand):
         )
         driver3_user.set_password('DriverPass123!')
         driver3_user.role = 'delivery'
+        driver3_user.email_verified = True
+        driver3_user.email_verified_at = timezone.now()
         driver3_user.save()
 
         DeliveryProfile.objects.update_or_create(
@@ -204,6 +216,8 @@ class Command(BaseCommand):
         )
         customer1.set_password('CustomerPass123!')
         customer1.role = 'customer'
+        customer1.email_verified = True
+        customer1.email_verified_at = timezone.now()
         customer1.save()
 
         customer2, _ = User.objects.get_or_create(
@@ -219,6 +233,8 @@ class Command(BaseCommand):
         )
         customer2.set_password('CustomerPass123!')
         customer2.role = 'customer'
+        customer2.email_verified = True
+        customer2.email_verified_at = timezone.now()
         customer2.save()
 
         # -------------------------------------------------------------------------

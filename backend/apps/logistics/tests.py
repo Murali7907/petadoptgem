@@ -95,7 +95,8 @@ class LogisticsTestCase(TestCase):
             password='password123',
             role='customer',
             phone='5551234567',
-            address='456 Customer Ave'
+            address='456 Customer Ave',
+            email_verified=True,
         )
 
         # Create Pet
@@ -453,7 +454,8 @@ class DoorstepOTPDispatchTests(TestCase):
             password='password123',
             role='customer',
             phone='4445556666',
-            address='200 Adopter Lane'
+            address='200 Adopter Lane',
+            email_verified=True,
         )
 
         self.pet = Pet.objects.create(
@@ -619,7 +621,7 @@ class DeliveryOTPSecurityHardeningTests(TestCase):
         )
 
         self.customer_user = User.objects.create_user(
-            username='sec_customer', email='customer@sec.org', password='password123', role='customer'
+            username='sec_customer', email='customer@sec.org', password='password123', role='customer', email_verified=True
         )
 
         self.pet = Pet.objects.create(
@@ -1050,7 +1052,7 @@ class DeliveryOnCommitEmailTests(TestCase):
         self.client = APIClient()
         self.shelter_user = User.objects.create_user(username='commit_shelter', email='shelter@commit.test', password='password123', role='shelter')
         self.shelter_profile = ShelterProfile.objects.create(user=self.shelter_user, organization_name='Commit Shelter', pickup_address='123 Test St', city='Bangalore', is_verified=True)
-        self.customer_user = User.objects.create_user(username='commit_customer', email='cust@commit.test', password='password123', role='customer')
+        self.customer_user = User.objects.create_user(username='commit_customer', email='cust@commit.test', password='password123', role='customer', email_verified=True)
         self.driver_user = User.objects.create_user(username='commit_driver', email='driver@commit.test', password='password123', role='delivery')
         self.driver_profile = DeliveryProfile.objects.create(user=self.driver_user, shelter=self.shelter_profile, is_available=True, vehicle_number='KA-01-C-1234')
         self.pet = Pet.objects.create(shelter=self.shelter_profile, name='CommitPet', species='dog', breed='Indie', age_months=12, gender='male', status='available')
@@ -1146,7 +1148,7 @@ class DeliveryConcurrencyTests(TransactionTestCase):
             user=self.driver_user, shelter=self.shelter_profile, vehicle_type='two_wheeler', vehicle_number='KA-01-CONC-01', is_available=True
         )
         self.customer_user = User.objects.create_user(
-            username='conc_customer', email='customer@conc.org', password='password123', role='customer'
+            username='conc_customer', email='customer@conc.org', password='password123', role='customer', email_verified=True
         )
         self.pet = Pet.objects.create(
             shelter=self.shelter_profile, name='ConcPet', species='dog', breed='Boxer', age_months=18, gender='male', status='available'
@@ -1270,7 +1272,7 @@ class DeliveryReassignmentTests(TestCase):
             user=self.driver_user2, shelter=self.shelter_profile, vehicle_type='four_wheeler', vehicle_number='KA-01-DRV-02', is_available=True
         )
         self.customer = User.objects.create_user(
-            username='reassign_customer', email='cust@reassign.org', password='password123', role='customer'
+            username='reassign_customer', email='cust@reassign.org', password='password123', role='customer', email_verified=True
         )
         self.pet = Pet.objects.create(
             shelter=self.shelter_profile, name='ReassignPet', species='dog', breed='Labrador', age_months=12, gender='female', status='available'
@@ -1398,7 +1400,7 @@ class PaymentHardeningTests(TestCase):
 
         # Adopter (applicant)
         self.applicant = User.objects.create_user(
-            username='pay_applicant', email='pay_applicant@test.com', password='password123', role='customer'
+            username='pay_applicant', email='pay_applicant@test.com', password='password123', role='customer', email_verified=True
         )
 
         # Other User (non-owner)
@@ -1873,7 +1875,7 @@ class PaymentConcurrencyHardeningTests(TransactionTestCase):
             user=self.driver_user, shelter=self.shelter_profile, is_available=True, vehicle_number='KA-01-P-9999'
         )
         self.applicant = User.objects.create_user(
-            username='conc_pay_applicant', email='cpa@test.com', password='password123', role='customer'
+            username='conc_pay_applicant', email='cpa@test.com', password='password123', role='customer', email_verified=True
         )
         self.pet = Pet.objects.create(
             shelter=self.shelter_profile, name='ConcPayPet', species='dog', breed='Lab', age_months=12, status='available'
@@ -2020,7 +2022,7 @@ class VerifiedShelterLogisticsPolicyTests(APITestCase):
         )
 
         self.customer = User.objects.create_user(
-            username='log_customer', email='cust@log.org', password='password123', role='customer'
+            username='log_customer', email='cust@log.org', password='password123', role='customer', email_verified=True
         )
 
         self.app_unverified = AdoptionApplication.objects.create(
@@ -2085,7 +2087,7 @@ class PickupPaymentGuardTestCase(TestCase):
         self.shelter = ShelterProfile.objects.create(user=self.shelter_user, organization_name='Guard Shelter', is_verified=True)
         self.driver_user = User.objects.create_user(username='guard_driver', email='guard_driver@test.org', password='password123', role='delivery')
         self.driver = DeliveryProfile.objects.create(user=self.driver_user, shelter=self.shelter, is_available=True, vehicle_number='KA-05-PG-1111')
-        self.customer = User.objects.create_user(username='guard_cust', email='guard_cust@test.org', password='password123', role='customer')
+        self.customer = User.objects.create_user(username='guard_cust', email='guard_cust@test.org', password='password123', role='customer', email_verified=True)
 
     def _create_setup(self, total_amount=Decimal('100.00'), payment_method='unset'):
         pet = Pet.objects.create(shelter=self.shelter, name='GuardPet', species='dog', breed='Lab', age_months=12, gender='female', status='available')
@@ -2218,7 +2220,7 @@ class CODCashCollectionTestCase(TestCase):
         self.driver = DeliveryProfile.objects.create(user=self.driver_user, shelter=self.shelter, is_available=True, vehicle_number='KA-03-CD-2222')
         self.other_driver_user = User.objects.create_user(username='cod_other_driver', email='cod_other@test.org', password='password123', role='delivery')
         self.other_driver = DeliveryProfile.objects.create(user=self.other_driver_user, shelter=self.shelter, is_available=True, vehicle_number='KA-03-CD-3333')
-        self.customer = User.objects.create_user(username='cod_cust', email='cod_cust@test.org', password='password123', role='customer')
+        self.customer = User.objects.create_user(username='cod_cust', email='cod_cust@test.org', password='password123', role='customer', email_verified=True)
 
     def _setup_out_for_delivery(self, total_amount=Decimal('150.00'), payment_method='cod'):
         self.driver.is_available = True
@@ -2394,7 +2396,7 @@ class CODCashCollectionConcurrencyTestCase(TransactionTestCase):
         shelter = ShelterProfile.objects.create(user=shelter_user, organization_name='Conc Shelter', is_verified=True)
         driver_user = User.objects.create_user(username='conc_driver', email='conc_driver@test.org', password='password123', role='delivery')
         driver = DeliveryProfile.objects.create(user=driver_user, shelter=shelter, is_available=True, vehicle_number='KA-03-CC-9999')
-        customer = User.objects.create_user(username='conc_cust', email='conc_cust@test.org', password='password123', role='customer')
+        customer = User.objects.create_user(username='conc_cust', email='conc_cust@test.org', password='password123', role='customer', email_verified=True)
 
         pet = Pet.objects.create(shelter=shelter, name='ConcPet', species='dog', breed='Boxer', age_months=15, gender='female', status='available')
         app = AdoptionApplication.objects.create(
@@ -2503,7 +2505,8 @@ class AdopterEmailLogisticsTests(APITestCase):
             username='adopter_with_email',
             email='adopter.valid@example.com',
             password='password123',
-            role='customer'
+            role='customer',
+            email_verified=True
         )
         self.pet2 = Pet.objects.create(
             shelter=self.shelter_profile,
@@ -2539,6 +2542,80 @@ class AdopterEmailLogisticsTests(APITestCase):
         res = self.client.post('/api/v1/shelter/deliveries/assign/', payload, format='json')
         self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(res.data.get('code'), 'adopter_email_missing')
+
+    def test_assign_delivery_refuses_when_adopter_email_unverified_service(self):
+        unverified_adopter = User.objects.create_user(
+            username='unverified_cust',
+            email='unverified.cust@example.com',
+            password='password123',
+            role='customer',
+            email_verified=False
+        )
+        app = AdoptionApplication.objects.create(
+            pet=self.pet2,
+            applicant=unverified_adopter,
+            status='approved',
+            total_amount=Decimal('0.00'),
+            payment_status='paid'
+        )
+        with self.assertRaises(ConflictError) as ctx:
+            assign_delivery_task(app, self.driver_profile)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.detail.get('code'), 'adopter_email_unverified')
+
+    def test_assign_delivery_refuses_when_adopter_email_unverified_api(self):
+        unverified_adopter = User.objects.create_user(
+            username='unverified_cust_api',
+            email='unverified.api@example.com',
+            password='password123',
+            role='customer',
+            email_verified=False
+        )
+        app = AdoptionApplication.objects.create(
+            pet=self.pet2,
+            applicant=unverified_adopter,
+            status='approved',
+            total_amount=Decimal('0.00'),
+            payment_status='paid'
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+        payload = {
+            'application_id': str(app.public_id),
+            'driver_id': str(self.driver_profile.public_id),
+            'payment_method': 'cod'
+        }
+        res = self.client.post('/api/v1/shelter/deliveries/assign/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res.data.get('code'), 'adopter_email_unverified')
+
+    def test_assign_delivery_allowed_after_adopter_verification(self):
+        unverified_adopter = User.objects.create_user(
+            username='eventual_verified_cust',
+            email='eventual@example.com',
+            password='password123',
+            role='customer',
+            email_verified=False
+        )
+        app = AdoptionApplication.objects.create(
+            pet=self.pet2,
+            applicant=unverified_adopter,
+            status='approved',
+            total_amount=Decimal('0.00'),
+            payment_status='paid'
+        )
+        # Blocked initially
+        with self.assertRaises(ConflictError):
+            assign_delivery_task(app, self.driver_profile)
+
+        # Verified by user / admin
+        unverified_adopter.email_verified = True
+        unverified_adopter.save(update_fields=['email_verified'])
+
+        # Now succeeds
+        delivery = assign_delivery_task(app, self.driver_profile)
+        self.assertIsNotNone(delivery)
+        self.assertEqual(delivery.status, 'assigned')
+
 
     def test_reissue_response_message_matches_email_dispatch_outcome(self):
         # Assign delivery for application with email
@@ -2643,7 +2720,8 @@ class ShelterCancelDeliveryAPITests(APITestCase):
             username='adopter_cancel_test',
             email='adopter.cancel@example.com',
             password='password123',
-            role='customer'
+            role='customer',
+            email_verified=True
         )
 
         # 7. Pet and Application
@@ -2894,7 +2972,7 @@ class StableErrorCodesTestCase(TestCase):
             user=self.driver_user, shelter=self.shelter_profile, is_available=True, vehicle_number='KA-05-ERR-1111'
         )
         self.customer = User.objects.create_user(
-            username='err_cust', email='err_cust@test.org', password='password123', role='customer'
+            username='err_cust', email='err_cust@test.org', password='password123', role='customer', email_verified=True
         )
         self.pet = Pet.objects.create(
             shelter=self.shelter_profile, name='ErrPet', species='dog', breed='Lab', age_months=12, status='available'
@@ -3229,7 +3307,8 @@ class RefundLedgerAndServiceTests(APITestCase):
             username='refund_adopter',
             email='adopter@refundexample.org',
             password='password123',
-            role='customer'
+            role='customer',
+            email_verified=True
         )
 
         self.pet = Pet.objects.create(
@@ -3597,7 +3676,8 @@ class CancelAndRefundEndpointTests(TestCase):
         self.adopter = User.objects.create_user(
             username='adopter_john',
             email='john@test.com',
-            role='adopter'
+            role='adopter',
+            email_verified=True
         )
 
         self.driver_user = User.objects.create_user(
@@ -3898,7 +3978,7 @@ class CancelAndRefundConcurrencyTests(TransactionTestCase):
             user=self.driver_user, shelter=self.shelter, is_available=False, vehicle_type='two_wheeler', vehicle_number='KA-02-C-1111'
         )
         self.adopter = User.objects.create_user(
-            username='conc_refund_adopter', email='cra@test.com', role='adopter'
+            username='conc_refund_adopter', email='cra@test.com', role='adopter', email_verified=True
         )
         self.pet = Pet.objects.create(
             shelter=self.shelter, name='ConcPet', species='dog', breed='Pug', age_months=6, status='pending'
@@ -4077,7 +4157,7 @@ class LateCaptureAndRefundCommandTests(TestCase):
             user=self.shelter_user, organization_name='Late Shelter', pickup_address='1 Late Rd', is_verified=True
         )
         self.adopter = User.objects.create_user(
-            username='late_adopter', email='late_a@test.com', role='adopter'
+            username='late_adopter', email='late_a@test.com', role='adopter', email_verified=True
         )
         self.pet = Pet.objects.create(
             shelter=self.shelter, name='LatePet', species='dog', breed='Terrier', age_months=8, status='available'
@@ -4365,7 +4445,7 @@ class LateCaptureConcurrencyTests(TransactionTestCase):
             user=self.shelter_user, organization_name='CLS Shelter', pickup_address='102 Conc St', is_verified=True
         )
         self.adopter = User.objects.create_user(
-            username='conc_late_adopter', email='cla@test.com', role='adopter'
+            username='conc_late_adopter', email='cla@test.com', role='adopter', email_verified=True
         )
         self.pet = Pet.objects.create(
             shelter=self.shelter, name='ConcLatePet', species='cat', breed='Persian', age_months=7, status='available'
@@ -4457,7 +4537,8 @@ class RefundWebhookTests(TestCase):
             email='adopter_wh@example.com',
             username='adopter_wh',
             password='TestPassword123!',
-            role='adopter'
+            role='adopter',
+            email_verified=True
         )
         self.pet = Pet.objects.create(
             name='WH Pet',
@@ -4830,7 +4911,8 @@ class CODCashReconciliationTests(TestCase):
             email='adopter_recon@example.com',
             username='adopter_recon',
             password='TestPassword123!',
-            role='adopter'
+            role='adopter',
+            email_verified=True
         )
 
         self.driver_user = User.objects.create_user(

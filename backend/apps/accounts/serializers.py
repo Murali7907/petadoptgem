@@ -54,6 +54,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             'public_id': str(user.public_id),
             'username': user.username,
             'email': user.email,
+            'email_verified': user.email_verified,
             'role': user.role,
             'shelter_id': shelter_id,
             'delivery_id': delivery_id,
@@ -88,6 +89,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'public_id', 
             'username', 
             'email', 
+            'email_verified',
+            'email_verified_at',
             'role', 
             'first_name', 
             'last_name', 
@@ -98,7 +101,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'shelter_profile', 
             'delivery_profile'
         ]
-        read_only_fields = ['id', 'public_id', 'is_staff', 'date_joined']
+        read_only_fields = ['id', 'public_id', 'email_verified', 'email_verified_at', 'is_staff', 'date_joined']
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -297,6 +300,11 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
 class PasswordChangeSerializer(serializers.Serializer):
     old_password = serializers.CharField(write_only=True, help_text="Current account password.")
     new_password = serializers.CharField(write_only=True, help_text="New secure password.")
+
+
+class EmailVerificationSerializer(serializers.Serializer):
+    token = serializers.CharField(help_text="Signed email verification token.")
+
 
 
 
