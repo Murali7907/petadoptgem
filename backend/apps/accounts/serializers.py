@@ -284,4 +284,20 @@ class LogoutSerializer(serializers.Serializer):
     refresh = serializers.CharField(help_text="The refresh JWT token to blacklist.")
 
 
+class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField(help_text="Registered account email address.")
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    uid = serializers.CharField(help_text="URL-safe base64-encoded user primary key.")
+    token = serializers.CharField(help_text="One-time password reset token.")
+    new_password = serializers.CharField(write_only=True, help_text="New secure password.")
+
+
+class PasswordChangeSerializer(serializers.Serializer):
+    old_password = serializers.CharField(write_only=True, help_text="Current account password.")
+    new_password = serializers.CharField(write_only=True, help_text="New secure password.")
+
+
+
 

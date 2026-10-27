@@ -1144,4 +1144,46 @@ Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medic
 
 ---
 
+## 18. Milestone 10b — Password Reset & Change, Email Verification Gate & GitHub Actions CI
+
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Milestone 10b approved and finalized.
+>
+> **Architectural Decisions**:
+> 1. **Password Reset Flow**: `POST /api/v1/auth/password-reset/` returns uniform 200 responses to prevent account enumeration. Active users receive an email link (`FRONTEND_BASE_URL + /reset-password?uid=<b64>&token=<token>`) using `django.contrib.auth.tokens.default_token_generator`, dispatched in `transaction.on_commit`.
+> 2. **Token Invalidation & Blacklisting**: On password reset confirmation (`POST /api/v1/auth/password-reset/confirm/`) or authenticated password change (`POST /api/v1/auth/password/change/`), validate against `AUTH_PASSWORD_VALIDATORS` (code `weak_password`), update credentials, and blacklist all outstanding SimpleJWT refresh tokens across all active sessions for the user.
+> 3. **Email Verification Gate**: Add additive fields `email_verified` (boolean, default False) and `email_verified_at` (nullable datetime) to `User`. On registration, dispatch a signed verification token (`TimestampSigner` with dedicated salt, max age 86400s) linking to `FRONTEND_BASE_URL + /verify-email?token=<token>`. Gate delivery assignment: `assign_delivery_task` returns 409 `{"code": "adopter_email_unverified"}` if the adopter's email is unverified.
+> 4. **GitHub Actions CI**: Configure `.github/workflows/ci.yml` running lint/checks, dry-run migrations, schema validation (`spectacular --validate --fail-on-warn`), and automated tests against a PostgreSQL service container. Add production deployment security checks and Dependabot configuration.
+
+### 18.1 Task 0: Check First (Pre-Implementation Audit)
+- Confirm absence of pre-existing password reset, password change, and email verification endpoints or fields in the codebase.
+- Audit User update paths to determine whether any endpoint permits email modification.
+
+### 18.2 Task 1: Password Reset & Change
+- Configure `FRONTEND_BASE_URL` (default `http://localhost:3000`, required non-mock in production) and `PASSWORD_RESET_TIMEOUT` (default 3600s).
+- Implement `POST /api/v1/auth/password-reset/` (uniform 200, IP throttle `auth_password_reset`).
+- Implement `POST /api/v1/auth/password-reset/confirm/` (`AUTH_PASSWORD_VALIDATORS`, single-use tokens, session refresh token blacklisting, IP throttle `auth_password_reset_confirm`).
+- Implement `POST /api/v1/auth/password/change/` (authenticated, old password check, `AUTH_PASSWORD_VALIDATORS`, refresh token blacklisting).
+- Redact passwords, uids, and tokens from all logs. Provide full `@extend_schema` definitions.
+- Comprehensive test suite covering enumeration resistance, token expiry/tampering, weak passwords, session revocation, and rate limiting.
+
+### 18.3 Task 2: Email Verification (Delivery Assignment Gate)
+- Generate additive schema migration for `email_verified` and `email_verified_at` on `User`.
+- Send signed verification token on registration inside `transaction.on_commit`.
+- Implement `POST /api/v1/auth/verify-email/` (idempotent, validates token against current user email).
+- Implement `POST /api/v1/auth/resend-verification/` (authenticated, throttled `auth_resend_verification`).
+- Expose `email_verified` in `UserProfileSerializer` (`GET /api/v1/auth/me/`).
+- Gate `assign_delivery_task`: return 409 `adopter_email_unverified` when adopter's email is not verified.
+- Update `seed_platform` to mark demo users verified. Document verification management in Django admin.
+- Update logistics test fixtures with verified adopters and verify gate behavior.
+
+### 18.4 Task 3: CI (GitHub Actions)
+- Create `.github/workflows/ci.yml` with test and production deploy check jobs.
+- Create `.github/dependabot.yml` for pip and actions.
+- Add CI build badge to `README.md`.
+
+---
+
 *Last updated: 2026-10-27*
+

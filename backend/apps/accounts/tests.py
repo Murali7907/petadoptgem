@@ -8,6 +8,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 import jwt
 from django.conf import settings
+from django.core import mail
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -746,6 +747,7 @@ class ProductionCredentialFailClosedTests(APITestCase):
             'EMAIL_BACKEND': 'django.core.mail.backends.smtp.EmailBackend',
             'EMAIL_HOST': 'smtp.sendgrid.net',
             'DEFAULT_FROM_EMAIL': 'KindHeart Pet Adoption <no-reply@kindheart.org>',
+            'FRONTEND_BASE_URL': 'https://petadopt.kindheart.org',
         }
 
     def test_dev_mode_debug_true_unaffected(self):
@@ -764,6 +766,7 @@ class ProductionCredentialFailClosedTests(APITestCase):
             'EMAIL_BACKEND': 'django.core.mail.backends.console.EmailBackend',
             'EMAIL_HOST': 'mock_host',
             'DEFAULT_FROM_EMAIL': 'mock_email@test.com',
+            'FRONTEND_BASE_URL': 'http://mock-frontend.local',
         }
         with mock.patch.dict('os.environ', dev_env):
             # Should succeed silently
@@ -898,6 +901,18 @@ class ProductionCredentialFailClosedTests(APITestCase):
                     self.validator()
                 self.assertIn("DEFAULT_FROM_EMAIL", str(ctx.exception))
 
+    def test_production_frontend_base_url_empty_or_mock_fails(self):
+        """When DEBUG is False, empty or mock FRONTEND_BASE_URL raises ImproperlyConfigured."""
+        from unittest import mock
+        from django.core.exceptions import ImproperlyConfigured
+
+        for bad_url in ['', 'http://mock-frontend.local', 'https://mock.example.com']:
+            bad_env = dict(self.valid_prod_env, FRONTEND_BASE_URL=bad_url)
+            with mock.patch.dict('os.environ', bad_env):
+                with self.assertRaises(ImproperlyConfigured) as ctx:
+                    self.validator()
+                self.assertIn("FRONTEND_BASE_URL", str(ctx.exception))
+
 
 class SeedPlatformCommandSafetyTests(APITestCase):
     """
@@ -921,5 +936,265 @@ class SeedPlatformCommandSafetyTests(APITestCase):
         # Ensure zero rows were created
         self.assertEqual(User.objects.count(), initial_user_count)
         self.assertEqual(Pet.objects.count(), initial_pet_count)
+
+
+class PasswordResetAndChangeTests(APITestCase):
+    """
+    Comprehensive tests for password reset request, confirmation, and authenticated change.
+    Enforces enumeration protection, token single-use, expiration, strength validation,
+    session revocation via refresh token blacklisting, and throttle enforcement.
+    """
+    def setUp(self):
+        from django.core.cache import cache
+        from django.core import mail
+        cache.clear()
+        mail.outbox = []
+        self.user = User.objects.create_user(
+            username='reset_tester',
+            email='reset_tester@example.com',
+            password='InitialPassword123!',
+            role='customer',
+            is_active=True,
+        )
+
+    def test_password_reset_request_happy_path(self):
+        url = '/api/v1/auth/password-reset/'
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(url, {'email': 'reset_tester@example.com'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data.get('message'),
+            "If an account with that email exists, a password reset link has been sent."
+        )
+        self.assertEqual(len(mail.outbox), 1)
+        sent_email = mail.outbox[0]
+        self.assertIn("reset_tester@example.com", sent_email.to)
+        self.assertIn("Reset Your Password", sent_email.subject)
+        # Check link format
+        body = sent_email.body
+        self.assertIn("http://localhost:3000/reset-password?uid=", body)
+        self.assertIn("&token=", body)
+
+    def test_password_reset_request_unknown_email_returns_identical_response_and_sends_nothing(self):
+        url = '/api/v1/auth/password-reset/'
+        response = self.client.post(url, {'email': 'nonexistent_user@example.com'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data.get('message'),
+            "If an account with that email exists, a password reset link has been sent."
+        )
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_password_reset_request_inactive_user_returns_identical_response_and_sends_nothing(self):
+        self.user.is_active = False
+        self.user.save()
+        url = '/api/v1/auth/password-reset/'
+        response = self.client.post(url, {'email': self.user.email}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data.get('message'),
+            "If an account with that email exists, a password reset link has been sent."
+        )
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_password_reset_confirm_happy_path_and_blacklists_sessions(self):
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.http import urlsafe_base64_encode
+        from django.utils.encoding import force_bytes
+        from rest_framework_simplejwt.tokens import RefreshToken
+
+        # Issue a refresh token prior to reset
+        old_refresh = RefreshToken.for_user(self.user)
+        old_refresh_str = str(old_refresh)
+
+        uid = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+
+        confirm_url = '/api/v1/auth/password-reset/confirm/'
+        payload = {
+            'uid': uid,
+            'token': token,
+            'new_password': 'BrandNewPassword987!',
+        }
+        res = self.client.post(confirm_url, payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn("Password has been reset successfully", res.data.get('message', ''))
+
+        # Can log in with new password
+        login_url = '/api/v1/auth/login/'
+        res_login = self.client.post(login_url, {'username': self.user.username, 'password': 'BrandNewPassword987!'}, format='json')
+        self.assertEqual(res_login.status_code, status.HTTP_200_OK)
+
+        # Old password rejected
+        res_old = self.client.post(login_url, {'username': self.user.username, 'password': 'InitialPassword123!'}, format='json')
+        self.assertEqual(res_old.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # Refresh token issued before reset is blacklisted
+        refresh_url = '/api/v1/auth/token/refresh/'
+        res_refresh = self.client.post(refresh_url, {'refresh': old_refresh_str}, format='json')
+        self.assertEqual(res_refresh.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_password_reset_token_is_single_use(self):
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.http import urlsafe_base64_encode
+        from django.utils.encoding import force_bytes
+
+        uid = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+
+        confirm_url = '/api/v1/auth/password-reset/confirm/'
+        payload = {
+            'uid': uid,
+            'token': token,
+            'new_password': 'FirstResetPassword123!',
+        }
+        res1 = self.client.post(confirm_url, payload, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+
+        # Second attempt with same token must fail
+        payload2 = {
+            'uid': uid,
+            'token': token,
+            'new_password': 'SecondResetPassword123!',
+        }
+        res2 = self.client.post(confirm_url, payload2, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res2.data.get('code'), 'invalid_token')
+
+    @override_settings(PASSWORD_RESET_TIMEOUT=-10)
+    def test_password_reset_expired_token(self):
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.http import urlsafe_base64_encode
+        from django.utils.encoding import force_bytes
+
+        uid = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+
+        confirm_url = '/api/v1/auth/password-reset/confirm/'
+        payload = {
+            'uid': uid,
+            'token': token,
+            'new_password': 'NewPassword123!',
+        }
+        res = self.client.post(confirm_url, payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'invalid_token')
+
+    def test_password_reset_tampered_or_bad_uid(self):
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.http import urlsafe_base64_encode
+        from django.utils.encoding import force_bytes
+
+        uid = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+
+        confirm_url = '/api/v1/auth/password-reset/confirm/'
+        # Bad UID
+        res_bad_uid = self.client.post(confirm_url, {
+            'uid': 'invalid-base64',
+            'token': token,
+            'new_password': 'ValidPassword123!',
+        }, format='json')
+        self.assertEqual(res_bad_uid.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res_bad_uid.data.get('code'), 'invalid_token')
+
+        # Tampered Token
+        res_bad_token = self.client.post(confirm_url, {
+            'uid': uid,
+            'token': 'tampered-invalid-token',
+            'new_password': 'ValidPassword123!',
+        }, format='json')
+        self.assertEqual(res_bad_token.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res_bad_token.data.get('code'), 'invalid_token')
+
+    def test_password_reset_weak_password_rejected(self):
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.http import urlsafe_base64_encode
+        from django.utils.encoding import force_bytes
+
+        uid = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+
+        confirm_url = '/api/v1/auth/password-reset/confirm/'
+        payload = {
+            'uid': uid,
+            'token': token,
+            'new_password': '123',  # Too short / common
+        }
+        res = self.client.post(confirm_url, payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'weak_password')
+        self.assertIn('messages', res.data)
+
+    def test_password_change_requires_authentication(self):
+        url = '/api/v1/auth/password/change/'
+        res = self.client.post(url, {'old_password': 'foo', 'new_password': 'bar'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_password_change_wrong_old_password(self):
+        self.client.force_authenticate(user=self.user)
+        url = '/api/v1/auth/password/change/'
+        res = self.client.post(url, {
+            'old_password': 'WrongPassword123!',
+            'new_password': 'NewStrongPassword123!',
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'invalid_password')
+
+    def test_password_change_weak_new_password(self):
+        self.client.force_authenticate(user=self.user)
+        url = '/api/v1/auth/password/change/'
+        res = self.client.post(url, {
+            'old_password': 'InitialPassword123!',
+            'new_password': '123',
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'weak_password')
+        self.assertIn('messages', res.data)
+
+    def test_password_change_happy_path_and_blacklists_sessions(self):
+        from rest_framework_simplejwt.tokens import RefreshToken
+
+        old_refresh = RefreshToken.for_user(self.user)
+        old_refresh_str = str(old_refresh)
+
+        self.client.force_authenticate(user=self.user)
+        url = '/api/v1/auth/password/change/'
+        res = self.client.post(url, {
+            'old_password': 'InitialPassword123!',
+            'new_password': 'UpdatedPassword123!',
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn("Password changed successfully", res.data.get('message', ''))
+
+        # Old refresh token is blacklisted
+        refresh_url = '/api/v1/auth/token/refresh/'
+        res_refresh = self.client.post(refresh_url, {'refresh': old_refresh_str}, format='json')
+        self.assertEqual(res_refresh.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_password_reset_throttling(self):
+        from django.core.cache import cache
+        cache.clear()
+        url = '/api/v1/auth/password-reset/'
+        for _ in range(5):
+            res = self.client.post(url, {'email': 'someone@example.com'}, format='json')
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        # 6th request must be 429
+        res_throttled = self.client.post(url, {'email': 'someone@example.com'}, format='json')
+        self.assertEqual(res_throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_password_reset_confirm_throttling(self):
+        from django.core.cache import cache
+        cache.clear()
+        url = '/api/v1/auth/password-reset/confirm/'
+        for _ in range(5):
+            res = self.client.post(url, {'uid': 'abc', 'token': 'def', 'new_password': '123'}, format='json')
+            self.assertIn(res.status_code, (status.HTTP_400_BAD_REQUEST, status.HTTP_200_OK))
+
+        # 6th request must be 429
+        res_throttled = self.client.post(url, {'uid': 'abc', 'token': 'def', 'new_password': '123'}, format='json')
+        self.assertEqual(res_throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
 
 

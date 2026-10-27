@@ -136,6 +136,9 @@ REST_FRAMEWORK = {
         'auth_login': os.getenv('AUTH_LOGIN_THROTTLE_RATE', '10/min'),
         'auth_register': os.getenv('AUTH_REGISTER_THROTTLE_RATE', '5/min'),
         'auth_refresh': os.getenv('AUTH_REFRESH_THROTTLE_RATE', '30/min'),
+        'auth_password_reset': os.getenv('AUTH_PASSWORD_RESET_THROTTLE_RATE', '5/min'),
+        'auth_password_reset_confirm': os.getenv('AUTH_PASSWORD_RESET_CONFIRM_THROTTLE_RATE', '5/min'),
+        'auth_resend_verification': os.getenv('AUTH_RESEND_VERIFICATION_THROTTLE_RATE', '5/min'),
         'pets_geo': os.getenv('PETS_GEO_THROTTLE_RATE', '30/min'),
         'refund': os.getenv('REFUND_THROTTLE_RATE', '10/min'),
     },
@@ -336,6 +339,11 @@ else:
     RAZORPAY_KEY_SECRET = RAZORPAY_KEY_SECRET or 'mock_secret_key_12345'
     RAZORPAY_WEBHOOK_SECRET = RAZORPAY_WEBHOOK_SECRET or 'mock_webhook_secret_12345'
 
+# Frontend Application URL & Authentication Lifecycle Configuration
+FRONTEND_BASE_URL = os.getenv('FRONTEND_BASE_URL', 'http://localhost:3000').rstrip('/')
+PASSWORD_RESET_TIMEOUT = int(os.getenv('PASSWORD_RESET_TIMEOUT', '3600'))
+EMAIL_VERIFY_MAX_AGE = int(os.getenv('EMAIL_VERIFY_MAX_AGE', '86400'))
+
 # Cross-Origin Resource Sharing (CORS) & CSRF Configuration
 # Note: Authentication across the API is stateless SimpleJWT (Bearer tokens in Authorization headers),
 # so browser session CSRF tokens do not apply to DRF API endpoints. CSRF_TRUSTED_ORIGINS is configured
@@ -485,6 +493,7 @@ def validate_production_credentials(
     email_backend=None,
     email_host=None,
     default_from_email=None,
+    frontend_base_url=None,
 ):
     """
     Validates security constraints for production deployment.
@@ -495,6 +504,7 @@ def validate_production_credentials(
       - EMAIL_BACKEND cannot be console, locmem, dummy, or filebased.
       - EMAIL_HOST cannot be empty or contain 'mock'.
       - DEFAULT_FROM_EMAIL cannot be empty or contain 'mock'.
+      - FRONTEND_BASE_URL cannot be empty or contain 'mock'.
     Raises ImproperlyConfigured if any invariant is violated.
     """
     if debug is None:
@@ -581,6 +591,14 @@ def validate_production_credentials(
     if 'mock' in default_from_email.lower():
         raise ImproperlyConfigured(f"Mock DEFAULT_FROM_EMAIL is forbidden when DEBUG is False: {default_from_email}")
 
+    # 5. FRONTEND_BASE_URL checks
+    if frontend_base_url is None:
+        frontend_base_url = os.getenv('FRONTEND_BASE_URL', '').strip()
+    if not frontend_base_url:
+        raise ImproperlyConfigured("FRONTEND_BASE_URL is required and cannot be empty when DEBUG is False.")
+    if 'mock' in frontend_base_url.lower():
+        raise ImproperlyConfigured(f"Mock FRONTEND_BASE_URL is forbidden when DEBUG is False: {frontend_base_url}")
+
 
 # Run production validation when running with DEBUG=False (outside test runner where test settings apply)
 if not DEBUG and 'test' not in sys.argv:
@@ -597,5 +615,7 @@ if not DEBUG and 'test' not in sys.argv:
         email_backend=EMAIL_BACKEND,
         email_host=EMAIL_HOST,
         default_from_email=DEFAULT_FROM_EMAIL,
+        frontend_base_url=FRONTEND_BASE_URL,
     )
+
 

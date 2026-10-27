@@ -21,7 +21,10 @@ class MaskSensitiveDataFilter(logging.Filter):
         (re.compile(r'\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+\b'), '[REDACTED_JWT]'),
         # Passwords, secrets, and api keys
         (re.compile(r'(?i)\b((?:password|secret|api[_-]?key)\s*[:=]\s*)[^\s,]+'), r'\1[REDACTED]'),
+        # Reset tokens and uids
+        (re.compile(r'(?i)\b((?:token|uid)\s*[:=]\s*)[^\s,]+'), r'\1[REDACTED]'),
     ]
+
 
     def _sanitize(self, text: Any) -> Any:
         if not isinstance(text, str):

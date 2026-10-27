@@ -7,8 +7,19 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from django.db.models import Sum, Avg
+import logging
+from django.conf import settings
+from django.core.mail import send_mail
+from django.contrib.auth.tokens import default_token_generator
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from django.utils.encoding import force_bytes, force_str
+from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiTypes, OpenApiResponse
 from django.db import transaction
+
+logger = logging.getLogger(__name__)
 from .models import User, ShelterProfile, DeliveryProfile, Notification
 from .permissions import IsAdminRole, IsShelterRole, IsVerifiedShelter
 from apps.pets.models import Pet
@@ -23,6 +34,9 @@ from .serializers import (
     NotificationSerializer,
     DriverCreateSerializer,
     LogoutSerializer,
+    PasswordResetRequestSerializer,
+    PasswordResetConfirmSerializer,
+    PasswordChangeSerializer,
 )
 
 class CustomTokenObtainPairView(TokenObtainPairView):
@@ -386,5 +400,185 @@ class NotificationMarkAllReadView(views.APIView):
             'message': f'{updated_count} notification(s) marked as read.',
             'updated_count': updated_count
         }, status=status.HTTP_200_OK)
+
+
+class PasswordResetView(views.APIView):
+    """
+    Password reset request endpoint.
+    POST /api/v1/auth/password-reset/
+    Always returns uniform 200 OK to prevent account enumeration.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_password_reset'
+    serializer_class = PasswordResetRequestSerializer
+
+    @extend_schema(
+        summary="Request password reset link",
+        description="Initiates password reset workflow. Always returns 200 OK to prevent user enumeration.",
+        request=PasswordResetRequestSerializer,
+        responses={
+            200: OpenApiResponse(description="Password reset email dispatched if account exists and is active.")
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email'].strip().lower()
+
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        if user:
+            uid = urlsafe_base64_encode(force_bytes(user.pk))
+            token = default_token_generator.make_token(user)
+            frontend_url = getattr(settings, 'FRONTEND_BASE_URL', 'http://localhost:3000').rstrip('/')
+            reset_link = f"{frontend_url}/reset-password?uid={uid}&token={token}"
+            timeout_minutes = getattr(settings, 'PASSWORD_RESET_TIMEOUT', 3600) // 60
+
+            def send_reset_email():
+                try:
+                    send_mail(
+                        subject="Reset Your Password - KindHeart Pet Adoption",
+                        message=(
+                            f"Hello {user.first_name or user.username},\n\n"
+                            f"We received a request to reset your password. Click the link below to set a new password:\n"
+                            f"{reset_link}\n\n"
+                            f"This link expires in {timeout_minutes} minutes.\n"
+                            f"If you did not make this request, you can safely ignore this email.\n"
+                        ),
+                        from_email=settings.DEFAULT_FROM_EMAIL,
+                        recipient_list=[user.email],
+                        fail_silently=True,
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to dispatch password reset email: {exc}")
+
+            transaction.on_commit(send_reset_email)
+
+        return Response({
+            "message": "If an account with that email exists, a password reset link has been sent."
+        }, status=status.HTTP_200_OK)
+
+
+class PasswordResetConfirmView(views.APIView):
+    """
+    Password reset confirmation endpoint.
+    POST /api/v1/auth/password-reset/confirm/
+    Validates token and password complexity, resets credentials, and revokes active sessions.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_password_reset_confirm'
+    serializer_class = PasswordResetConfirmSerializer
+
+    @extend_schema(
+        summary="Confirm password reset",
+        description="Resets user password with valid one-time token and invalidates all existing JWT sessions.",
+        request=PasswordResetConfirmSerializer,
+        responses={
+            200: OpenApiResponse(description="Password reset successful"),
+            400: OpenApiResponse(description="Invalid or expired token, or weak password"),
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = PasswordResetConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        uid_b64 = serializer.validated_data['uid']
+        token = serializer.validated_data['token']
+        new_password = serializer.validated_data['new_password']
+
+        try:
+            uid = force_str(urlsafe_base64_decode(uid_b64))
+            user = User.objects.get(pk=uid, is_active=True)
+        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+            return Response({
+                "code": "invalid_token",
+                "detail": "Invalid or expired password reset token."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if not default_token_generator.check_token(user, token):
+            return Response({
+                "code": "invalid_token",
+                "detail": "Invalid or expired password reset token."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            validate_password(new_password, user)
+        except ValidationError as err:
+            return Response({
+                "code": "weak_password",
+                "detail": "Password does not meet security requirements.",
+                "messages": list(err.messages)
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
+        user.save()
+
+        # Revoke all outstanding SimpleJWT refresh tokens across all sessions
+        try:
+            for ot in OutstandingToken.objects.filter(user=user):
+                BlacklistedToken.objects.get_or_create(token=ot)
+        except Exception as exc:
+            logger.warning(f"Failed to blacklist tokens after password reset: {exc}")
+
+        return Response({
+            "message": "Password has been reset successfully. Please log in with your new password."
+        }, status=status.HTTP_200_OK)
+
+
+class PasswordChangeView(views.APIView):
+    """
+    Authenticated password change endpoint.
+    POST /api/v1/auth/password/change/
+    Validates current password, updates to new password, and revokes outstanding sessions.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = PasswordChangeSerializer
+
+    @extend_schema(
+        summary="Change account password",
+        description="Changes password for authenticated user and revokes active refresh tokens.",
+        request=PasswordChangeSerializer,
+        responses={
+            200: OpenApiResponse(description="Password changed successfully"),
+            400: OpenApiResponse(description="Invalid current password or weak new password"),
+            401: OpenApiResponse(description="Authentication required"),
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = PasswordChangeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        old_password = serializer.validated_data['old_password']
+        new_password = serializer.validated_data['new_password']
+        user = request.user
+
+        if not user.check_password(old_password):
+            return Response({
+                "code": "invalid_password",
+                "detail": "Current password is incorrect."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            validate_password(new_password, user)
+        except ValidationError as err:
+            return Response({
+                "code": "weak_password",
+                "detail": "Password does not meet security requirements.",
+                "messages": list(err.messages)
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
+        user.save()
+
+        # Revoke all outstanding SimpleJWT refresh tokens across all sessions
+        try:
+            for ot in OutstandingToken.objects.filter(user=user):
+                BlacklistedToken.objects.get_or_create(token=ot)
+        except Exception as exc:
+            logger.warning(f"Failed to blacklist tokens after password change: {exc}")
+
+        return Response({
+            "message": "Password changed successfully. Please log in again."
+        }, status=status.HTTP_200_OK)
+
 
 
