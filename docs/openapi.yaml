@@ -680,6 +680,92 @@ paths:
                 type: object
                 additionalProperties: {}
           description: ''
+  /api/v1/auth/password-reset/:
+    post:
+      operationId: auth_password_reset_create
+      description: Initiates password reset workflow. Always returns 200 OK to prevent
+        user enumeration.
+      summary: Request password reset link
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequestRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequestRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequestRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      - {}
+      responses:
+        '200':
+          description: Password reset email dispatched if account exists and is active.
+  /api/v1/auth/password-reset/confirm/:
+    post:
+      operationId: auth_password_reset_confirm_create
+      description: Resets user password with valid one-time token and invalidates
+        all existing JWT sessions.
+      summary: Confirm password reset
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirmRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirmRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirmRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      - {}
+      responses:
+        '200':
+          description: Password reset successful
+        '400':
+          description: Invalid or expired token, or weak password
+  /api/v1/auth/password/change/:
+    post:
+      operationId: auth_password_change_create
+      description: Changes password for authenticated user and revokes active refresh
+        tokens.
+      summary: Change account password
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          description: Password changed successfully
+        '400':
+          description: Invalid current password or weak new password
+        '401':
+          description: Authentication required
   /api/v1/auth/register/:
     post:
       operationId: auth_register_create
@@ -711,6 +797,20 @@ paths:
               schema:
                 $ref: '#/components/schemas/UserRegistration'
           description: ''
+  /api/v1/auth/resend-verification/:
+    post:
+      operationId: auth_resend_verification_create
+      description: Resends email verification link to authenticated user's email if
+        not already verified. Always returns 200 OK.
+      summary: Resend email verification link
+      tags:
+      - auth
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          description: Verification email dispatched if unverified.
   /api/v1/auth/token/refresh/:
     post:
       operationId: auth_token_refresh_create
@@ -765,6 +865,35 @@ paths:
       responses:
         '200':
           description: No response body
+  /api/v1/auth/verify-email/:
+    post:
+      operationId: auth_verify_email_create
+      description: Validates email verification token and marks user email as verified.
+        Idempotent.
+      summary: Verify user email address
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailVerificationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/EmailVerificationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/EmailVerificationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      - {}
+      responses:
+        '200':
+          description: Email address successfully verified
+        '400':
+          description: Invalid or expired verification token
   /api/v1/customer/favorites/:
     get:
       operationId: customer_favorites_list
@@ -1326,6 +1455,92 @@ paths:
               schema:
                 $ref: '#/components/schemas/DeliveryDriverTask'
           description: ''
+  /api/v1/password-reset/:
+    post:
+      operationId: password_reset_create
+      description: Initiates password reset workflow. Always returns 200 OK to prevent
+        user enumeration.
+      summary: Request password reset link
+      tags:
+      - password-reset
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequestRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequestRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequestRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      - {}
+      responses:
+        '200':
+          description: Password reset email dispatched if account exists and is active.
+  /api/v1/password-reset/confirm/:
+    post:
+      operationId: password_reset_confirm_create
+      description: Resets user password with valid one-time token and invalidates
+        all existing JWT sessions.
+      summary: Confirm password reset
+      tags:
+      - password-reset
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirmRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirmRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirmRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      - {}
+      responses:
+        '200':
+          description: Password reset successful
+        '400':
+          description: Invalid or expired token, or weak password
+  /api/v1/password/change/:
+    post:
+      operationId: password_change_create
+      description: Changes password for authenticated user and revokes active refresh
+        tokens.
+      summary: Change account password
+      tags:
+      - password
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          description: Password changed successfully
+        '400':
+          description: Invalid current password or weak new password
+        '401':
+          description: Authentication required
   /api/v1/payments/create-order/:
     post:
       operationId: payments_create_order_create
@@ -1807,6 +2022,20 @@ paths:
       responses:
         '204':
           description: No response body
+  /api/v1/resend-verification/:
+    post:
+      operationId: resend_verification_create
+      description: Resends email verification link to authenticated user's email if
+        not already verified. Always returns 200 OK.
+      summary: Resend email verification link
+      tags:
+      - resend-verification
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          description: Verification email dispatched if unverified.
   /api/v1/reviews/:
     post:
       operationId: reviews_create
@@ -2747,6 +2976,35 @@ paths:
               schema:
                 $ref: '#/components/schemas/AdoptionReviewDetail'
           description: ''
+  /api/v1/verify-email/:
+    post:
+      operationId: verify_email_create
+      description: Validates email verification token and marks user email as verified.
+        Idempotent.
+      summary: Verify user email address
+      tags:
+      - verify-email
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailVerificationRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/EmailVerificationRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/EmailVerificationRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      - {}
+      responses:
+        '200':
+          description: Email address successfully verified
+        '400':
+          description: Invalid or expired verification token
 components:
   schemas:
     AdminPetStats:
@@ -4172,6 +4430,15 @@ components:
       - name
       - public_id
       - species
+    EmailVerificationRequest:
+      type: object
+      properties:
+        token:
+          type: string
+          minLength: 1
+          description: Signed email verification token.
+      required:
+      - token
     ErrorResponse:
       type: object
       properties:
@@ -4525,6 +4792,52 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ShelterDelivery'
+    PasswordChangeRequest:
+      type: object
+      properties:
+        old_password:
+          type: string
+          writeOnly: true
+          minLength: 1
+          description: Current account password.
+        new_password:
+          type: string
+          writeOnly: true
+          minLength: 1
+          description: New secure password.
+      required:
+      - new_password
+      - old_password
+    PasswordResetConfirmRequest:
+      type: object
+      properties:
+        uid:
+          type: string
+          minLength: 1
+          description: URL-safe base64-encoded user primary key.
+        token:
+          type: string
+          minLength: 1
+          description: One-time password reset token.
+        new_password:
+          type: string
+          writeOnly: true
+          minLength: 1
+          description: New secure password.
+      required:
+      - new_password
+      - token
+      - uid
+    PasswordResetRequestRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          minLength: 1
+          description: Registered account email address.
+      required:
+      - email
     PatchedAdminShelterDetailRequest:
       type: object
       properties:
@@ -5981,6 +6294,16 @@ components:
             maxLength: 254
           - type: string
             maxLength: 0
+        email_verified:
+          type: boolean
+          readOnly: true
+          description: Designates whether the user's email address has been verified.
+        email_verified_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+          description: Timestamp when the user verified their email address.
         role:
           $ref: '#/components/schemas/RoleEnum'
         first_name:
@@ -6014,6 +6337,8 @@ components:
       required:
       - date_joined
       - delivery_profile
+      - email_verified
+      - email_verified_at
       - id
       - is_staff
       - public_id

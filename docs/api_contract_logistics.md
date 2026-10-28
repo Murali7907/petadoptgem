@@ -51,6 +51,7 @@ This document specifies the canonical and legacy API contracts for the pet deliv
   - `400 Bad Request`: Validation failure or driver unavailable.
   - `409 Conflict`:
     - `{"code": "adopter_email_missing"}`: Adopter does not have an email address registered (`409 {"code": "adopter_email_missing"}`).
+    - `{"code": "adopter_email_unverified"}`: Adopter's email address has not been verified yet (`409 {"code": "adopter_email_unverified", "detail": "Cannot assign delivery task: adopter email address is unverified."}`).
     - Cannot reassign delivery when already in-flight (`out_for_delivery`) or completed (`delivered`). (Reassignment in `assigned` or `failed` safely frees previous driver, resets `dispatched_at`, and issues fresh OTPs).
 
 ---
@@ -549,5 +550,117 @@ This document specifies the canonical and legacy API contracts for the pet deliv
 2. **Single-Response Plaintext Delivery**:
    - Plaintext pickup OTPs are returned strictly once in the response body of task assignment (`POST /api/v1/shelter/deliveries/assign/`) and pickup reissue (`POST /api/v1/shelter/deliveries/<id>/reissue-otp/`).
    - Plaintext OTPs are never persisted in the database or exposed via GET endpoints, model serializers, or application logs.
+
+---
+
+## Authentication, Password Management & Email Verification Endpoints
+
+### 1. Password Reset Request
+- **URL**: `POST /api/v1/auth/password-reset/`
+- **Authentication**: None (Public)
+- **Throttle Scope**: `auth_password_reset` (5 requests/minute default, configurable via `AUTH_PASSWORD_RESET_THROTTLE_RATE`)
+- **Request Body**:
+  ```json
+  {
+    "email": "user@example.com"
+  }
+  ```
+- **Responses**:
+  - `200 OK`: Uniform response returned regardless of whether the email exists, preventing account enumeration attacks.
+    ```json
+    {
+      "message": "If an account with this email exists, a password reset link has been sent."
+    }
+    ```
+- **Token Format**: URL-safe base64 encoded user PK (`uid`) and cryptographic token (`token`) generated via Django's `default_token_generator`, dispatched via email linking to `{FRONTEND_BASE_URL}/reset-password?uid={uid}&token={token}`.
+- **Validity Timeout**: Governed by `PASSWORD_RESET_TIMEOUT` (default `3600` seconds / 1 hour).
+
+### 2. Password Reset Confirm
+- **URL**: `POST /api/v1/auth/password-reset/confirm/`
+- **Authentication**: None (Public)
+- **Throttle Scope**: `auth_password_reset_confirm` (5 requests/minute default, configurable via `AUTH_PASSWORD_RESET_CONFIRM_THROTTLE_RATE`)
+- **Request Body**:
+  ```json
+  {
+    "uid": "MQ",
+    "token": "d7k6j1-9d8a1c8f...",
+    "new_password": "NewSecurePassword123!"
+  }
+  ```
+- **Responses**:
+  - `200 OK`: Password reset successfully. Revokes all outstanding refresh tokens for the user.
+    ```json
+    {
+      "message": "Password has been reset successfully. Please log in with your new password."
+    }
+    ```
+  - `400 Bad Request`:
+    - `{"error": "Invalid or expired reset token.", "code": "invalid_token"}`: Uniform error for invalid UID, bad token, or expired token. Single-use enforcement guarantees token invalidation immediately upon password change.
+    - `{"error": "Password does not meet complexity requirements.", "code": "weak_password", "details": ["This password is too short..."]}`: Password rejected by `AUTH_PASSWORD_VALIDATORS`.
+
+### 3. Authenticated Password Change
+- **URL**: `POST /api/v1/auth/password/change/`
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Request Body**:
+  ```json
+  {
+    "old_password": "CurrentPassword123!",
+    "new_password": "NewSecurePassword456!"
+  }
+  ```
+- **Responses**:
+  - `200 OK`: Password changed successfully. Blacklists all outstanding refresh tokens for the user.
+    ```json
+    {
+      "message": "Password changed successfully. Please log in again with your new password."
+    }
+    ```
+  - `400 Bad Request`:
+    - `{"error": "Current password is incorrect.", "code": "invalid_password"}`
+    - `{"error": "Password does not meet complexity requirements.", "code": "weak_password", "details": [...]}`
+
+### 4. Email Verification
+- **URL**: `POST /api/v1/auth/verify-email/`
+- **Authentication**: None (Public)
+- **Request Body**:
+  ```json
+  {
+    "token": "InVzZXJfaWQiOjEsImVtYWlsIjoidXNlckBleGFtcGxlLmNvbSJ9:1vB7y8:..."
+  }
+  ```
+- **Responses**:
+  - `200 OK`: Sets `email_verified = True` and `email_verified_at = now()`. Idempotent for already verified accounts.
+    ```json
+    {
+      "message": "Email address verified successfully.",
+      "email_verified": true
+    }
+    ```
+  - `400 Bad Request`: `{"error": "Invalid or expired verification token.", "code": "invalid_token"}`. Returned if token signature fails, timestamp exceeds `EMAIL_VERIFY_MAX_AGE` (default `86400` seconds / 24 hours), or token email does not match user's current email.
+
+### 5. Resend Verification Email
+- **URL**: `POST /api/v1/auth/resend-verification/`
+- **Authentication**: Required (`Bearer <access_token>`)
+- **Throttle Scope**: `auth_resend_verification` (3 requests/minute default, configurable via `AUTH_RESEND_VERIFICATION_THROTTLE_RATE`)
+- **Responses**:
+  - `200 OK`: Uniform response. Sends a signed verification link only if the user is not yet verified.
+    ```json
+    {
+      "message": "If your email address is not yet verified, a new verification link has been sent."
+    }
+    ```
+
+---
+
+## Standard Error Code Summary
+
+| Error Code | HTTP Status | Context / Trigger |
+|---|---|---|
+| `invalid_token` | `400 Bad Request` | Invalid, tampered, expired, or already-consumed password reset or email verification token |
+| `weak_password` | `400 Bad Request` | Password fails validation rules configured in Django's `AUTH_PASSWORD_VALIDATORS` |
+| `invalid_password` | `400 Bad Request` | Current password does not match on `/api/v1/auth/password/change/` |
+| `adopter_email_missing` | `409 Conflict` | Delivery assignment attempted for adopter application missing an email address |
+| `adopter_email_unverified` | `409 Conflict` | Delivery assignment attempted for adopter application whose email is not yet verified |
+
 
 

@@ -8,7 +8,7 @@ This guide is the complete API handoff manual for frontend and mobile client dev
 
 KindHeart uses **JSON Web Tokens (SimpleJWT)** with embedded role claims and sliding expiration.
 
-### 1.1 Token Endpoints
+### 1.1 Token & Account Management Endpoints
 
 | Endpoint | Method | Purpose | Request Body | Response Payload |
 |---|---|---|---|---|
@@ -17,6 +17,11 @@ KindHeart uses **JSON Web Tokens (SimpleJWT)** with embedded role claims and sli
 | `/api/v1/auth/token/refresh/` | `POST` | Rotate access token | `{"refresh": "<jwt>"}` | `{"access": "<new_jwt>", "refresh": "<optional_rotated_jwt>"}` |
 | `/api/v1/auth/token/verify/` | `POST` | Validate token validity | `{"token": "<jwt>"}` | `200 OK` or `401 Unauthorized` |
 | `/api/v1/auth/logout/` | `POST` | Blacklist refresh token | `{"refresh": "<jwt>"}` | `{"message": "Successfully logged out."}` |
+| `/api/v1/auth/password-reset/` | `POST` | Request password reset link | `{"email": "<email>"}` | `{"message": "If an account with this email exists, a password reset link has been sent."}` (uniform 200, no enumeration) |
+| `/api/v1/auth/password-reset/confirm/` | `POST` | Confirm password reset | `{"uid": "<uid>", "token": "<token>", "new_password": "<new_pass>"}` | `{"message": "Password has been reset successfully. Please log in with your new password."}` (blacklists all refresh tokens) |
+| `/api/v1/auth/password/change/` | `POST` | Authenticated password change | `{"old_password": "<old>", "new_password": "<new>"}` | `{"message": "Password changed successfully. Please log in again with your new password."}` (blacklists all refresh tokens) |
+| `/api/v1/auth/verify-email/` | `POST` | Confirm email verification | `{"token": "<token>"}` | `{"message": "Email address verified successfully.", "email_verified": true}` (idempotent) |
+| `/api/v1/auth/resend-verification/` | `POST` | Resend verification email | Empty / Authenticated | `{"message": "If your email address is not yet verified, a new verification link has been sent."}` |
 
 ### 1.2 JWT Claims & Client Headers
 Protected endpoints require the standard `Authorization` header:
@@ -39,10 +44,28 @@ All authentication endpoints are rate-limited per client IP:
 - **`auth_login`**: `10 requests/min` (default). Configurable via `AUTH_LOGIN_THROTTLE_RATE`.
 - **`auth_register`**: `5 requests/min` (default). Configurable via `AUTH_REGISTER_THROTTLE_RATE`.
 - **`auth_refresh`**: `30 requests/min` (default). Configurable via `AUTH_REFRESH_THROTTLE_RATE`.
+- **`auth_password_reset`**: `5 requests/min` (default). Configurable via `AUTH_PASSWORD_RESET_THROTTLE_RATE`.
+- **`auth_password_reset_confirm`**: `5 requests/min` (default). Configurable via `AUTH_PASSWORD_RESET_CONFIRM_THROTTLE_RATE`.
+- **`auth_resend_verification`**: `3 requests/min` (default). Configurable via `AUTH_RESEND_VERIFICATION_THROTTLE_RATE`.
 - **`otp_verify`**: `5 requests/min` (default). Configurable via `OTP_THROTTLE_RATE`.
 - **`shelter_cancel`**: `20 requests/min` (default). Configurable via `SHELTER_CANCEL_THROTTLE_RATE`.
 
 When throttled, the server returns HTTP `429 Too Many Requests` with a `Retry-After` header in seconds.
+
+### 1.5 Password Management & Email Verification Lifecycle
+1. **Password Reset (No Account Enumeration)**:
+   - `POST /api/v1/auth/password-reset/` always returns HTTP 200 with `{"message": "If an account with this email exists, a password reset link has been sent."}` regardless of whether the email is registered or active.
+   - For active users, an email containing `{FRONTEND_BASE_URL}/reset-password?uid={uid}&token={token}` is queued after database commit. Tokens are single-use and expire after `PASSWORD_RESET_TIMEOUT` (default `3600` seconds / 1 hour).
+   - `POST /api/v1/auth/password-reset/confirm/` validates password strength using `AUTH_PASSWORD_VALIDATORS` (returns 400 `weak_password`), ensures the token is valid and unconsumed (returns 400 `invalid_token`), resets the password, and blacklists all outstanding refresh tokens for the user.
+2. **Authenticated Password Change**:
+   - `POST /api/v1/auth/password/change/` checks the existing password (returns 400 `invalid_password`), validates the new password against `AUTH_PASSWORD_VALIDATORS` (returns 400 `weak_password`), updates the password, and immediately blacklists all active refresh tokens for the user.
+3. **Email Verification**:
+   - On registration, a verification email containing a cryptographically signed token (`TimestampSigner`) is dispatched to `{FRONTEND_BASE_URL}/verify-email?token={token}` after transaction commit. The token expires after `EMAIL_VERIFY_MAX_AGE` (default `86400` seconds / 24 hours).
+   - `POST /api/v1/auth/verify-email/` marks `email_verified=True` and records `email_verified_at=now()`. It is idempotent and returns 400 `invalid_token` if tampered, expired, or claimed by a different email.
+   - Profile email updates via `PUT/PATCH /api/v1/auth/me/` automatically reset `email_verified` to `False` and dispatch a new verification email after transaction commit.
+   - **Existing Users & Admin Verification**: Existing users created prior to email verification start unverified (`email_verified=False`). Platform administrators can mark users verified directly in the Django Admin interface (`email_verified` and `email_verified_at` are exposed on `CustomUserAdmin`).
+   - **Logistics Delivery Gate**: Attempting to assign a delivery task to an adopter whose email is not verified returns HTTP 409 `{"code": "adopter_email_unverified", "detail": "Cannot assign delivery task: adopter email address is unverified."}`.
+
 
 ---
 
@@ -492,6 +515,12 @@ This section documents standard deployment procedures, production environment re
 | `REFUND_THROTTLE_RATE` | Optional | Rate limit for cancel-and-refund endpoint (defaults to `10/min`). |
 | `MAX_PET_IMAGE_SIZE_BYTES` | Optional | Maximum image upload size in bytes (defaults to `10485760` / 10MB). |
 | `MAX_MEDICAL_DOC_SIZE_BYTES` | Optional | Maximum medical document upload size (defaults to `15728640` / 15MB). |
+| `FRONTEND_BASE_URL` | **Required** when DEBUG=False | Frontend application URL (defaults to `http://localhost:3000` when `DEBUG=True`). Cannot contain `mock`. |
+| `PASSWORD_RESET_TIMEOUT` | Optional | Validity period of password reset tokens in seconds (defaults to `3600` / 1 hour). |
+| `EMAIL_VERIFY_MAX_AGE` | Optional | Validity period of signed email verification tokens in seconds (defaults to `86400` / 24 hours). |
+| `AUTH_PASSWORD_RESET_THROTTLE_RATE` | Optional | Rate limit for password reset request endpoint (defaults to `5/min`). |
+| `AUTH_PASSWORD_RESET_CONFIRM_THROTTLE_RATE` | Optional | Rate limit for password reset confirm endpoint (defaults to `5/min`). |
+| `AUTH_RESEND_VERIFICATION_THROTTLE_RATE` | Optional | Rate limit for resend verification email endpoint (defaults to `3/min`). |
 | `DATA_UPLOAD_MAX_MEMORY_SIZE` | Optional | Memory limit for request body uploads (defaults to `10485760`). |
 | `FILE_UPLOAD_MAX_MEMORY_SIZE` | Optional | Memory limit before streaming files to disk (defaults to `15728640`). |
 | `SECURE_SSL_REDIRECT` | Optional | Redirect all HTTP traffic to HTTPS (defaults to `True` when `DEBUG=False`). |
