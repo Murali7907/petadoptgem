@@ -81,6 +81,7 @@ class DeliveryProfileSerializer(serializers.ModelSerializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     shelter_profile = ShelterProfileSerializer(read_only=True)
     delivery_profile = DeliveryProfileSerializer(read_only=True)
+    current_password = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
         model = User
@@ -99,9 +100,29 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'is_staff',
             'date_joined', 
             'shelter_profile', 
-            'delivery_profile'
+            'delivery_profile',
+            'current_password',
         ]
-        read_only_fields = ['id', 'public_id', 'email_verified', 'email_verified_at', 'is_staff', 'date_joined']
+        read_only_fields = ['id', 'public_id', 'role', 'email_verified', 'email_verified_at', 'is_staff', 'date_joined']
+        extra_kwargs = {
+            'username': {'required': False},
+        }
+
+    def validate_email(self, value):
+        if value:
+            normalized = value.strip().lower()
+            user = self.instance
+            qs = User.objects.filter(email__iexact=normalized)
+            if user:
+                qs = qs.exclude(pk=user.pk)
+            if qs.exists():
+                raise serializers.ValidationError("A user with this email address already exists.")
+            return normalized
+        return value
+
+    def update(self, instance, validated_data):
+        validated_data.pop('current_password', None)
+        return super().update(instance, validated_data)
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):

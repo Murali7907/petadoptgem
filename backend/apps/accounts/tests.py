@@ -1530,6 +1530,118 @@ class LogHygieneTests(APITestCase):
         self.assertNotIn(v_token, verify_logs)
 
 
+class EmailChangeHardeningTests(APITestCase):
+    def setUp(self):
+        mail.outbox.clear()
+        self.user = User.objects.create_user(
+            username='email_change_user',
+            email='old_address@example.com',
+            password='OriginalPassword123!',
+            role='customer',
+            email_verified=True,
+            first_name='OriginalFirst',
+            last_name='OriginalLast',
+            phone='1234567890'
+        )
+        self.client.force_authenticate(user=self.user)
+        self.endpoint = '/api/v1/auth/me/'
+
+    def test_missing_password_blocks_email_change_returns_400_invalid_password(self):
+        res = self.client.patch(self.endpoint, {'email': 'new_address@example.com'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'invalid_password')
+
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, 'old_address@example.com')
+        self.assertTrue(self.user.email_verified)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_wrong_password_blocks_email_change_returns_400_invalid_password(self):
+        res = self.client.patch(self.endpoint, {
+            'email': 'new_address@example.com',
+            'current_password': 'WrongPassword999!'
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data.get('code'), 'invalid_password')
+
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, 'old_address@example.com')
+        self.assertTrue(self.user.email_verified)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_valid_email_change_sends_notice_to_old_and_link_to_new_and_resets_verified(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.patch(self.endpoint, {
+                'email': 'new_address@example.com',
+                'current_password': 'OriginalPassword123!'
+            }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, 'new_address@example.com')
+        self.assertFalse(self.user.email_verified)
+        self.assertIsNone(self.user.email_verified_at)
+
+        # 2 emails must be dispatched: notice to OLD address, verification to NEW address
+        self.assertEqual(len(mail.outbox), 2)
+
+        # Check old address notice
+        old_notices = [m for m in mail.outbox if 'old_address@example.com' in m.to]
+        self.assertEqual(len(old_notices), 1)
+        old_mail = old_notices[0]
+        self.assertIn("Security Alert", old_mail.subject)
+        # Verify NO links in notice
+        self.assertNotIn("http://", old_mail.body)
+        self.assertNotIn("https://", old_mail.body)
+        self.assertNotIn("token=", old_mail.body)
+
+        # Check new address verification email
+        new_notices = [m for m in mail.outbox if 'new_address@example.com' in m.to]
+        self.assertEqual(len(new_notices), 1)
+        new_mail = new_notices[0]
+        self.assertIn("Verify Your Email Address", new_mail.subject)
+        self.assertIn("token=", new_mail.body)
+
+    def test_profile_update_without_email_change_needs_no_password(self):
+        res = self.client.patch(self.endpoint, {
+            'first_name': 'NewFirst',
+            'phone': '9876543210'
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, 'NewFirst')
+        self.assertEqual(self.user.phone, '9876543210')
+        self.assertEqual(self.user.email, 'old_address@example.com')
+        self.assertTrue(self.user.email_verified)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_unchanged_email_needs_no_password(self):
+        res = self.client.put(self.endpoint, {
+            'email': 'old_address@example.com',
+            'first_name': 'PutFirst',
+            'phone': '1112223333'
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, 'old_address@example.com')
+        self.assertEqual(self.user.first_name, 'PutFirst')
+        self.assertTrue(self.user.email_verified)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_legacy_aliases_email_change_hardening(self):
+        # Test /api/auth/me/ alias
+        res_auth_me = self.client.patch('/api/auth/me/', {'email': 'alias@example.com'}, format='json')
+        self.assertEqual(res_auth_me.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res_auth_me.data.get('code'), 'invalid_password')
+
+        # Test /api/v1/me/ alias
+        res_v1_me = self.client.patch('/api/v1/me/', {'email': 'alias2@example.com'}, format='json')
+        self.assertEqual(res_v1_me.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res_v1_me.data.get('code'), 'invalid_password')
+
+
 
 
 

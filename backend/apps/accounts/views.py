@@ -133,15 +133,70 @@ class RegisterView(generics.CreateAPIView):
         )
 
 
-class UserProfileView(generics.RetrieveAPIView):
+@extend_schema_view(
+    get=extend_schema(summary="Retrieve current user profile"),
+    put=extend_schema(summary="Update current user profile"),
+    patch=extend_schema(summary="Partially update current user profile"),
+)
+class UserProfileView(generics.RetrieveUpdateAPIView):
     """
-    Endpoint returning authenticated user profile and identity.
+    Endpoint returning and updating authenticated user profile and identity.
+    Changing email requires current_password in the body.
     """
     serializer_class = UserProfileSerializer
     permission_classes = [IsAuthenticated]
 
     def get_object(self):
         return self.request.user
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+
+        # Check if email is being changed
+        new_email = request.data.get('email')
+        email_changing = False
+        old_email = (instance.email or '').strip()
+
+        if new_email is not None:
+            new_email_clean = new_email.strip().lower()
+            current_email_clean = (instance.email or '').strip().lower()
+            if new_email_clean != current_email_clean:
+                email_changing = True
+                current_password = request.data.get('current_password')
+                if not current_password or not instance.check_password(current_password):
+                    return Response({
+                        "code": "invalid_password",
+                        "detail": "Current password is required to change email address."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+
+        with transaction.atomic():
+            self.perform_update(serializer)
+
+            if email_changing and old_email:
+                def _send_old_email_notice():
+                    try:
+                        send_mail(
+                            subject="Security Alert: Email address changed",
+                            message=(
+                                f"Hello {instance.username},\n\n"
+                                f"The email address associated with your KindHeart account was recently updated.\n"
+                                f"If you did not initiate this change, please contact support immediately.\n\n"
+                                f"KindHeart Pet Adoption Platform"
+                            ),
+                            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@kindheart.org'),
+                            recipient_list=[old_email],
+                            fail_silently=False,
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to dispatch email change notice to old address: %s", exc)
+
+                transaction.on_commit(_send_old_email_notice)
+
+        return Response(serializer.data)
 
 
 class ShelterDriverCreateView(views.APIView):
