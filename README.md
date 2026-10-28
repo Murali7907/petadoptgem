@@ -1,5 +1,7 @@
 # PetAdoptGem - Pet Adoption & Logistics Platform
 
+[![CI](https://github.com/Murali7907/petadoptgem/actions/workflows/ci.yml/badge.svg)](https://github.com/Murali7907/petadoptgem/actions/workflows/ci.yml)
+
 A modern, full-stack pet adoption management platform backend built with Django REST Framework, PostgreSQL, and PostGIS. The platform connects animal shelters, prospective pet adopters, and logistics delivery partners with real-time location pings, 6-digit OTP delivery handoffs, KYC verification, saved favorites, in-app notifications, and Razorpay payment processing.
 
 ---
