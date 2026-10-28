@@ -23,6 +23,10 @@ class MaskSensitiveDataFilter(logging.Filter):
         (re.compile(r'(?i)\b((?:password|secret|api[_-]?key)\s*[:=]\s*)[^\s,]+'), r'\1[REDACTED]'),
         # Reset tokens and uids
         (re.compile(r'(?i)\b((?:token|uid)\s*[:=]\s*)[^\s,]+'), r'\1[REDACTED]'),
+        # Email addresses
+        (re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'), '[REDACTED_EMAIL]'),
+        # Verification / Reset URLs with tokens
+        (re.compile(r'(?i)(https?://[^\s]+(?:token|uid)=[^\s]+)'), '[REDACTED_LINK]'),
     ]
 
 

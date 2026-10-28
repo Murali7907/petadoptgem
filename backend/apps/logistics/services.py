@@ -617,7 +617,7 @@ def dispatch_doorstep_otp(delivery: PetDelivery, raw_otp: str = None) -> bool:
             return False
 
         if not customer_email:
-            logger.warning(f"Delivery #{delivery.id}: Customer {customer_username} has no email address.")
+            logger.warning("Delivery #%s: Customer has no email address.", delivery.id)
             return False
 
         subject = f"Your Pet Delivery for {pet_name} is on the way! Doorstep Verification OTP"
@@ -644,10 +644,10 @@ def dispatch_doorstep_otp(delivery: PetDelivery, raw_otp: str = None) -> bool:
             fail_silently=False,
         )
         if sent_count <= 0:
-            logger.warning(f"Delivery #{delivery.id}: send_mail dispatched 0 messages to {customer_email}")
+            logger.warning("Delivery #%s: send_mail dispatched 0 messages.", delivery.id)
             return False
 
-        logger.info(f"Successfully dispatched doorstep OTP for delivery #{delivery.id} to {customer_email}")
+        logger.info("Successfully dispatched doorstep OTP for delivery #%s", delivery.id)
 
         # In-App Notification (without OTP code!)
         try:

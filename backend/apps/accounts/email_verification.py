@@ -69,4 +69,4 @@ def send_verification_email(user):
             fail_silently=True,
         )
     except Exception as exc:
-        logger.warning(f"Failed to dispatch verification email to {email}: {exc}")
+        logger.warning("Failed to dispatch verification email: %s", exc)

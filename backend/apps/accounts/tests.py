@@ -6,6 +6,8 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+import re
+from decimal import Decimal
 import jwt
 from django.conf import settings
 from django.core import mail
@@ -1354,6 +1356,179 @@ class EmailVerificationTests(APITestCase):
         res2 = self.client.get('/api/v1/auth/me/')
         self.assertEqual(res2.status_code, status.HTTP_200_OK)
         self.assertTrue(res2.data['email_verified'])
+
+
+class LogHygieneTests(APITestCase):
+    """
+    Milestone 10c Task 3: Verifies that OTP flows, password reset, and email verification
+    never log customer email addresses, uids, tokens, or plaintext 6-digit OTP strings.
+    """
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        mail.outbox.clear()
+        self.user = User.objects.create_user(
+            username='log_hygiene_user',
+            email='sensitive_adopter@example.com',
+            password='Password123!',
+            role='customer',
+            email_verified=True
+        )
+
+    def test_log_hygiene_otp_flow(self):
+        from apps.accounts.models import ShelterProfile, DeliveryProfile
+        from apps.pets.models import Pet
+        from apps.adoptions.models import AdoptionApplication
+        from apps.logistics.services import assign_delivery_task, verify_pickup_service, verify_doorstep_service, OTPVerificationOutcome
+
+        shelter_user = User.objects.create_user(
+            username='log_shelter_owner',
+            email='shelter_sensitive@example.com',
+            password='password123',
+            role='shelter'
+        )
+        shelter = ShelterProfile.objects.create(
+            user=shelter_user,
+            organization_name='Log Shelter',
+            pickup_address='123 Log St',
+            is_verified=True
+        )
+        driver_user = User.objects.create_user(
+            username='log_driver_user',
+            email='driver_sensitive@example.com',
+            password='password123',
+            role='delivery'
+        )
+        driver = DeliveryProfile.objects.create(
+            user=driver_user,
+            shelter=shelter,
+            is_available=True
+        )
+        pet = Pet.objects.create(
+            shelter=shelter,
+            name='LoggiePet',
+            species='dog',
+            breed='Beagle',
+            age_months=12,
+            gender='male',
+            status='available',
+            adoption_fee=Decimal('100.00')
+        )
+        app = AdoptionApplication.objects.create(
+            applicant=self.user,
+            pet=pet,
+            status='approved',
+            payment_method='cod',
+            total_amount=Decimal('100.00'),
+            contact_phone='9876543210'
+        )
+
+        with self.assertLogs('apps.logistics.services', level='INFO') as cm:
+            with self.captureOnCommitCallbacks(execute=True):
+                delivery = assign_delivery_task(app, driver)
+
+            with self.captureOnCommitCallbacks(execute=True):
+                pickup_res = verify_pickup_service(delivery.id, delivery.raw_pickup_otp)
+            self.assertEqual(pickup_res.outcome, OTPVerificationOutcome.SUCCESS)
+
+            # Get doorstep OTP from mail
+            doorstep_mail = [m for m in mail.outbox if "doorstep" in m.subject.lower() or "otp" in m.subject.lower()][-1]
+            doorstep_otp_match = re.search(r'\b\d{6}\b', doorstep_mail.body)
+            self.assertIsNotNone(doorstep_otp_match)
+            doorstep_otp = doorstep_otp_match.group(0)
+
+            # Satisfy COD payment guard
+            delivery.cash_collected = Decimal('100.00')
+            delivery.save(update_fields=['cash_collected'])
+
+            with self.captureOnCommitCallbacks(execute=True):
+                doorstep_res = verify_doorstep_service(delivery.id, doorstep_otp)
+            self.assertEqual(doorstep_res.outcome, OTPVerificationOutcome.SUCCESS)
+
+        full_logs = "\n".join(cm.output)
+        # Verify no email address, customer username, or 6-digit OTP string in logs
+        self.assertNotIn('sensitive_adopter@example.com', full_logs)
+        self.assertNotIn('shelter_sensitive@example.com', full_logs)
+        self.assertNotIn('driver_sensitive@example.com', full_logs)
+        self.assertNotIn(doorstep_otp, full_logs)
+        self.assertNotIn(delivery.raw_pickup_otp, full_logs)
+        # Ensure regex 6-digit number is not present
+        six_digit_matches = re.findall(r'\b\d{6}\b', full_logs)
+        self.assertEqual(six_digit_matches, [], f"Found 6-digit OTP in logs: {six_digit_matches}")
+
+    def test_log_hygiene_password_reset_and_email_verification(self):
+        import logging
+        test_logger = logging.getLogger('apps.accounts.views')
+
+        # 1. Password reset request
+        with self.assertLogs('apps.accounts.views', level='INFO') as cm_reset:
+            test_logger.info("Executing password reset for user ID %s", self.user.id)
+            with self.captureOnCommitCallbacks(execute=True):
+                res_reset = self.client.post(
+                    '/api/v1/auth/password-reset/',
+                    {'email': 'sensitive_adopter@example.com'},
+                    format='json'
+                )
+            self.assertEqual(res_reset.status_code, status.HTTP_200_OK)
+
+        reset_logs = "\n".join(cm_reset.output)
+        self.assertNotIn('sensitive_adopter@example.com', reset_logs)
+
+        # Extract token from mail
+        self.assertEqual(len(mail.outbox), 1)
+        reset_mail = mail.outbox[0].body
+        token_match = re.search(r'token=([A-Za-z0-9_-]+)', reset_mail)
+        self.assertIsNotNone(token_match)
+        raw_token = token_match.group(1)
+
+        from django.utils.http import urlsafe_base64_encode
+        from django.utils.encoding import force_bytes
+        uid = urlsafe_base64_encode(force_bytes(self.user.pk))
+
+        # 2. Confirm password reset
+        with self.assertLogs('apps.accounts.views', level='INFO') as cm_confirm:
+            test_logger.info("Confirming password reset for user ID %s", self.user.id)
+            res_confirm = self.client.post('/api/v1/auth/password-reset/confirm/', {
+                'uid': uid,
+                'token': raw_token,
+                'new_password': 'NewPassword123!Secure'
+            }, format='json')
+            self.assertEqual(res_confirm.status_code, status.HTTP_200_OK)
+
+        confirm_logs = "\n".join(cm_confirm.output)
+        self.assertNotIn('sensitive_adopter@example.com', confirm_logs)
+        self.assertNotIn(raw_token, confirm_logs)
+        self.assertNotIn(uid, confirm_logs)
+
+        # 3. Registration and email verification
+        mail.outbox.clear()
+        with self.assertLogs('apps.accounts.views', level='INFO') as cm_reg:
+            test_logger.info("Registering user account")
+            with self.captureOnCommitCallbacks(execute=True):
+                res_reg = self.client.post('/api/v1/auth/register/', {
+                    'username': 'new_hygiene_user',
+                    'email': 'new_hygiene@example.com',
+                    'password': 'Password123!'
+                }, format='json')
+            self.assertEqual(res_reg.status_code, status.HTTP_201_CREATED)
+
+        reg_logs = "\n".join(cm_reg.output)
+        self.assertNotIn('new_hygiene@example.com', reg_logs)
+
+        self.assertEqual(len(mail.outbox), 1)
+        v_token_match = re.search(r'token=([A-Za-z0-9_:-]+)', mail.outbox[0].body)
+        self.assertIsNotNone(v_token_match)
+        v_token = v_token_match.group(1)
+
+        with self.assertLogs('apps.accounts.views', level='INFO') as cm_verify:
+            test_logger.info("Verifying email address")
+            res_verify = self.client.post('/api/v1/auth/verify-email/', {'token': v_token}, format='json')
+            self.assertEqual(res_verify.status_code, status.HTTP_200_OK)
+
+        verify_logs = "\n".join(cm_verify.output)
+        self.assertNotIn('new_hygiene@example.com', verify_logs)
+        self.assertNotIn(v_token, verify_logs)
+
 
 
 
