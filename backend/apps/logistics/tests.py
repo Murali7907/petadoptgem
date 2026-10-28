@@ -3602,18 +3602,19 @@ class RefundLedgerAndServiceTests(APITestCase):
         Milestone 10a Task 2: Razorpay 409 response for idempotency header is treated
         as 'refund_in_progress' (retryable): no state change, clear log line, no crash.
         """
+        from razorpay.errors import BadRequestError
         from apps.logistics.models import Refund, RefundStatus
-        from apps.logistics.payment_services import issue_refund
+        from apps.logistics.payment_services import issue_refund, RefundFailedError
 
         mock_client = mock_get_client.return_value
         mock_client.payment.fetch_multiple_refund.return_value = {'items': []}
 
-        # Simulate Razorpay 409 exception
-        conflict_err = Exception("409 Client Error: Conflict for url: https://api.razorpay.com/v1/payments/.../refund")
+        # Simulate Razorpay SDK 409 exception built as SDK's BadRequestError with HTTP status 409
+        conflict_err = BadRequestError("Refund is already in progress")
         conflict_err.status_code = 409
         mock_client.payment.refund.side_effect = conflict_err
 
-        # Should not raise RefundFailedError or crash
+        # Should not raise RefundFailedError or crash; leaves Refund CREATED and retryable
         refund = issue_refund(payment=self.payment, reason="Testing 409 handling")
 
         # No state change: status must NOT be FAILED, remains CREATED
@@ -3623,6 +3624,18 @@ class RefundLedgerAndServiceTests(APITestCase):
         # Payment remains captured
         self.payment.refresh_from_db()
         self.assertEqual(self.payment.status, PaymentStatus.CAPTURED)
+
+        # Conversely, any other error (e.g. 400 Bad Request) marks the refund FAILED
+        other_err = BadRequestError("Invalid payment ID")
+        other_err.status_code = 400
+        mock_client.payment.refund.side_effect = other_err
+
+        with self.assertRaises(RefundFailedError):
+            issue_refund(payment=self.payment, reason="Testing non-409 error", refund_obj=refund)
+
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, RefundStatus.FAILED)
+        self.assertIn("Invalid payment ID", refund.failure_reason)
 
 
 class CancelAndRefundEndpointTests(TestCase):

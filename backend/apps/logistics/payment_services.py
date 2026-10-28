@@ -485,7 +485,7 @@ def issue_refund(payment: Payment, reason: str = "", initiated_by=None, source: 
        the installed SDK method `client.payment.fetch_multiple_refund(payment_id)`.
        If a full refund already exists, adopts its id and status and does not call refund again.
     4. Calls client.payment.refund for the full captured amount with our refund id in notes/receipt
-       and X-Razorpay-Idempotency-Key.
+       and X-Refund-Idempotency header.
     5. Success: stores razorpay_refund_id and sets processing/processed per response.
        On 'processed': marks Payment, application.payment_status and delivery.payment_status as 'refunded'.
     6. API error: marks Refund as 'failed' with reason, raises RefundFailedError; retry allowed.
@@ -610,17 +610,15 @@ def issue_refund(payment: Payment, reason: str = "", initiated_by=None, source: 
             **refund_options
         )
     except Exception as exc:
-        is_409 = (
-            getattr(exc, 'status_code', None) == 409
-            or getattr(getattr(exc, 'response', None), 'status_code', None) == 409
-            or '409' in str(exc)
-            or 'in progress' in str(exc).lower()
-            or 'in_progress' in str(exc).lower()
-            or 'conflict' in str(exc).lower()
+        status_code = (
+            getattr(exc, 'status_code', None)
+            or getattr(getattr(exc, 'response', None), 'status_code', None)
+            or getattr(exc, 'http_status', None)
         )
+        is_409 = status_code in (409, '409') or getattr(exc, 'code', None) in (409, '409', 'CONFLICT')
         if is_409:
             logger.info(
-                f"Razorpay refund is in progress (409 conflict/in_progress) for Payment #{locked_payment.id}, "
+                f"Razorpay refund is in progress (409 conflict) for Payment #{locked_payment.id}, "
                 f"Refund #{refund.id} (key={idempotency_key}): {exc}"
             )
             return refund
