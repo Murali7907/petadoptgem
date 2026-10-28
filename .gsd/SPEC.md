@@ -1185,5 +1185,51 @@ Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medic
 
 ---
 
-*Last updated: 2026-10-27*
+## 19. Milestone 10c — CI Hardening, Razorpay 409 & Retry Evidence, Log Hygiene, Email Change Verification & Pre-flight Evidence
+
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Milestone 10c approved and finalized.
+>
+> **Architectural Decisions**:
+> 1. **CI Security Check Hardening**: Fix deploy-check `SECRET_KEY` length (60+ characters, 20+ unique characters) to clear `security.W009` under `--fail-level WARNING`. Replace `rzp_live_` literals with neutral dummy strings (`ci-dummy-razorpay-key-id-0001`) preventing secret scanning flags. Add top-level `permissions: { contents: read }`, concurrency groups with cancel-in-progress, job timeouts, and branch restrictions (`main`, `develop`).
+> 2. **Razorpay 409 & Retry Evidence**: Inspect SDK exception classes (`BadRequestError` with status 409 or SDK error structures) instead of fragile substring matching. Invariant: 409 leaves the Refund row retryable without marking it failed; other errors mark it failed. Document SDK retry defaults and verify idempotency header propagation.
+> 3. **Log Hygiene & Privacy (PII Protection)**: Eliminate emails, usernames, phone numbers, addresses, OTPs, and tokens from logging strings across `apps.logistics` and `apps.accounts`. Log only resource identifiers (`delivery_id`, `refund_id`, `user_id`). Verify with `assertLogs` test.
+> 4. **Email Change Verification & Re-authentication**: Require `current_password` on `PUT/PATCH /api/v1/auth/me/` when changing email. Send security alert to old address and signed verification token to new address, resetting `email_verified=False`.
+> 5. **Evidence & Documentation Alignment**: Update `test_e2e_contract` to complete email verification via API. Document staticfiles serving, production email guards, and align Razorpay documentation to SDK version 2.0.1.
+
+### 19.1 Task 1: CI Fix Before the First Push
+- Update `.github/workflows/ci.yml`:
+  - 60+ char `SECRET_KEY` with 20+ unique characters.
+  - Neutral non-mock dummy Razorpay credentials.
+  - Top-level `permissions: contents: read`.
+  - Push trigger on `main` and `develop` only; pull_request for all branches.
+  - Concurrency group per ref with `cancel-in-progress: true`.
+  - Job timeout limits.
+  - Verify local child process `check --deploy --fail-level WARNING` exits 0.
+
+### 19.2 Task 2: Refund Call Evidence & 409 Handling
+- Inspect `payment_services.py` lines 600-650 and `razorpay/resources/payment.py` to prove `headers` option forwarding.
+- Update docstring naming `X-Refund-Idempotency`.
+- Handle SDK 409 error structure cleanly (leaving refund retryable).
+- Document SDK retry defaults and add idempotency test if automatic retries apply.
+
+### 19.3 Task 3: Log Hygiene
+- Purge PII (email, phone, username, address, token, uid, OTP) from all `logger` calls.
+- Add `assertLogs` test validating that OTP flows, password resets, and email verification do not log PII.
+
+### 19.4 Task 4: Email Change Hardening
+- Require `current_password` on `/api/v1/auth/me/` email updates (400 `invalid_password`).
+- Send notification to old email and verification link to new email.
+- Report on password-reset inline vs queue latency, timeouts, and token lifetimes.
+
+### 19.5 Task 5: Evidence & Clean-up
+- End-to-end adopter verification via real endpoint in `test_e2e_contract`.
+- Silence test staticfiles warning in `STORAGES`.
+- Align docs with Razorpay 2.0.1.
+
+---
+
+*Last updated: 2026-10-28*
+
 

@@ -1,15 +1,24 @@
 name: CI
 
-on:
+'on':
   push:
-    branches: [ "**" ]
+    branches:
+      - main
+      - develop
   pull_request:
-    branches: [ "**" ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     name: Test & Schema Validation
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     services:
       postgres:
@@ -34,9 +43,9 @@ jobs:
       DB_PASSWORD: "postgres_ci_password"
       DB_HOST: "127.0.0.1"
       DB_PORT: "5432"
-      RAZORPAY_KEY_ID: "rzp_test_mock_ci_key"
-      RAZORPAY_KEY_SECRET: "mock_ci_secret"
-      RAZORPAY_WEBHOOK_SECRET: "mock_ci_webhook_secret"
+      RAZORPAY_KEY_ID: "ci-dummy-razorpay-key-id-0001"
+      RAZORPAY_KEY_SECRET: "ci-dummy-razorpay-key-secret-0002"
+      RAZORPAY_WEBHOOK_SECRET: "ci-dummy-razorpay-webhook-secret-0003"
       USE_CLOUDINARY: "False"
       EMAIL_BACKEND: "django.core.mail.backends.locmem.EmailBackend"
       DEFAULT_FROM_EMAIL: "KindHeart <noreply@kindheart.org>"
@@ -70,7 +79,7 @@ jobs:
         run: python backend/manage.py makemigrations --check --dry-run
 
       - name: Validate OpenAPI schema
-        run: python backend/manage.py spectacular --validate --fail-on-warn
+        run: python -X utf8 backend/manage.py spectacular --validate --fail-on-warn
 
       - name: Run test suite
         run: python backend/manage.py test --noinput
@@ -78,19 +87,20 @@ jobs:
   deploy-check:
     name: Production Deployment Security Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     env:
       DEBUG: "False"
-      SECRET_KEY: "production-secure-random-token-32bytes-ci-check"
+      SECRET_KEY: "ci-production-deploy-check-secret-key-64chars-long-random-string-a1b2c3d4"
       ALLOWED_HOSTS: "petadopt.kindheart.org,localhost"
       DB_NAME: "pet_adoption_prod"
       DB_USER: "prod_user"
       DB_PASSWORD: "prod_password_dummy"
       DB_HOST: "127.0.0.1"
       DB_PORT: "5432"
-      RAZORPAY_KEY_ID: "rzp_live_productionLiveKey12345"
-      RAZORPAY_KEY_SECRET: "productionLiveSecret456789"
-      RAZORPAY_WEBHOOK_SECRET: "productionLiveWebhook789012"
+      RAZORPAY_KEY_ID: "ci-dummy-razorpay-key-id-0001"
+      RAZORPAY_KEY_SECRET: "ci-dummy-razorpay-key-secret-0002"
+      RAZORPAY_WEBHOOK_SECRET: "ci-dummy-razorpay-webhook-secret-0003"
       USE_CLOUDINARY: "False"
       EMAIL_BACKEND: "django.core.mail.backends.smtp.EmailBackend"
       EMAIL_HOST: "smtp.sendgrid.net"
