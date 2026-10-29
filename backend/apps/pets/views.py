@@ -56,7 +56,7 @@ class Distance(Expression):
     """
     Geodesic distance calculation in meters between shelter (latitude, longitude)
     and a reference Point using the spherical Haversine formula.
-    Provides standard PostGIS Distance('shelter__location', Point(...)) interface.
+    Provides drop-in Distance('shelter__location', Point(...)) interface without requiring PostGIS.
     """
     def __init__(self, field_name, point, output_field=None):
         self.field_name = field_name
@@ -445,7 +445,7 @@ class PetMedicalRecordListCreateView(generics.ListCreateAPIView):
 @extend_schema_view(
     list=extend_schema(
         summary="Browse available pets",
-        description="Public discovery catalog of available pets. Supports filtering by species, breed, gender, size, age ranges, and shelter city. If lat and lng are provided, results are ordered by PostGIS proximity.",
+        description="Public discovery catalog of available pets. Supports filtering by species, breed, gender, size, age ranges, and shelter city. If lat and lng are provided, results are ordered by geographic proximity (Haversine formula).",
         parameters=[
             OpenApiParameter('lat', OpenApiTypes.FLOAT, description='Latitude for proximity sorting'),
             OpenApiParameter('lng', OpenApiTypes.FLOAT, description='Longitude for proximity sorting'),

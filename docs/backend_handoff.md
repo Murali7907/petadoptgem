@@ -343,7 +343,7 @@ To protect rescue volunteers, residential shelters, and confidential clinical do
 - **Public Pet List (`GET /api/v1/pets/`)**:
   - Exposes `shelter_name`, `shelter_city`, and `distance_km`.
   - When a shelter record lacks a `city`, the API returns `"location not provided"`. Raw physical pickup street addresses are never used as a fallback.
-  - Geographical sorting (`distance_meters`) and distance calculations (`distance_km`) operate entirely on the backend via PostGIS / Haversine database queries without streaming coordinates to the client.
+  - Geographical sorting (`distance_meters`) and distance calculations (`distance_km`) operate entirely on the backend via spherical Haversine SQL database expressions without streaming coordinates to the client.
 - **Public Pet Detail (`GET /api/v1/pets/<uuid:public_id>/`)**:
   - **Masked Data (Public Visitors & Pending Applicants)**:
     - Anonymous users, general authenticated customers, and applicants with pending applications (`submitted` or `reviewing`) receive:
@@ -388,7 +388,7 @@ The shelter profile is serialized as the nested `shelter_profile` object (`Shelt
 ## 8. Platform Runtime Environment
 
 - **Backend Framework**: Django 6.1.2 (pinned in `requirements.lock.txt`), Django REST Framework 3.18.3
-- **Database Engine**: PostgreSQL 18.6 on x86_64-windows with PostGIS extensions
+- **Database Engine**: PostgreSQL (tested with PostgreSQL 16 in CI, supports standard PostgreSQL 14+)
 - **Schema & Documentation**: drf-spectacular 0.30.0 (OpenAPI 3.0)
 
 ---
