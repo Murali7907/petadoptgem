@@ -193,8 +193,10 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-# Fast password hasher for test execution only (never in production)
+# Test configuration overrides (never in production)
 if 'test' in sys.argv:
+    import warnings
+    warnings.filterwarnings('ignore', message=r'No directory at: .*staticfiles.*', category=UserWarning)
     PASSWORD_HASHERS = [
         'django.contrib.auth.hashers.MD5PasswordHasher',
     ]

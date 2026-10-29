@@ -1,5 +1,7 @@
+import re
 import uuid
 from decimal import Decimal
+from django.core import mail
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -35,11 +37,22 @@ class EndToEndContractFlowTestCase(TestCase):
             'phone': '9876543210',
             'address': '100 Koramangala 4th Block, Bangalore'
         }
-        res_cust_reg = self.client.post('/api/auth/register/', data=cust_payload, format='json')
+        with self.captureOnCommitCallbacks(execute=True):
+            res_cust_reg = self.client.post('/api/auth/register/', data=cust_payload, format='json')
         self.assertEqual(res_cust_reg.status_code, status.HTTP_201_CREATED)
+
+        # 1.1b Adopter verifies email via real endpoint using outbox token
+        self.assertGreaterEqual(len(mail.outbox), 1)
+        v_mail = [m for m in mail.outbox if 'e2e_customer@example.com' in m.to][-1]
+        token_match = re.search(r'token=([A-Za-z0-9_:-]+)', v_mail.body)
+        self.assertIsNotNone(token_match)
+        v_token = token_match.group(1)
+
+        res_verify = self.client.post('/api/auth/verify-email/', data={'token': v_token}, format='json')
+        self.assertEqual(res_verify.status_code, status.HTTP_200_OK)
+
         customer_user = User.objects.get(username='e2e_customer')
-        customer_user.email_verified = True
-        customer_user.save()
+        self.assertTrue(customer_user.email_verified)
 
         # 1.2 Register Shelter
         shelter_payload = {
@@ -260,8 +273,6 @@ class EndToEndContractFlowTestCase(TestCase):
         # Hardened architecture: plaintext OTP stripped from tracking payload; dispatched via secure email
         self.assertNotIn('doorstep_otp', res_track.data['delivery'])
         self.assertTrue(bool(res_track.data['delivery']['doorstep_otp_sent_at']))
-        import re
-        from django.core import mail
         match = re.search(r"OTP is:\s*(\d{6})", mail.outbox[-1].body)
         customer_doorstep_otp = match.group(1) if match else ''
         self.assertTrue(bool(customer_doorstep_otp))

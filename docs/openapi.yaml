@@ -599,9 +599,70 @@ paths:
   /api/v1/auth/me/:
     get:
       operationId: auth_me_retrieve
-      description: Endpoint returning authenticated user profile and identity.
+      description: |-
+        Endpoint returning and updating authenticated user profile and identity.
+        Changing email requires current_password in the body.
+      summary: Retrieve current user profile
       tags:
       - auth
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+          description: ''
+    put:
+      operationId: auth_me_update
+      description: |-
+        Endpoint returning and updating authenticated user profile and identity.
+        Changing email requires current_password in the body.
+      summary: Update current user profile
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserProfileRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/UserProfileRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/UserProfileRequest'
+      security:
+      - jwtAuth: []
+      - jwt_auth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+          description: ''
+    patch:
+      operationId: auth_me_partial_update
+      description: |-
+        Endpoint returning and updating authenticated user profile and identity.
+        Changing email requires current_password in the body.
+      summary: Partially update current user profile
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedUserProfileRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedUserProfileRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedUserProfileRequest'
       security:
       - jwtAuth: []
       - jwt_auth: []
@@ -4221,6 +4282,32 @@ components:
       - shelter
       - shelter_name
       - vehicle_number
+    DeliveryProfileRequest:
+      type: object
+      properties:
+        shelter:
+          type: integer
+        vehicle_type:
+          $ref: '#/components/schemas/VehicleTypeEnum'
+        vehicle_number:
+          type: string
+          minLength: 1
+          maxLength: 30
+        is_available:
+          type: boolean
+        current_latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        current_longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+      required:
+      - shelter
+      - vehicle_number
     DeliveryReissueOTPRequestRequest:
       type: object
       properties:
@@ -5029,6 +5116,38 @@ components:
           type: boolean
         status:
           $ref: '#/components/schemas/PetStatus'
+    PatchedUserProfileRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          minLength: 1
+          description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
+            only.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        email:
+          title: Email address
+          oneOf:
+          - type: string
+            format: email
+            maxLength: 254
+          - type: string
+            maxLength: 0
+        first_name:
+          type: string
+          maxLength: 150
+        last_name:
+          type: string
+          maxLength: 150
+        phone:
+          type: string
+          maxLength: 20
+        address:
+          type: string
+        current_password:
+          type: string
+          writeOnly: true
     PaymentLedger:
       type: object
       properties:
@@ -6232,6 +6351,39 @@ components:
       - organization_name
       - pickup_address
       - public_id
+    ShelterProfileRequest:
+      type: object
+      properties:
+        organization_name:
+          type: string
+          minLength: 1
+          maxLength: 150
+        license_no:
+          type: string
+          maxLength: 50
+        pickup_address:
+          type: string
+          minLength: 1
+        city:
+          type: string
+          maxLength: 100
+        latitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        longitude:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,3}(?:\.\d{0,6})?$
+          nullable: true
+        is_active:
+          type: boolean
+        is_verified:
+          type: boolean
+      required:
+      - organization_name
+      - pickup_address
     SpeciesEnum:
       enum:
       - dog
@@ -6305,7 +6457,9 @@ components:
           nullable: true
           description: Timestamp when the user verified their email address.
         role:
-          $ref: '#/components/schemas/RoleEnum'
+          allOf:
+          - $ref: '#/components/schemas/RoleEnum'
+          readOnly: true
         first_name:
           type: string
           maxLength: 150
@@ -6342,8 +6496,40 @@ components:
       - id
       - is_staff
       - public_id
+      - role
       - shelter_profile
-      - username
+    UserProfileRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          minLength: 1
+          description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
+            only.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        email:
+          title: Email address
+          oneOf:
+          - type: string
+            format: email
+            maxLength: 254
+          - type: string
+            maxLength: 0
+        first_name:
+          type: string
+          maxLength: 150
+        last_name:
+          type: string
+          maxLength: 150
+        phone:
+          type: string
+          maxLength: 20
+        address:
+          type: string
+        current_password:
+          type: string
+          writeOnly: true
     UserRegistration:
       type: object
       properties:
