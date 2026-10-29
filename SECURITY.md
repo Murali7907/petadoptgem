@@ -35,5 +35,5 @@ Please **DO NOT** open public GitHub issues, discussions, or pull requests for s
 > **No real credentials, API secrets, database passwords, or private encryption keys belong in this repository.**
 
 - All secrets, tokens, credentials, and API keys must be provided exclusively via environment variables or secret management services (e.g. AWS Secrets Manager, HashiCorp Vault, GitHub Actions Secrets).
-- The repository `.env.example` file contains sanitized dummy placeholders only.
+- The template `backend/.env.example` file contains sanitized dummy placeholders only.
 - Continuous Integration (`.github/workflows/ci.yml`) runs strict secret scanning and security checks (`python manage.py check --deploy`).

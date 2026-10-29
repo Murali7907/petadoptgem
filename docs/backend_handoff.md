@@ -482,7 +482,7 @@ To prevent slow SMTP servers from blocking requests or rolling back database cha
 
 This section documents standard deployment procedures, production environment requirements, static asset serving, and background schedulers.
 
-### 10.1 Environment Variables Checklist (.env.example)
+### 10.1 Environment Variables Checklist (backend/.env.example)
 
 | Environment Variable | Production Status | Description & Constraints |
 |---|---|---|
