@@ -999,7 +999,17 @@ def cancel_and_refund_service(delivery: PetDelivery, user, reason: str) -> dict:
                     "application_id": str(locked_deliv.application.public_id) if locked_deliv.application else None,
                     "amount_refunded_paise": existing_active_refund.amount_in_paise,
                 }
-            elif existing_active_refund.status in [RefundStatus.CREATED, RefundStatus.PROCESSING]:
+            elif existing_active_refund.status == RefundStatus.PROCESSING:
+                return {
+                    "status": "processing",
+                    "code": "refund_processing",
+                    "detail": "A refund is currently processing at the payment gateway.",
+                    "refund_id": str(existing_active_refund.public_id),
+                    "delivery_id": str(locked_deliv.public_id),
+                    "application_id": str(locked_deliv.application.public_id) if locked_deliv.application else None,
+                    "amount_refunded_paise": existing_active_refund.amount_in_paise,
+                }
+            elif existing_active_refund.status == RefundStatus.CREATED:
                 raise ConflictError({
                     "code": "refund_in_progress",
                     "detail": "A refund is already in progress for this payment."
@@ -1041,7 +1051,31 @@ def cancel_and_refund_service(delivery: PetDelivery, user, reason: str) -> dict:
     # Step 2: Call issue_refund with NO locks held
     refund = issue_refund(payment, reason=reason, initiated_by=user, source=RefundSource.MANUAL)
 
-    if refund.status in [RefundStatus.CREATED, RefundStatus.PROCESSING]:
+    if refund.status == RefundStatus.PROCESSING:
+        with transaction.atomic():
+            app_id = delivery.application_id
+            if app_id:
+                locked_app = AdoptionApplication.objects.select_for_update().get(id=app_id)
+                if locked_app.status == 'approved':
+                    locked_app.status = 'cancelled'
+                    locked_app.save(update_fields=['status', 'updated_at'])
+
+                    if locked_app.pet_id:
+                        locked_pet = Pet.objects.select_for_update().get(id=locked_app.pet_id)
+                        locked_pet.status = 'available'
+                        locked_pet.save(update_fields=['status'])
+
+        return {
+            "status": "processing",
+            "code": "refund_processing",
+            "detail": "Delivery cancelled and refund initiated at gateway; awaiting processing confirmation.",
+            "refund_id": str(refund.public_id),
+            "delivery_id": str(delivery.public_id),
+            "application_id": str(delivery.application.public_id) if delivery.application else None,
+            "amount_refunded_paise": refund.amount_in_paise,
+        }
+
+    if refund.status == RefundStatus.CREATED:
         raise ConflictError({
             "code": "refund_in_progress",
             "detail": "A refund is already in progress for this payment."

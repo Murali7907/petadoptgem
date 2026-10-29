@@ -3599,8 +3599,9 @@ class RefundLedgerAndServiceTests(APITestCase):
     @patch('apps.logistics.payment_services.get_razorpay_client')
     def test_refund_409_response_handled_as_in_progress_without_crash_or_state_change(self, mock_get_client):
         """
-        Milestone 10a Task 2: Razorpay 409 response for idempotency header is treated
+        Milestone 10d Task 2: Razorpay 409 response for idempotency header is treated
         as 'refund_in_progress' (retryable): no state change, clear log line, no crash.
+        Proves that real SDK BadRequestError without status_code attribute is detected.
         """
         from razorpay.errors import BadRequestError
         from apps.logistics.models import Refund, RefundStatus
@@ -3609,9 +3610,8 @@ class RefundLedgerAndServiceTests(APITestCase):
         mock_client = mock_get_client.return_value
         mock_client.payment.fetch_multiple_refund.return_value = {'items': []}
 
-        # Simulate Razorpay SDK 409 exception built as SDK's BadRequestError with HTTP status 409
-        conflict_err = BadRequestError("Refund is already in progress")
-        conflict_err.status_code = 409
+        # Real SDK raises BadRequestError with only message; SDK NEVER attaches status_code
+        conflict_err = BadRequestError("A refund is already in progress for this payment")
         mock_client.payment.refund.side_effect = conflict_err
 
         # Should not raise RefundFailedError or crash; leaves Refund CREATED and retryable
@@ -3625,9 +3625,8 @@ class RefundLedgerAndServiceTests(APITestCase):
         self.payment.refresh_from_db()
         self.assertEqual(self.payment.status, PaymentStatus.CAPTURED)
 
-        # Conversely, any other error (e.g. 400 Bad Request) marks the refund FAILED
+        # Conversely, any other error (e.g. Invalid payment ID) marks the refund FAILED
         other_err = BadRequestError("Invalid payment ID")
-        other_err.status_code = 400
         mock_client.payment.refund.side_effect = other_err
 
         with self.assertRaises(RefundFailedError):
@@ -3636,6 +3635,87 @@ class RefundLedgerAndServiceTests(APITestCase):
         refund.refresh_from_db()
         self.assertEqual(refund.status, RefundStatus.FAILED)
         self.assertIn("Invalid payment ID", refund.failure_reason)
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_refund_status_mapping_processed_stamps_processed_and_emails_adopter(self, mock_get_client):
+        """Milestone 10d Task 2: Gateway response status 'processed' -> status PROCESSED and emails adopter."""
+        from django.core import mail
+        from apps.logistics.models import Refund, RefundStatus
+        from apps.logistics.payment_services import issue_refund
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.fetch_multiple_refund.return_value = {'items': []}
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_mapped_processed_01',
+            'amount': 25000,
+            'status': 'processed'
+        }
+
+        with self.captureOnCommitCallbacks(execute=True):
+            refund = issue_refund(payment=self.payment, reason="Processed test")
+
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, RefundStatus.PROCESSED)
+        self.assertEqual(refund.razorpay_refund_id, 'rfnd_mapped_processed_01')
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, PaymentStatus.REFUNDED)
+
+        # Adopter email must be sent
+        self.assertTrue(len(mail.outbox) >= 1)
+        refund_mail = [m for m in mail.outbox if 'Refund Processed' in m.subject]
+        self.assertEqual(len(refund_mail), 1)
+        self.assertIn(self.adopter.email, refund_mail[0].to)
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_refund_status_mapping_pending_sets_processing_and_no_email(self, mock_get_client):
+        """Milestone 10d Task 2: Gateway response status 'pending' -> status PROCESSING, no email dispatched."""
+        from django.core import mail
+        from apps.logistics.models import Refund, RefundStatus
+        from apps.logistics.payment_services import issue_refund
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.fetch_multiple_refund.return_value = {'items': []}
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_mapped_pending_02',
+            'amount': 25000,
+            'status': 'pending'
+        }
+
+        mail.outbox = []
+        with self.captureOnCommitCallbacks(execute=True):
+            refund = issue_refund(payment=self.payment, reason="Pending test")
+
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, RefundStatus.PROCESSING)
+        self.assertEqual(refund.razorpay_refund_id, 'rfnd_mapped_pending_02')
+        # Payment remains captured until webhook confirms
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, PaymentStatus.CAPTURED)
+
+        # No adopter email should be sent
+        refund_mail = [m for m in mail.outbox if 'Refund Processed' in m.subject]
+        self.assertEqual(len(refund_mail), 0)
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_refund_status_mapping_failed_sets_failed_with_reason(self, mock_get_client):
+        """Milestone 10d Task 2: Gateway response status 'failed' -> status FAILED with reason recorded."""
+        from apps.logistics.models import Refund, RefundStatus
+        from apps.logistics.payment_services import issue_refund
+
+        mock_client = mock_get_client.return_value
+        mock_client.payment.fetch_multiple_refund.return_value = {'items': []}
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_mapped_failed_03',
+            'amount': 25000,
+            'status': 'failed',
+            'error_description': 'Customer account blocked or inactive'
+        }
+
+        refund = issue_refund(payment=self.payment, reason="Failed test")
+
+        refund.refresh_from_db()
+        self.assertEqual(refund.status, RefundStatus.FAILED)
+        self.assertEqual(refund.failure_reason, 'Customer account blocked or inactive')
 
 
 class CancelAndRefundEndpointTests(TestCase):
@@ -3829,6 +3909,40 @@ class CancelAndRefundEndpointTests(TestCase):
         res = self.client.post(self.url, {'reason': 'Admin policy cancellation'}, format='json')
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data['code'], 'success')
+
+    @patch('apps.logistics.payment_services.get_razorpay_client')
+    def test_cancel_and_refund_gateway_pending_response_returns_processing_200(self, mock_get_client):
+        """Milestone 10d Task 2: Gateway pending response returns 200 with code refund_processing, cancels app & frees driver."""
+        mock_client = mock_get_client.return_value
+        mock_client.payment.refund.return_value = {
+            'id': 'rfnd_pending_gateway_01',
+            'amount': 25000,
+            'status': 'pending'
+        }
+
+        self.client.force_authenticate(user=self.shelter_user)
+        res = self.client.post(self.url, {'reason': 'Adopter requested cancellation'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['status'], 'processing')
+        self.assertEqual(res.data['code'], 'refund_processing')
+
+        # Delivery failed and driver freed
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.status, 'failed')
+        self.driver.refresh_from_db()
+        self.assertTrue(self.driver.is_available)
+
+        # Application cancelled and pet available
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.status, 'cancelled')
+        self.pet.refresh_from_db()
+        self.assertEqual(self.pet.status, 'available')
+
+        # Idempotent repeat call while processing returns 200 processing
+        res_repeat = self.client.post(self.url, {'reason': 'Repeat call while processing'}, format='json')
+        self.assertEqual(res_repeat.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_repeat.data['status'], 'processing')
+        self.assertEqual(res_repeat.data['code'], 'refund_processing')
 
     def test_cancel_and_refund_permissions_enforcement(self):
         """Only owning verified shelter or admin can cancel-and-refund; others rejected with 403 or 401, 404 for missing."""

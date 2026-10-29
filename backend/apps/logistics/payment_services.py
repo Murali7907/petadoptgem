@@ -603,6 +603,8 @@ def issue_refund(payment: Payment, reason: str = "", initiated_by=None, source: 
         }
     }
 
+    from razorpay.errors import BadRequestError
+
     try:
         rzp_response = client.payment.refund(
             locked_payment.razorpay_payment_id,
@@ -615,7 +617,15 @@ def issue_refund(payment: Payment, reason: str = "", initiated_by=None, source: 
             or getattr(getattr(exc, 'response', None), 'status_code', None)
             or getattr(exc, 'http_status', None)
         )
-        is_409 = status_code in (409, '409') or getattr(exc, 'code', None) in (409, '409', 'CONFLICT')
+        msg_str = str(exc).lower()
+        is_409 = (
+            status_code in (409, '409')
+            or getattr(exc, 'code', None) in (409, '409', 'CONFLICT')
+            or (isinstance(exc, BadRequestError) and any(
+                k in msg_str for k in ['in progress', 'already in progress', 'conflict', '409', 'already processed']
+            ))
+            or any(k in msg_str for k in ['already in progress', 'refund is already in progress'])
+        )
         if is_409:
             logger.info(
                 f"Razorpay refund is in progress (409 conflict) for Payment #{locked_payment.id}, "
@@ -642,17 +652,25 @@ def issue_refund(payment: Payment, reason: str = "", initiated_by=None, source: 
         return refund
 
     rzp_refund_id = rzp_response.get('id', '')
-    rzp_status = rzp_response.get('status', 'processed')
+    rzp_status = str(rzp_response.get('status', 'processed')).lower()
 
     with transaction.atomic():
         refund.razorpay_refund_id = rzp_refund_id
         if rzp_status == 'processed':
             refund.status = RefundStatus.PROCESSED
-        else:
-            refund.status = RefundStatus.PROCESSING
-        refund.save(update_fields=['razorpay_refund_id', 'status', 'updated_at'])
-
-        if refund.status == RefundStatus.PROCESSED:
+            refund.save(update_fields=['razorpay_refund_id', 'status', 'updated_at'])
             mark_refund_processed_state(refund)
+        elif rzp_status == 'failed':
+            refund.status = RefundStatus.FAILED
+            refund.failure_reason = (
+                rzp_response.get('error_description')
+                or rzp_response.get('error_reason')
+                or 'Refund rejected at gateway'
+            )
+            refund.save(update_fields=['razorpay_refund_id', 'status', 'failure_reason', 'updated_at'])
+        else:
+            # 'pending', 'created', etc. (awaiting refund.processed webhook)
+            refund.status = RefundStatus.PROCESSING
+            refund.save(update_fields=['razorpay_refund_id', 'status', 'updated_at'])
 
     return refund
