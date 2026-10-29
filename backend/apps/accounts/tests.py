@@ -977,6 +977,32 @@ class PasswordResetAndChangeTests(APITestCase):
         self.assertIn("http://localhost:3000/reset-password?uid=", body)
         self.assertIn("&token=", body)
 
+    @override_settings(AUTH_PASSWORD_RESET_ASYNC_EMAIL=True)
+    def test_password_reset_request_async_threading_does_not_call_send_mail_synchronously(self):
+        """
+        Milestone 10d Task 3: When AUTH_PASSWORD_RESET_ASYNC_EMAIL is True,
+        send_mail is dispatched in a daemon thread and does not block the request thread synchronously.
+        """
+        from unittest.mock import patch
+
+        url = '/api/v1/auth/password-reset/'
+
+        with patch('apps.accounts.views.send_mail') as mock_send_mail:
+            with patch('apps.accounts.views.threading.Thread') as mock_thread_cls:
+                with self.captureOnCommitCallbacks(execute=True):
+                    response = self.client.post(url, {'email': 'reset_tester@example.com'}, format='json')
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                # Verify send_mail was NOT called synchronously on request thread
+                mock_send_mail.assert_not_called()
+
+                # Verify daemon thread was instantiated and started
+                mock_thread_cls.assert_called_once()
+                _, kwargs = mock_thread_cls.call_args
+                self.assertTrue(kwargs.get('daemon'))
+                self.assertEqual(kwargs.get('name'), f"pwd-reset-email-{self.user.pk}")
+                mock_thread_cls.return_value.start.assert_called_once()
+
     def test_password_reset_request_unknown_email_returns_identical_response_and_sends_nothing(self):
         url = '/api/v1/auth/password-reset/'
         response = self.client.post(url, {'email': 'nonexistent_user@example.com'}, format='json')

@@ -8,6 +8,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from django.db.models import Sum, Avg
 import logging
+import threading
 from django.conf import settings
 from django.core.mail import send_mail
 from django.contrib.auth.tokens import default_token_generator
@@ -511,7 +512,18 @@ class PasswordResetView(views.APIView):
                 except Exception as exc:
                     logger.warning(f"Failed to dispatch password reset email: {exc}")
 
-            transaction.on_commit(send_reset_email)
+            def dispatch_reset():
+                if getattr(settings, 'AUTH_PASSWORD_RESET_ASYNC_EMAIL', False):
+                    email_thread = threading.Thread(
+                        target=send_reset_email,
+                        name=f"pwd-reset-email-{user.pk}",
+                        daemon=True
+                    )
+                    email_thread.start()
+                else:
+                    send_reset_email()
+
+            transaction.on_commit(dispatch_reset)
 
         return Response({
             "message": "If an account with that email exists, a password reset link has been sent."

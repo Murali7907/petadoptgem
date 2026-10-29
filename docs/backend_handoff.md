@@ -373,6 +373,12 @@ The shelter profile is serialized as the nested `shelter_profile` object (`Shelt
 - `is_verified`: Administrative vetting and verification badge (`true`/`false`).
 - `created_at`: Account registration timestamp.
 
+### 7.1 Password Reset Timing Leak Defense & Asynchronous Dispatch
+- **Endpoint**: `POST /api/v1/auth/password-reset/`
+- **Mitigation**: To prevent user enumeration attacks via response timing discrepancies (where SMTP I/O for existing users would take 200–2000 ms vs ~5 ms for unknown emails), email dispatch is decoupled from the HTTP request cycle using a short-lived daemon thread started inside `transaction.on_commit` (`AUTH_PASSWORD_RESET_ASYNC_EMAIL = True`).
+- **Response Uniformity**: Both existing and unknown email addresses return the identical HTTP 200 OK message in ~5–15 ms.
+- **Determinism under Test**: During automated test execution (`'test' in sys.argv`), dispatch runs synchronously so unit test suites assert sent emails deterministically without flakiness.
+
 ---
 
 ## 8. Platform Runtime Environment
@@ -517,6 +523,7 @@ This section documents standard deployment procedures, production environment re
 | `MAX_MEDICAL_DOC_SIZE_BYTES` | Optional | Maximum medical document upload size (defaults to `15728640` / 15MB). |
 | `FRONTEND_BASE_URL` | **Required** when DEBUG=False | Frontend application URL (defaults to `http://localhost:3000` when `DEBUG=True`). Cannot contain `mock`. |
 | `PASSWORD_RESET_TIMEOUT` | Optional | Validity period of password reset tokens in seconds (defaults to `3600` / 1 hour). |
+| `AUTH_PASSWORD_RESET_ASYNC_EMAIL` | Optional | Dispatch password reset emails asynchronously via short-lived daemon thread to eliminate timing leaks and account enumeration (defaults to `True` in production, `False` during test suite). |
 | `EMAIL_VERIFY_MAX_AGE` | Optional | Validity period of signed email verification tokens in seconds (defaults to `86400` / 24 hours). |
 | `AUTH_PASSWORD_RESET_THROTTLE_RATE` | Optional | Rate limit for password reset request endpoint (defaults to `5/min`). |
 | `AUTH_PASSWORD_RESET_CONFIRM_THROTTLE_RATE` | Optional | Rate limit for password reset confirm endpoint (defaults to `5/min`). |

@@ -308,6 +308,12 @@ EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '10'))
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'KindHeart Pet Adoption <no-reply@kindheart.org>').strip()
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
+# Password Reset Asynchronous Email Configuration (timing leak mitigation)
+AUTH_PASSWORD_RESET_ASYNC_EMAIL = (
+    os.getenv('AUTH_PASSWORD_RESET_ASYNC_EMAIL', 'True').lower() in ('true', '1', 't', 'yes', 'y')
+    and 'test' not in sys.argv
+)
+
 # Razorpay Payment Gateway Configuration (fail-closed in production)
 RAZORPAY_KEY_ID = os.getenv('RAZORPAY_KEY_ID', '').strip()
 RAZORPAY_KEY_SECRET = os.getenv('RAZORPAY_KEY_SECRET', '').strip()
