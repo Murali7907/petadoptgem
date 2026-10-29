@@ -1668,6 +1668,27 @@ class EmailChangeHardeningTests(APITestCase):
         self.assertEqual(res_v1_me.data.get('code'), 'invalid_password')
 
 
+class TokenLifetimeConfigurationTests(APITestCase):
+    """Milestone 10d Task 4: JWT token lifetimes configurable from environment."""
+
+    def test_default_token_lifetimes(self):
+        from django.conf import settings
+        from datetime import timedelta
+        self.assertEqual(settings.SIMPLE_JWT['ACCESS_TOKEN_LIFETIME'], timedelta(minutes=15))
+        self.assertEqual(settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'], timedelta(days=7))
+
+    def test_access_token_expiry_matches_settings(self):
+        from rest_framework_simplejwt.tokens import AccessToken
+        from apps.accounts.models import User
+
+        user = User.objects.create_user(username='jwt_user', email='jwt@test.com', password='password123')
+        token = AccessToken.for_user(user)
+        exp = token['exp']
+        iat = token['iat']
+        delta_seconds = exp - iat
+        self.assertEqual(delta_seconds, 15 * 60)
+
+
 
 
 

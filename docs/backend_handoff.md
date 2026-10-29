@@ -66,6 +66,10 @@ When throttled, the server returns HTTP `429 Too Many Requests` with a `Retry-Af
    - **Existing Users & Admin Verification**: Existing users created prior to email verification start unverified (`email_verified=False`). Platform administrators can mark users verified directly in the Django Admin interface (`email_verified` and `email_verified_at` are exposed on `CustomUserAdmin`).
    - **Logistics Delivery Gate**: Attempting to assign a delivery task to an adopter whose email is not verified returns HTTP 409 `{"code": "adopter_email_unverified", "detail": "Cannot assign delivery task: adopter email address is unverified."}`.
 
+### 1.6 JWT Token Lifetimes & Frontend Refresh Obligation
+- **Access Token Lifetime**: 15 minutes by default (configurable via `ACCESS_TOKEN_MINUTES`). Short-lived access tokens limit exposure windows if a token is intercepted.
+- **Refresh Token Lifetime**: 7 days by default (configurable via `REFRESH_TOKEN_DAYS`), with automatic rotation (`ROTATE_REFRESH_TOKENS = True`) and immediate blacklisting of rotated tokens (`BLACKLIST_AFTER_ROTATION = True`).
+- **Frontend Token Refresh Obligation**: The frontend web application MUST securely store the refresh token and silently invoke `POST /api/v1/auth/token/refresh/` with `{"refresh": "<refresh_token>"}` to obtain a fresh access token before the 15-minute expiration or immediately upon catching an HTTP `401 Unauthorized` response with `code: "token_not_valid"`.
 
 ---
 
@@ -522,6 +526,8 @@ This section documents standard deployment procedures, production environment re
 | `MAX_PET_IMAGE_SIZE_BYTES` | Optional | Maximum image upload size in bytes (defaults to `10485760` / 10MB). |
 | `MAX_MEDICAL_DOC_SIZE_BYTES` | Optional | Maximum medical document upload size (defaults to `15728640` / 15MB). |
 | `FRONTEND_BASE_URL` | **Required** when DEBUG=False | Frontend application URL (defaults to `http://localhost:3000` when `DEBUG=True`). Cannot contain `mock`. |
+| `ACCESS_TOKEN_MINUTES` | Optional | JWT access token lifetime in minutes (defaults to `15`). Frontend must refresh access tokens using refresh token. |
+| `REFRESH_TOKEN_DAYS` | Optional | JWT refresh token lifetime in days (defaults to `7`). |
 | `PASSWORD_RESET_TIMEOUT` | Optional | Validity period of password reset tokens in seconds (defaults to `3600` / 1 hour). |
 | `AUTH_PASSWORD_RESET_ASYNC_EMAIL` | Optional | Dispatch password reset emails asynchronously via short-lived daemon thread to eliminate timing leaks and account enumeration (defaults to `True` in production, `False` during test suite). |
 | `EMAIL_VERIFY_MAX_AGE` | Optional | Validity period of signed email verification tokens in seconds (defaults to `86400` / 24 hours). |
