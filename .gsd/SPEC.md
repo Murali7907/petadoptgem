@@ -1230,6 +1230,65 @@ Medical records are currently public (`AllowAny` GET on `/api/v1/pets/<id>/medic
 
 ---
 
-*Last updated: 2026-10-28*
+## 20. Milestone 10d — CI Workflow Repair, Refund Status Mapping, Password-Reset Timing & Token Lifetimes
+
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Milestone 10d approved and finalized.
+
+### 20.1 Task 1: CI Workflow Repair
+- **Docker Healthcheck**: Remove non-existent `--health-cmd-args` from Postgres service in `.github/workflows/ci.yml`; use `--health-cmd pg_isready` with interval, timeout, and retries.
+- **Image & Dependency Pruning**: Switch container image to `postgres:16`. Remove apt-get GDAL/GEOS/Proj dependencies since PostGIS is not used.
+- **Environment Parity**: Explicitly provide `DEBUG`, `SECRET_KEY`, and `DB_*` on every step invoking `manage.py` in the test job.
+- **Pinned Lock File & Cache**: Install via `pip install -r backend/requirements.lock.txt` with graceful fallback to `backend/requirements.txt` with a `::warning::` line; set `cache-dependency-path: backend/requirements*.txt`.
+- **Sanitized Hostnames**: Replace all occurrences of `kindheart.org` in CI environment configurations with RFC 2606 reserved `example.invalid`.
+- **Semantic Validation**: Run each step in a local PowerShell child process and validate GitHub Actions syntax via `actionlint`.
+
+### 20.2 Task 2: Refund Status Mapping & 409 Gateway Handling
+- **Status Mapping**:
+  - `processed`: Mark refund `PROCESSED`, set `processed_at = now()`, dispatch confirmation email to adopter via `transaction.on_commit`.
+  - `pending` / `created`: Mark refund `PROCESSING`, do not set `processed_at`, do not send email. The `refund.processed` webhook listener will transition status to `PROCESSED` and dispatch email upon confirmation from Razorpay.
+  - `failed`: Mark refund `FAILED` with `failure_reason`.
+- **Cancel-and-Refund Invariants**: When refund is in `processing`, delivery is already `failed` and driver freed; cancel-and-refund returns HTTP 200/409 indicating refund is already in progress without double-issuing.
+- **SDK Inspection & 409 Detection**: Inspect installed `razorpay/client.py` and `razorpay/errors.py`. Detect 409 from SDK error attributes (`code`, `description`, or response object) without artificial test-only attributes.
+
+### 20.3 Task 3: Password-Reset Timing Leak Elimination
+- Dispatch password reset emails asynchronously inside `transaction.on_commit` using a lightweight daemon thread in production so requests for both existing and non-existing accounts return in identical time (~5-15ms).
+- Provide deterministic synchronous dispatch during test execution via settings flag (`AUTH_PASSWORD_RESET_ASYNC_EMAIL = False` under test).
+- Add tests verifying non-blocking thread invocation and document in `docs/backend_handoff.md`.
+
+### 20.4 Task 4: Configurable Token Lifetimes
+- Introduce environment variables `ACCESS_TOKEN_MINUTES` (default `15`) and `REFRESH_TOKEN_DAYS` (default `7`) in `backend/config/settings.py` for `SIMPLE_JWT`.
+- Document configuration in `backend/.env.example` and `docs/backend_handoff.md`.
+- Update any test assertions referencing token expiration limits.
+
+---
+
+## 21. Milestone 11 — PostGIS Reconciliation, License, Security Policy, README Rewrite & Repo Tidy
+
+> **Status**: `FINALIZED`
+>
+> ⚠️ **Planning Lock**: Milestone 11 approved and finalized.
+
+### 21.1 Task 1: PostGIS Reconciliation
+- Audit codebase, dependencies, and settings for GeoDjango / PostGIS usage.
+- Confirm distance calculation uses standard SQL Haversine spherical trigonometric expression.
+- Purge legacy PostGIS claims from platform documentation.
+
+### 21.2 Task 2: License & Security Policy
+- Add standard MIT `LICENSE` file at repository root with copyright attributed to configured Git user.
+- Add `SECURITY.md` documenting private vulnerability disclosure workflow, supported branches, and credential safety policies.
+
+### 21.3 Task 3: Grounded README Rewrite
+- Rewrite `README.md` completely with exact versions from `requirements.lock.txt`, verified roles, application states, delivery lifecycle, environment configurations, and setup guides for Windows and Linux.
+- Validate documentation against actual codebase paths and test commands.
+
+### 21.4 Task 4: Repository Tidy
+- Audit root vs backend `.env.example`; remove redundant root copy.
+- Produce structured recommendation list for auxiliary root tool directories.
+
+---
+
+*Last updated: 2026-10-29*
 
 
