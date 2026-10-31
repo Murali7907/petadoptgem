@@ -56,7 +56,7 @@ class Distance(Expression):
     """
     Geodesic distance calculation in meters between shelter (latitude, longitude)
     and a reference Point using the spherical Haversine formula.
-    Provides drop-in Distance('shelter__location', Point(...)) interface without requiring PostGIS.
+    Provides drop-in Distance('shelter__location', Point(...)) interface with distance computed with the Haversine formula in SQL.
     """
     def __init__(self, field_name, point, output_field=None):
         self.field_name = field_name

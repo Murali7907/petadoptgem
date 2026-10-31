@@ -30,7 +30,7 @@ All dependency versions are pinned in [`backend/requirements.lock.txt`](backend/
 | **WSGI Server** | Gunicorn | `26.2.0` | `gunicorn==26.2.0` |
 | **Static File Serving** | WhiteNoise | `6.12.0` | `whitenoise==6.12.0` |
 
-*Note: The platform utilizes standard PostgreSQL. Spatial distance and proximity queries are computed entirely using spherical Haversine trigonometric expressions (`6371 * acos(...)`) in pure SQL without requiring PostGIS extensions, GDAL, or GEOS system libraries.*
+*Note: The platform utilizes standard PostgreSQL. Spatial distance and proximity queries are distance computed with the Haversine formula in SQL without requiring external spatial database extensions, GDAL, or GEOS system libraries.*
 
 ---
 
@@ -335,10 +335,13 @@ petadoptgem/
 │   └── openapi.yaml             # Complete OpenAPI 3.0 schema definition generated via drf-spectacular
 ├── LICENSE                      # Standard MIT License
 ├── SECURITY.md                  # Vulnerability disclosure policy and credential safety rules
+├── VERSION                      # GSD framework version (1.6.0), not the application version
 └── README.md                    # Project overview, setup instructions, and architecture documentation
 ```
 
-### Purpose of Auxiliary Tooling Folders:
+### Purpose of Auxiliary Tooling Folders & Agent Scaffolding:
+- **`VERSION`**: Contains `1.6.0`, representing the GSD development framework version, not the application version (application version is `1.0.0` defined in `backend/config/settings.py`).
+- **AI-Agent Workflow Files**: `.agent/`, `.agents/`, `.gemini/`, `.gsd/`, `adapters/`, `scripts/`, `GSD-STYLE.md`, `PROJECT_RULES.md`, and `model_capabilities.yaml` are AI-agent workflow specifications, rules, templates, and validation scripts used by the pair-programming development framework; they are scaffolding files and not part of the production application runtime.
 - **`.gsd/`**: Specification, milestones, and task roadmap managed by the GSD project planning engine.
 - **`.agent/` and `.agents/`**: Local AI pair programming workflows, agent skills, and prompt specifications.
 - **`.gemini/`**: Antigravity IDE project configuration and localized workspace knowledge items.

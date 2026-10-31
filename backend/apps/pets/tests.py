@@ -380,7 +380,7 @@ class PublicPetCatalogAPITests(APITestCase):
         self.assertEqual(len(city_results), 1)
         self.assertEqual(city_results[0]['name'], 'Luna')
 
-    def test_postgis_proximity_sorting_orders_closer_shelter_pets_first(self):
+    def test_haversine_proximity_sorting_orders_closer_shelter_pets_first(self):
         """
         Verify proximity sorting when lat and lng are provided.
         Closer shelter pets should appear before further shelter pets.
