@@ -23,6 +23,7 @@ class AdoptionApplication(models.Model):
         ('pending', 'Pending'),
         ('paid', 'Paid'),
         ('failed', 'Failed'),
+        ('refunded', 'Refunded'),
     )
 
     public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
@@ -66,6 +67,7 @@ class AdoptionApplication(models.Model):
     class Meta:
         db_table = 'adoption_applications'
         managed = True
+        ordering = ['-submitted_at', '-id']
 
     def save(self, *args, **kwargs):
         if not self.dropoff_address and self.delivery_address:
@@ -83,7 +85,24 @@ class AdoptionApplication(models.Model):
         elif self.customer_longitude is not None and self.destination_longitude is None:
             self.destination_longitude = self.customer_longitude
 
+        prev_status = None
+        if self.pk:
+            orig = AdoptionApplication.objects.filter(pk=self.pk).values('status').first()
+            if orig:
+                prev_status = orig['status']
+
         super().save(*args, **kwargs)
+
+        # Application code status convergence: if an approved application is rejected or cancelled,
+        # restore pet to available if no other approved/completed application exists
+        if prev_status == 'approved' and self.status in ['rejected', 'cancelled']:
+            has_other = AdoptionApplication.objects.filter(
+                pet_id=self.pet_id,
+                status__in=['approved', 'completed']
+            ).exclude(id=self.id).exists()
+            if not has_other:
+                from apps.pets.models import Pet
+                Pet.objects.filter(id=self.pet_id, status='pending').update(status='available')
 
     def calculate_total(self, per_km_rate=10):
         shelter = self.pet.shelter
@@ -138,6 +157,7 @@ class AdoptionReview(models.Model):
     class Meta:
         db_table = 'adoption_reviews'
         managed = True
+        ordering = ['-created_at', '-id']
 
     def save(self, *args, **kwargs):
         if not self.rating:

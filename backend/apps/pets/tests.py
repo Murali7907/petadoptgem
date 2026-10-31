@@ -29,7 +29,8 @@ class PetManagementAPITests(APITestCase):
             organization_name='Happy Paws Rescue',
             pickup_address='123 Shelter Lane, City',
             latitude=12.9716,
-            longitude=77.5946
+            longitude=77.5946,
+            is_verified=True
         )
 
         # Create shelter user 2 & profile (for multi-tenancy testing)
@@ -44,7 +45,8 @@ class PetManagementAPITests(APITestCase):
             organization_name='Paws and Claws Rescue',
             pickup_address='456 Haven Road, City',
             latitude=12.9800,
-            longitude=77.6000
+            longitude=77.6000,
+            is_verified=True
         )
 
         # Create customer user
@@ -208,7 +210,8 @@ class PublicPetCatalogAPITests(APITestCase):
             pickup_address='MG Road, Central Bangalore',
             city='Bangalore',
             latitude=12.971600,
-            longitude=77.594600
+            longitude=77.594600,
+            is_verified=True
         )
 
         # Create Shelter 2 in Whitefield (Farther East, ~17km)
@@ -225,7 +228,8 @@ class PublicPetCatalogAPITests(APITestCase):
             pickup_address='ITPL Main Road, Whitefield',
             city='Whitefield',
             latitude=12.969800,
-            longitude=77.750000
+            longitude=77.750000,
+            is_verified=True
         )
 
         # 1. Available Dog at Central Shelter
@@ -376,7 +380,7 @@ class PublicPetCatalogAPITests(APITestCase):
         self.assertEqual(len(city_results), 1)
         self.assertEqual(city_results[0]['name'], 'Luna')
 
-    def test_postgis_proximity_sorting_orders_closer_shelter_pets_first(self):
+    def test_haversine_proximity_sorting_orders_closer_shelter_pets_first(self):
         """
         Verify proximity sorting when lat and lng are provided.
         Closer shelter pets should appear before further shelter pets.
@@ -423,14 +427,26 @@ class PublicPetCatalogAPITests(APITestCase):
         self.assertGreaterEqual(len(med['medical_records']), 1)
         self.assertEqual(med['medical_records'][0]['title'], 'Annual Core Vaccinations')
 
-        # Verify shelter details and coordinates
+        # Verify shelter details: masked coordinates & phone for anonymous
         self.assertIn('shelter', data)
         shelter_data = data['shelter']
         self.assertEqual(shelter_data['organization_name'], 'Central City Animal Rescue')
         self.assertEqual(shelter_data['city'], 'Bangalore')
-        self.assertEqual(shelter_data['phone'], '+919876543210')
-        self.assertIsNotNone(shelter_data['latitude'])
-        self.assertIsNotNone(shelter_data['longitude'])
+        self.assertIsNone(shelter_data['phone'])
+        self.assertIsNone(shelter_data['latitude'])
+        self.assertIsNone(shelter_data['longitude'])
+        self.assertIsNone(shelter_data['pickup_address'])
+
+        # Verify unmasked coordinates & phone for owning shelter
+        self.client.force_authenticate(user=self.shelter_user_central)
+        res_owner = self.client.get(detail_url)
+        self.assertEqual(res_owner.status_code, status.HTTP_200_OK)
+        owner_shelter = res_owner.data['shelter']
+        self.assertEqual(owner_shelter['phone'], '+919876543210')
+        self.assertIsNotNone(owner_shelter['latitude'])
+        self.assertIsNotNone(owner_shelter['longitude'])
+        self.assertIsNotNone(owner_shelter['pickup_address'])
+        self.client.logout()
 
         # Verify gallery images
         self.assertIn('images', data)
@@ -457,7 +473,8 @@ class CustomerFavoritePetsAPITests(APITestCase):
         self.shelter_profile = ShelterProfile.objects.create(
             user=self.shelter_user,
             organization_name='Paws Shelter',
-            pickup_address='100 Main St'
+            pickup_address='100 Main St',
+            is_verified=True
         )
         self.customer = User.objects.create_user(
             username='alice_fav',
@@ -539,7 +556,8 @@ class MediaStoragePipelineTests(APITestCase):
             organization_name='Storage Pipeline Shelter',
             pickup_address='789 Storage Rd',
             latitude=12.9716,
-            longitude=77.5946
+            longitude=77.5946,
+            is_verified=True
         )
         self.pet = Pet.objects.create(
             shelter=self.shelter_profile,
@@ -561,8 +579,13 @@ class MediaStoragePipelineTests(APITestCase):
         self.assertIn('API_SECRET', settings.CLOUDINARY_STORAGE)
 
     def test_pet_gallery_image_upload_saves_to_storage(self):
+        from io import BytesIO
+        from PIL import Image
+        bio = BytesIO()
+        Image.new('RGB', (10, 10), color='green').save(bio, format='JPEG')
+        fake_image = SimpleUploadedFile("bella_gallery.jpg", bio.getvalue(), content_type="image/jpeg")
+
         url = f"/api/pets/{self.pet.id}/images/"
-        fake_image = SimpleUploadedFile("bella_gallery.jpg", b"fake_image_binary_data", content_type="image/jpeg")
         response = self.client.post(url, {'image': fake_image, 'caption': 'Bella at park'}, format='multipart')
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -574,7 +597,7 @@ class MediaStoragePipelineTests(APITestCase):
 
     def test_pet_medical_record_document_upload_saves_to_storage(self):
         url = f"/api/pets/{self.pet.id}/medical/"
-        fake_doc = SimpleUploadedFile("rabies_cert.pdf", b"fake_pdf_binary_content", content_type="application/pdf")
+        fake_doc = SimpleUploadedFile("rabies_cert.pdf", b"%PDF-1.4\n%fake_pdf_binary_content\n%%EOF", content_type="application/pdf")
         response = self.client.post(url, {
             'title': 'Rabies Vaccination',
             'record_date': '2026-05-10',
@@ -589,8 +612,13 @@ class MediaStoragePipelineTests(APITestCase):
         self.assertIn('/media/medical/', med_rec.document)
 
     def test_shelter_pet_images_action_upload(self):
+        from io import BytesIO
+        from PIL import Image
+        bio = BytesIO()
+        Image.new('RGB', (10, 10), color='yellow').save(bio, format='JPEG')
+        fake_image = SimpleUploadedFile("bella_action.jpg", bio.getvalue(), content_type="image/jpeg")
+
         url = f"/api/v1/shelter/pets/{self.pet.public_id}/images/"
-        fake_image = SimpleUploadedFile("bella_action.jpg", b"fake_binary_jpeg", content_type="image/jpeg")
         response = self.client.post(url, {'images': fake_image, 'caption': 'Action Photo'}, format='multipart')
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -608,7 +636,7 @@ class MediaStoragePipelineTests(APITestCase):
 
         url = f"/api/v1/shelter/pets/{self.pet.public_id}/medical/"
         # 1. Document-only PATCH should preserve existing description
-        fake_doc = SimpleUploadedFile("report.pdf", b"pdf_data", content_type="application/pdf")
+        fake_doc = SimpleUploadedFile("report.pdf", b"%PDF-1.4\n%pdf_data\n%%EOF", content_type="application/pdf")
         patch_resp = self.client.patch(url, {'document': fake_doc}, format='multipart')
         self.assertEqual(patch_resp.status_code, status.HTTP_200_OK)
         med_rec.refresh_from_db()
@@ -647,5 +675,1073 @@ class MediaStoragePipelineTests(APITestCase):
         self.assertTrue(settings.USE_CLOUDINARY)
         self.assertEqual(settings.STORAGES['default']['BACKEND'], 'cloudinary_storage.storage.MediaCloudinaryStorage')
         self.assertEqual(settings.STORAGES['raw']['BACKEND'], 'cloudinary_storage.storage.RawMediaCloudinaryStorage')
+
+
+class VerifiedShelterPetPolicyTests(APITestCase):
+    def setUp(self):
+        # Unverified shelter
+        self.unverified_user = User.objects.create_user(
+            username='unverified_shelter_pet',
+            email='unverified_pet@shelter.org',
+            password='password123',
+            role='shelter'
+        )
+        self.unverified_profile = ShelterProfile.objects.create(
+            user=self.unverified_user,
+            organization_name='Unverified Pet Haven',
+            pickup_address='101 Pending Pet Rd',
+            is_verified=False
+        )
+        self.unverified_pet = Pet.objects.create(
+            shelter=self.unverified_profile,
+            name='Ghost',
+            species='dog',
+            breed='Husky',
+            age_months=12,
+            gender='male',
+            status='available'
+        )
+
+        # Verified shelter
+        self.verified_user = User.objects.create_user(
+            username='verified_shelter_pet',
+            email='verified_pet@shelter.org',
+            password='password123',
+            role='shelter'
+        )
+        self.verified_profile = ShelterProfile.objects.create(
+            user=self.verified_user,
+            organization_name='Verified Pet Haven',
+            pickup_address='202 Verified Pet Rd',
+            is_verified=True
+        )
+        self.verified_pet = Pet.objects.create(
+            shelter=self.verified_profile,
+            name='Buddy',
+            species='dog',
+            breed='Golden Retriever',
+            age_months=24,
+            gender='male',
+            status='available'
+        )
+
+        # Admin user
+        self.admin_user = User.objects.create_superuser(
+            username='admin_pet_boss',
+            email='admin_pet@kindheart.org',
+            password='password123'
+        )
+
+        # Customer user
+        self.customer_user = User.objects.create_user(
+            username='adopter_sam',
+            email='sam@customer.org',
+            password='password123',
+            role='customer'
+        )
+
+    def test_unverified_shelter_cannot_create_pet(self):
+        self.client.force_authenticate(user=self.unverified_user)
+        payload = {
+            'name': 'Shadow',
+            'species': 'cat',
+            'breed': 'Persian',
+            'age_months': 6,
+            'gender': 'female',
+            'adoption_fee': 50.00
+        }
+        res = self.client.post('/api/v1/shelter/pets/', payload)
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res.data.get('code'), 'shelter_not_verified')
+
+    def test_verified_shelter_can_create_pet(self):
+        self.client.force_authenticate(user=self.verified_user)
+        payload = {
+            'name': 'Shadow',
+            'species': 'cat',
+            'breed': 'Persian',
+            'age_months': 6,
+            'gender': 'female',
+            'adoption_fee': 50.00
+        }
+        res = self.client.post('/api/v1/shelter/pets/', payload)
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+    def test_admin_can_manage_pets(self):
+        self.client.force_authenticate(user=self.admin_user)
+        payload = {
+            'shelter': self.verified_profile.id,
+            'name': 'AdminPet',
+            'species': 'dog',
+            'breed': 'Beagle',
+            'age_months': 8,
+            'gender': 'male',
+            'adoption_fee': 0.00
+        }
+        res = self.client.post('/api/pets/', payload)
+        self.assertNotEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_public_catalog_filters_unverified_shelters(self):
+        # Anonymous user visiting public pets list
+        res = self.client.get('/api/pets/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        results = res.data['results'] if 'results' in res.data else res.data
+        pet_names = [p['name'] for p in results]
+        self.assertIn('Buddy', pet_names)
+        self.assertNotIn('Ghost', pet_names)
+
+        # Owning shelter can still see their own pet in catalog
+        self.client.force_authenticate(user=self.unverified_user)
+        res_own = self.client.get('/api/pets/')
+        own_results = res_own.data['results'] if 'results' in res_own.data else res_own.data
+        own_names = [p['name'] for p in own_results]
+        self.assertIn('Ghost', own_names)
+
+        # Admin can see all pets in catalog
+        self.client.force_authenticate(user=self.admin_user)
+        res_admin = self.client.get('/api/pets/')
+        admin_results = res_admin.data['results'] if 'results' in res_admin.data else res_admin.data
+        admin_names = [p['name'] for p in admin_results]
+        self.assertIn('Ghost', admin_names)
+        self.assertIn('Buddy', admin_names)
+
+    def test_suspension_immediately_blocks_pet_writes(self):
+        self.client.force_authenticate(user=self.verified_user)
+        self.verified_profile.is_verified = False
+        self.verified_profile.save()
+
+        res = self.client.patch(f'/api/v1/shelter/pets/{self.verified_pet.public_id}/', {'name': 'Buddy Renamed'})
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res.data.get('code'), 'shelter_not_verified')
+
+    def test_unverified_shelter_blocked_from_pet_media_and_medical(self):
+        self.client.force_authenticate(user=self.unverified_user)
+        # Pet image upload
+        res_img = self.client.post(f'/api/pets/{self.unverified_pet.id}/images/', {'is_primary': True})
+        self.assertEqual(res_img.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_img.data.get('code'), 'shelter_not_verified')
+
+        # Medical record creation
+        res_med = self.client.post(f'/api/pets/{self.unverified_pet.id}/medical/', {
+            'record_type': 'vaccination',
+            'title': 'Rabies Vaccine',
+            'record_date': '2026-10-15'
+        })
+        self.assertEqual(res_med.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_med.data.get('code'), 'shelter_not_verified')
+
+
+class UploadValidationAPITests(APITestCase):
+    def setUp(self):
+        from io import BytesIO
+        from PIL import Image
+
+        self.shelter_user = User.objects.create_user(
+            username='upload_shelter_user',
+            email='upload.shelter@example.org',
+            password='password123',
+            role='shelter'
+        )
+        self.shelter_profile = ShelterProfile.objects.create(
+            user=self.shelter_user,
+            organization_name='Upload Shelter Org',
+            pickup_address='500 Upload Blvd',
+            city='Bangalore',
+            is_verified=True
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter_profile,
+            name='UploadTestPet',
+            species='dog',
+            breed='Poodle',
+            age_months=12,
+            gender='female',
+            status='available'
+        )
+        self.client.force_authenticate(user=self.shelter_user)
+
+    def _create_image_file(self, filename, fmt='JPEG', size=(20, 20)):
+        from io import BytesIO
+        from PIL import Image
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        io = BytesIO()
+        img = Image.new('RGB', size, color='blue')
+        img.save(io, format=fmt)
+        content_type = f"image/{fmt.lower()}"
+        return SimpleUploadedFile(filename, io.getvalue(), content_type=content_type)
+
+    def test_valid_pet_image_upload_success(self):
+        valid_img = self._create_image_file("valid.jpg", fmt='JPEG')
+        url = f'/api/pets/{self.pet.id}/images/'
+        res = self.client.post(url, {'images': [valid_img], 'caption': 'Valid Image'}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+    def test_fake_image_exe_renamed_jpg_rejected_400(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        fake_exe = SimpleUploadedFile("malware.jpg", b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff", content_type="image/jpeg")
+        url = f'/api/pets/{self.pet.id}/images/'
+        res = self.client.post(url, {'images': [fake_exe]}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_mismatched_image_extension_rejected_400(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        # PNG content with .jpg filename
+        png_as_jpg = self._create_image_file("mismatch.jpg", fmt='PNG')
+        url = f'/api/pets/{self.pet.id}/images/'
+        res = self.client.post(url, {'images': [png_as_jpg]}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_oversize_pet_image_rejected_400(self):
+        from unittest.mock import patch
+        valid_img = self._create_image_file("oversize.png", fmt='PNG')
+        url = f'/api/pets/{self.pet.id}/images/'
+        # Force max size limit to 50 bytes
+        with patch('apps.pets.validators.get_pet_image_max_size', return_value=50):
+            res = self.client.post(url, {'images': [valid_img]}, format='multipart')
+            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_disallowed_image_extension_rejected_400(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        gif_file = SimpleUploadedFile("animation.gif", b"GIF89a...", content_type="image/gif")
+        url = f'/api/pets/{self.pet.id}/images/'
+        res = self.client.post(url, {'images': [gif_file]}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_valid_medical_pdf_upload_success(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        valid_pdf = SimpleUploadedFile("report.pdf", b"%PDF-1.4\n%test pdf content\n%%EOF", content_type="application/pdf")
+        url = f'/api/pets/{self.pet.id}/medical/'
+        res = self.client.post(url, {
+            'title': 'Vaccination Certificate',
+            'record_type': 'vaccination',
+            'record_date': '2026-10-15',
+            'document': valid_pdf
+        }, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+    def test_fake_medical_pdf_text_file_rejected_400(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        fake_pdf = SimpleUploadedFile("report.pdf", b"This is plain text pretending to be a pdf file.", content_type="application/pdf")
+        url = f'/api/pets/{self.pet.id}/medical/'
+        res = self.client.post(url, {
+            'title': 'Vaccination Certificate',
+            'record_type': 'vaccination',
+            'record_date': '2026-10-15',
+            'document': fake_pdf
+        }, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_valid_medical_image_upload_success(self):
+        valid_img = self._create_image_file("xray.png", fmt='PNG')
+        url = f'/api/pets/{self.pet.id}/medical/'
+        res = self.client.post(url, {
+            'title': 'Chest X-Ray',
+            'record_type': 'exam',
+            'record_date': '2026-10-15',
+            'document': valid_img
+        }, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+    def test_oversize_medical_document_rejected_400(self):
+        from unittest.mock import patch
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        valid_pdf = SimpleUploadedFile("large_report.pdf", b"%PDF-1.4\n%test content\n%%EOF", content_type="application/pdf")
+        url = f'/api/pets/{self.pet.id}/medical/'
+        with patch('apps.pets.validators.get_medical_doc_max_size', return_value=10):
+            res = self.client.post(url, {
+                'title': 'Large Report',
+                'record_type': 'exam',
+                'record_date': '2026-10-15',
+                'document': valid_pdf
+            }, format='multipart')
+            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class PetMedicalRecordVisibilityHybridTests(APITestCase):
+    def setUp(self):
+        from decimal import Decimal
+        from apps.accounts.models import ShelterProfile
+        from apps.adoptions.models import AdoptionApplication
+
+        # 1. Owner shelter
+        self.owner_user = User.objects.create_user(
+            username='med_shelter_owner', email='owner@medhaven.org', password='password123', role='shelter', phone='9876543210'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.owner_user, organization_name='Med Haven Shelter', is_verified=True,
+            pickup_address='42 Rescue Lane', city='Bangalore',
+            latitude=Decimal('12.971600'), longitude=Decimal('77.594600')
+        )
+
+        # 2. Foreign shelter
+        self.foreign_user = User.objects.create_user(
+            username='foreign_shelter_user', email='foreign@shelter.org', password='password123', role='shelter'
+        )
+        self.foreign_shelter = ShelterProfile.objects.create(
+            user=self.foreign_user, organization_name='Foreign Shelter', is_verified=True
+        )
+
+        # 3. Applicant customer with approved application
+        self.applicant = User.objects.create_user(
+            username='med_applicant', email='applicant@example.com', password='password123', role='customer'
+        )
+
+        # 4. Other customer (not applicant for this pet)
+        self.other_customer = User.objects.create_user(
+            username='other_customer_med', email='other@example.com', password='password123', role='customer'
+        )
+
+        # 5. Pending applicant (application still submitted/reviewing)
+        self.pending_applicant = User.objects.create_user(
+            username='pending_applicant_med', email='pending@example.com', password='password123', role='customer'
+        )
+
+        # 6. Admin
+        self.admin = User.objects.create_user(
+            username='med_admin', email='admin@medhaven.org', password='password123', role='admin', is_staff=True
+        )
+
+        # 7. Pet & Medical Record
+        self.pet = Pet.objects.create(
+            shelter=self.shelter, name='MedPet', species='dog', breed='Retriever', age_months=18, gender='male', status='available'
+        )
+        self.doc_secret_url = 'https://storage.googleapis.com/kindheart-docs/medical/report_confidential_123.pdf'
+        self.record = PetMedicalRecord.objects.create(
+            pet=self.pet,
+            title='Rabies Vaccination & Health Certificate',
+            description=f'Routine vaccination administered.\nDocument: {self.doc_secret_url}',
+            vet_name='Dr. Sharma',
+            record_date='2026-05-15'
+        )
+
+        # 8. Applications
+        self.application = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.applicant, living_situation='House', contact_phone='9876543210', status='approved'
+        )
+        self.pending_application = AdoptionApplication.objects.create(
+            pet=self.pet, applicant=self.pending_applicant, living_situation='Apartment', contact_phone='9876543211', status='submitted'
+        )
+
+    def test_anonymous_user_sees_metadata_but_null_document_url(self):
+        self.client.logout()
+        url = f'/api/v1/pets/{self.pet.public_id}/medical-records/'
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        records = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+
+        # Metadata visible
+        self.assertEqual(rec['title'], 'Rabies Vaccination & Health Certificate')
+        self.assertEqual(rec['vet_name'], 'Dr. Sharma')
+        self.assertEqual(rec['record_date'], '2026-05-15')
+
+        # Document link masked
+        self.assertIsNone(rec['document_url'])
+        self.assertNotIn('Document:', rec['description'])
+        self.assertNotIn('https://', rec['description'])
+
+    def test_applicant_gets_document_url(self):
+        self.client.force_authenticate(user=self.applicant)
+        url = f'/api/v1/pets/{self.pet.public_id}/medical-records/'
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        records = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+
+        self.assertEqual(rec['document_url'], self.doc_secret_url)
+
+    def test_pending_applicant_gets_null_document_url(self):
+        self.client.force_authenticate(user=self.pending_applicant)
+        url = f'/api/v1/pets/{self.pet.public_id}/medical-records/'
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        records = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        rec = records[0]
+
+        self.assertIsNone(rec['document_url'])
+        self.assertNotIn(self.doc_secret_url, rec['description'])
+
+    def test_other_customer_gets_null_document_url(self):
+        self.client.force_authenticate(user=self.other_customer)
+        url = f'/api/v1/pets/{self.pet.public_id}/medical-records/'
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        records = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        rec = records[0]
+
+        self.assertIsNone(rec['document_url'])
+        self.assertNotIn(self.doc_secret_url, rec['description'])
+
+    def test_owner_shelter_gets_document_url(self):
+        self.client.force_authenticate(user=self.owner_user)
+        url = f'/api/v1/pets/{self.pet.public_id}/medical-records/'
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        records = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        rec = records[0]
+
+        self.assertEqual(rec['document_url'], self.doc_secret_url)
+
+    def test_admin_gets_document_url(self):
+        self.client.force_authenticate(user=self.admin)
+        url = f'/api/v1/pets/{self.pet.public_id}/medical-records/'
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        records = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        rec = records[0]
+
+        self.assertEqual(rec['document_url'], self.doc_secret_url)
+
+    def test_no_link_leaks_through_public_pet_detail(self):
+        # 1. Anonymous request to public pet detail
+        self.client.logout()
+        url = f'/api/v1/pets/{self.pet.public_id}/'
+        res_anon = self.client.get(url)
+        self.assertEqual(res_anon.status_code, status.HTTP_200_OK)
+
+        overview = res_anon.data.get('medical_overview', {})
+        self.assertIn('medical_records', overview)
+        med_list = overview['medical_records']
+        self.assertEqual(len(med_list), 1)
+        self.assertIsNone(med_list[0]['document_url'])
+        self.assertNotIn('Document:', med_list[0]['description'])
+        self.assertNotIn('https://', med_list[0]['description'])
+        self.assertNotIn(self.doc_secret_url, res_anon.content.decode())
+
+        # 2. Unrelated customer request to public pet detail
+        self.client.force_authenticate(user=self.other_customer)
+        res_cust = self.client.get(url)
+        self.assertEqual(res_cust.status_code, status.HTTP_200_OK)
+        med_list_cust = res_cust.data['medical_overview']['medical_records']
+        self.assertIsNone(med_list_cust[0]['document_url'])
+        self.assertNotIn(self.doc_secret_url, res_cust.content.decode())
+
+        # 3. Applicant with approved application request to public pet detail -> gets link
+        self.client.force_authenticate(user=self.applicant)
+        res_app = self.client.get(url)
+        self.assertEqual(res_app.status_code, status.HTTP_200_OK)
+        med_list_app = res_app.data['medical_overview']['medical_records']
+        self.assertEqual(med_list_app[0]['document_url'], self.doc_secret_url)
+
+    def test_tiered_location_disclosure_all_roles(self):
+        url = f'/api/v1/pets/{self.pet.public_id}/'
+
+        # 1. Anonymous
+        self.client.logout()
+        res_anon = self.client.get(url)
+        self.assertEqual(res_anon.status_code, status.HTTP_200_OK)
+        shelter = res_anon.data['shelter']
+        self.assertEqual(shelter['organization_name'], 'Med Haven Shelter')
+        self.assertEqual(shelter['city'], 'Bangalore')
+        self.assertIsNone(shelter['pickup_address'])
+        self.assertIsNone(shelter['latitude'])
+        self.assertIsNone(shelter['longitude'])
+        self.assertIsNone(shelter['phone'])
+
+        # 2. Other customer
+        self.client.force_authenticate(user=self.other_customer)
+        res_other = self.client.get(url)
+        shelter_other = res_other.data['shelter']
+        self.assertEqual(shelter_other['organization_name'], 'Med Haven Shelter')
+        self.assertEqual(shelter_other['city'], 'Bangalore')
+        self.assertIsNone(shelter_other['pickup_address'])
+        self.assertIsNone(shelter_other['latitude'])
+        self.assertIsNone(shelter_other['longitude'])
+        self.assertIsNone(shelter_other['phone'])
+
+        # 3. Pending applicant
+        self.client.force_authenticate(user=self.pending_applicant)
+        res_pending = self.client.get(url)
+        shelter_pending = res_pending.data['shelter']
+        self.assertEqual(shelter_pending['organization_name'], 'Med Haven Shelter')
+        self.assertEqual(shelter_pending['city'], 'Bangalore')
+        self.assertIsNone(shelter_pending['pickup_address'])
+        self.assertIsNone(shelter_pending['latitude'])
+        self.assertIsNone(shelter_pending['longitude'])
+        self.assertIsNone(shelter_pending['phone'])
+
+        # 4. Adopter with approved application
+        self.client.force_authenticate(user=self.applicant)
+        res_approved = self.client.get(url)
+        shelter_approved = res_approved.data['shelter']
+        self.assertEqual(shelter_approved['organization_name'], 'Med Haven Shelter')
+        self.assertEqual(shelter_approved['city'], 'Bangalore')
+        self.assertEqual(shelter_approved['pickup_address'], '42 Rescue Lane')
+        self.assertEqual(shelter_approved['latitude'], '12.971600')
+        self.assertEqual(shelter_approved['longitude'], '77.594600')
+        self.assertEqual(shelter_approved['phone'], '9876543210')
+
+        # 5. Adopter with completed application
+        from apps.adoptions.models import AdoptionApplication
+        completed_user = User.objects.create_user(
+            username='med_completed', email='completed@example.com', password='password123', role='customer'
+        )
+        AdoptionApplication.objects.create(
+            pet=self.pet, applicant=completed_user, living_situation='House', contact_phone='1234567890', status='completed'
+        )
+        self.client.force_authenticate(user=completed_user)
+        res_comp = self.client.get(url)
+        shelter_comp = res_comp.data['shelter']
+        self.assertEqual(shelter_comp['pickup_address'], '42 Rescue Lane')
+        self.assertEqual(shelter_comp['phone'], '9876543210')
+
+        # 6. Owning shelter staff
+        self.client.force_authenticate(user=self.owner_user)
+        res_owner = self.client.get(url)
+        shelter_owner = res_owner.data['shelter']
+        self.assertEqual(shelter_owner['pickup_address'], '42 Rescue Lane')
+        self.assertEqual(shelter_owner['phone'], '9876543210')
+
+        # 7. Admin
+        self.client.force_authenticate(user=self.admin)
+        res_admin = self.client.get(url)
+        shelter_admin = res_admin.data['shelter']
+        self.assertEqual(shelter_admin['pickup_address'], '42 Rescue Lane')
+        self.assertEqual(shelter_admin['phone'], '9876543210')
+
+    def test_public_pet_list_empty_city_returns_placeholder_not_address(self):
+        from apps.accounts.models import ShelterProfile
+        empty_city_shelter_user = User.objects.create_user(
+            username='empty_city_shelter', email='empty@shelter.org', password='password123', role='shelter'
+        )
+        empty_shelter = ShelterProfile.objects.create(
+            user=empty_city_shelter_user,
+            organization_name='Secret Sanctuary',
+            is_verified=True,
+            city='',
+            pickup_address='Hidden Basement 77, Secret Road'
+        )
+        secret_pet = Pet.objects.create(
+            shelter=empty_shelter, name='HiddenPet', species='cat', breed='Persian', age_months=12, gender='female', status='available'
+        )
+        self.client.logout()
+        res = self.client.get('/api/v1/pets/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        data = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        pet_entry = next((p for p in data if p['name'] == 'HiddenPet'), None)
+        self.assertIsNotNone(pet_entry)
+        self.assertEqual(pet_entry['shelter_city'], 'location not provided')
+        self.assertNotIn('Hidden Basement 77', res.content.decode())
+
+    def test_inline_serializers_match_schema_keys(self):
+        from apps.pets.serializers import (
+            MedicalOverviewSerializer,
+            MedicalOverviewRecordSerializer,
+            PublicPetShelterSerializer,
+            PublicPetDetailSerializer,
+        )
+        serializer = PublicPetDetailSerializer(self.pet, context={'request': None})
+        data = serializer.data
+
+        # 1. medical_overview matches MedicalOverviewSerializer declared fields
+        med_overview = data['medical_overview']
+        self.assertEqual(set(med_overview.keys()), set(MedicalOverviewSerializer().fields.keys()))
+
+        # 2. Each record in medical_overview matches MedicalOverviewRecordSerializer declared fields
+        for rec in med_overview['medical_records']:
+            self.assertEqual(set(rec.keys()), set(MedicalOverviewRecordSerializer().fields.keys()))
+
+        # 3. shelter matches PublicPetShelterSerializer declared fields
+        shelter_data = data['shelter']
+        self.assertEqual(set(shelter_data.keys()), set(PublicPetShelterSerializer().fields.keys()))
+
+    def _assert_no_leaks_recursive(self, data, sensitive_keys, path=""):
+        if isinstance(data, dict):
+            for key, val in data.items():
+                curr_path = f"{path}.{key}" if path else key
+                if key in sensitive_keys and val is not None:
+                    self.fail(f"Privacy leak detected at '{curr_path}': value is {val!r}")
+                self._assert_no_leaks_recursive(val, sensitive_keys, curr_path)
+        elif isinstance(data, list):
+            for idx, item in enumerate(data):
+                self._assert_no_leaks_recursive(item, sensitive_keys, f"{path}[{idx}]")
+
+    def _get_pet_family_endpoints(self):
+        pet_id = str(self.pet.public_id)
+        return [
+            # PetViewSet (List and Detail)
+            ('/api/pets/', 'PetViewSet List (legacy)'),
+            (f'/api/pets/{pet_id}/', 'PetViewSet Detail (legacy)'),
+            ('/api/v1/pets/', 'PetViewSet List (canonical)'),
+            (f'/api/v1/pets/{pet_id}/', 'PetViewSet Detail (canonical)'),
+            # PublicPetViewSet (List and Detail)
+            ('/api/pets/public/pets/', 'PublicPetViewSet List (legacy)'),
+            (f'/api/pets/public/pets/{pet_id}/', 'PublicPetViewSet Detail (legacy)'),
+            ('/api/v1/pets/public/pets/', 'PublicPetViewSet List (v1 nested)'),
+            (f'/api/v1/pets/public/pets/{pet_id}/', 'PublicPetViewSet Detail (v1 nested)'),
+            ('/api/v1/public/pets/', 'PublicPetViewSet List (canonical)'),
+            (f'/api/v1/public/pets/{pet_id}/', 'PublicPetViewSet Detail (canonical)'),
+        ]
+
+    def test_recursive_leak_sweep_anonymous_actor(self):
+        """
+        Verify that an anonymous visitor receives NO non-null sensitive fields
+        at any depth across all pet route families (PetViewSet and PublicPetViewSet).
+        """
+        self.client.logout()
+        sensitive_keys = {'pickup_address', 'latitude', 'longitude', 'phone', 'email', 'document_url'}
+        for url, desc in self._get_pet_family_endpoints():
+            res = self.client.get(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK, f"Failed on {desc} ({url})")
+            self._assert_no_leaks_recursive(res.data, sensitive_keys, path=f"{desc}:{url}")
+
+    def test_recursive_leak_sweep_other_customer_actor(self):
+        """
+        Verify that an authenticated customer with NO application receives NO non-null
+        sensitive fields at any depth across all pet route families.
+        """
+        self.client.force_authenticate(user=self.other_customer)
+        sensitive_keys = {'pickup_address', 'latitude', 'longitude', 'phone', 'email', 'document_url'}
+        for url, desc in self._get_pet_family_endpoints():
+            res = self.client.get(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK, f"Failed on {desc} ({url})")
+            self._assert_no_leaks_recursive(res.data, sensitive_keys, path=f"{desc}:{url}")
+
+    def test_recursive_leak_sweep_submitted_applicant_actor(self):
+        """
+        Verify that a customer with a SUBMITTED (pending review) application receives NO non-null
+        sensitive fields at any depth across all pet route families.
+        """
+        self.client.force_authenticate(user=self.pending_applicant)
+        sensitive_keys = {'pickup_address', 'latitude', 'longitude', 'phone', 'email', 'document_url'}
+        for url, desc in self._get_pet_family_endpoints():
+            res = self.client.get(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK, f"Failed on {desc} ({url})")
+            self._assert_no_leaks_recursive(res.data, sensitive_keys, path=f"{desc}:{url}")
+
+    def test_recursive_leak_sweep_approved_applicant_receives_confidential_fields(self):
+        """
+        Verify that an applicant with an APPROVED application successfully receives
+        unmasked confidential fields (pickup_address, latitude, longitude, phone, document_url) on detail endpoints.
+        """
+        self.client.force_authenticate(user=self.applicant)
+        for url in [f'/api/pets/{self.pet.public_id}/', f'/api/v1/pets/{self.pet.public_id}/', f'/api/v1/public/pets/{self.pet.public_id}/']:
+            res = self.client.get(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            shelter = res.data['shelter']
+            self.assertEqual(shelter['pickup_address'], '42 Rescue Lane')
+            self.assertIsNotNone(shelter['latitude'])
+            self.assertIsNotNone(shelter['longitude'])
+            self.assertEqual(shelter['phone'], '9876543210')
+            records = res.data['medical_overview']['medical_records']
+            self.assertEqual(records[0]['document_url'], self.doc_secret_url)
+
+    def test_recursive_leak_sweep_owner_shelter_receives_confidential_fields(self):
+        """
+        Verify that the owning shelter staff successfully receives unmasked confidential fields on detail endpoints.
+        """
+        self.client.force_authenticate(user=self.owner_user)
+        for url in [f'/api/pets/{self.pet.public_id}/', f'/api/v1/pets/{self.pet.public_id}/', f'/api/v1/public/pets/{self.pet.public_id}/']:
+            res = self.client.get(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            shelter = res.data['shelter']
+            self.assertEqual(shelter['pickup_address'], '42 Rescue Lane')
+            self.assertEqual(shelter['phone'], '9876543210')
+
+    def test_recursive_leak_sweep_admin_receives_confidential_fields(self):
+        """
+        Verify that platform admin successfully receives unmasked confidential fields on detail endpoints.
+        """
+        self.client.force_authenticate(user=self.admin)
+        for url in [f'/api/pets/{self.pet.public_id}/', f'/api/v1/pets/{self.pet.public_id}/', f'/api/v1/public/pets/{self.pet.public_id}/']:
+            res = self.client.get(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            shelter = res.data['shelter']
+            self.assertEqual(shelter['pickup_address'], '42 Rescue Lane')
+            self.assertEqual(shelter['phone'], '9876543210')
+
+
+class DistancePrivacyAndThrottlingTests(APITestCase):
+    """
+    Milestone 8b Task 3:
+    - Round distance_km to whole kilometres (minimum 1) in every response, for every actor.
+    - Two origins 100 m apart give the same value.
+    - Values are integers (not floats).
+    - Throttling (pets_geo, default 30/min) on requests carrying client-supplied coordinates.
+    - 429 after limit.
+    """
+
+    def setUp(self):
+        from decimal import Decimal
+        from rest_framework.test import APIClient
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+
+        # Shelter at Bangalore center: lat=12.971600, lng=77.594600
+        self.shelter_user = User.objects.create_user(
+            username='geoshelter',
+            email='geoshelter@test.org',
+            password='Password123!',
+            role='shelter'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.shelter_user,
+            organization_name='Geo Safe Shelter',
+            license_no='GEO-12345',
+            pickup_address='100 MG Road',
+            city='Bangalore',
+            latitude=Decimal('12.971600'),
+            longitude=Decimal('77.594600'),
+            is_active=True,
+            is_verified=True
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter,
+            name='PrivacyPup',
+            species='dog',
+            breed='Indie',
+            age_months=12,
+            gender='male',
+            size='medium',
+            status='available',
+            adoption_fee=Decimal('100.00')
+        )
+
+    def test_distance_km_values_are_integers_and_minimum_one(self):
+        # Query 1: Very close origin (100m away) -> should round to minimum 1
+        resp = self.client.get('/api/v1/pets/?lat=12.972000&lng=77.594600')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.data.get('results', resp.data)
+        self.assertTrue(len(results) > 0)
+        dist = results[0]['distance_km']
+        self.assertIsInstance(dist, int, f"distance_km should be int, got {type(dist)}")
+        self.assertEqual(dist, 1, "Distance under 1km should be clamped to minimum 1")
+
+        # Query 2: Detail endpoint
+        detail_resp = self.client.get(f'/api/v1/pets/{self.pet.public_id}/?lat=12.972000&lng=77.594600')
+        self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
+        detail_dist = detail_resp.data['distance_km']
+        self.assertIsInstance(detail_dist, int)
+        self.assertEqual(detail_dist, 1)
+
+    def test_two_origins_100m_apart_give_same_value(self):
+        # Origin A: 5.0 km away (approx 0.045 deg north: lat=13.0166, lng=77.5946)
+        lat_a = 13.016600
+        lng_a = 77.594600
+        # Origin B: 100 meters further north (approx 0.0009 deg north: lat=13.0175, lng=77.5946)
+        lat_b = 13.017500
+        lng_b = 77.594600
+
+        resp_a = self.client.get(f'/api/v1/pets/?lat={lat_a}&lng={lng_a}')
+        resp_b = self.client.get(f'/api/v1/pets/?lat={lat_b}&lng={lng_b}')
+
+        self.assertEqual(resp_a.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp_b.status_code, status.HTTP_200_OK)
+
+        dist_a = resp_a.data.get('results', resp_a.data)[0]['distance_km']
+        dist_b = resp_b.data.get('results', resp_b.data)[0]['distance_km']
+
+        self.assertIsInstance(dist_a, int)
+        self.assertIsInstance(dist_b, int)
+        self.assertEqual(dist_a, dist_b, f"Expected same whole km value for origins 100m apart, got {dist_a} vs {dist_b}")
+
+    def test_pets_geo_throttle_enforces_limit_and_returns_429(self):
+        from django.core.cache import cache
+        from unittest.mock import patch
+        cache.clear()
+
+        # Override throttle rate to 3/min via env
+        with patch.dict('os.environ', {'PETS_GEO_THROTTLE_RATE': '3/min'}):
+            # Requests carrying coordinates should be throttled after 3
+            url = '/api/v1/pets/?lat=12.971600&lng=77.594600'
+            for i in range(3):
+                r = self.client.get(url)
+                self.assertEqual(r.status_code, status.HTTP_200_OK, f"Request {i+1} should succeed")
+
+            # 4th request must be throttled with 429
+            r_throttled = self.client.get(url)
+            self.assertEqual(r_throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+            # Requests without coordinates from the same client are NOT throttled
+            r_no_geo = self.client.get('/api/v1/pets/')
+            self.assertEqual(r_no_geo.status_code, status.HTTP_200_OK)
+
+
+class FileCleanupOnDeleteTests(APITestCase):
+    """
+    Milestone 10a Task 4: post_delete storage cleanup for PetImage and PetMedicalRecord.
+    Asserts:
+      - File removed after delete
+      - External URL untouched
+      - Rolled-back delete keeps the file
+      - Cascade delete removes files
+      - Queryset .delete() removes files
+      - Storage errors are logged and swallowed without raising
+    """
+    def setUp(self):
+        import tempfile
+        self.temp_media = tempfile.mkdtemp()
+        self.override = override_settings(
+            MEDIA_ROOT=self.temp_media,
+            USE_CLOUDINARY=False,
+        )
+        self.override.enable()
+
+        self.user = User.objects.create_user(
+            username='cleanup_shelter',
+            email='cleanup@example.com',
+            password='pass',
+            role='shelter'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.user,
+            organization_name='Cleanup Shelter',
+            is_verified=True
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter,
+            name='CleanupPet',
+            species='dog',
+            age_months=12,
+            status='available'
+        )
+
+    def tearDown(self):
+        import shutil
+        self.override.disable()
+        shutil.rmtree(self.temp_media, ignore_errors=True)
+
+    def test_file_removed_after_delete_for_image_and_medical(self):
+        """Stored files are deleted via default_storage on transaction commit."""
+        from django.core.files.storage import default_storage
+        from django.core.files.base import ContentFile
+
+        img_path = default_storage.save('pets/test_img.jpg', ContentFile(b'test image bytes'))
+        doc_path = default_storage.save('medical/test_doc.pdf', ContentFile(b'%PDF-1.4 test bytes'))
+
+        img = PetImage.objects.create(pet=self.pet, image_url=img_path)
+        med = PetMedicalRecord.objects.create(
+            pet=self.pet,
+            title='Rabies Vaccine',
+            record_date='2026-01-01',
+            description=f'Document: {doc_path}'
+        )
+
+        self.assertTrue(default_storage.exists(img_path))
+        self.assertTrue(default_storage.exists(doc_path))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            img.delete()
+            med.delete()
+
+        self.assertFalse(default_storage.exists(img_path))
+        self.assertFalse(default_storage.exists(doc_path))
+
+    def test_external_url_untouched_on_delete(self):
+        """External image URLs and document URLs are never passed to storage.delete."""
+        from django.core.files.storage import default_storage
+        from unittest.mock import patch
+
+        img = PetImage.objects.create(pet=self.pet, image_url='https://images.unsplash.com/photo-sample-dog')
+        med = PetMedicalRecord.objects.create(
+            pet=self.pet,
+            title='External Certificate',
+            record_date='2026-01-01',
+            description='Document: https://external-docs.example.com/record.pdf'
+        )
+
+        with patch.object(default_storage, 'delete') as mock_delete:
+            with self.captureOnCommitCallbacks(execute=True):
+                img.delete()
+                med.delete()
+
+        mock_delete.assert_not_called()
+
+    def test_rolled_back_delete_keeps_file(self):
+        """When a deletion transaction is rolled back, the storage file is preserved."""
+        from django.core.files.storage import default_storage
+        from django.core.files.base import ContentFile
+        from django.db import transaction
+
+        img_path = default_storage.save('pets/keep_me.jpg', ContentFile(b'preserve this file'))
+        img = PetImage.objects.create(pet=self.pet, image_url=img_path)
+        img_id = img.id
+
+        try:
+            with transaction.atomic():
+                img.delete()
+                raise RuntimeError("Simulated transaction failure")
+        except RuntimeError:
+            pass
+
+        # File must still exist because on_commit callbacks were discarded
+        self.assertTrue(default_storage.exists(img_path))
+        self.assertTrue(PetImage.objects.filter(id=img_id).exists())
+
+    def test_cascade_delete_removes_files(self):
+        """Deleting a parent Pet cascades to PetImage and PetMedicalRecord and deletes files."""
+        from django.core.files.storage import default_storage
+        from django.core.files.base import ContentFile
+
+        img_path = default_storage.save('pets/cascade_img.jpg', ContentFile(b'cascade image'))
+        doc_path = default_storage.save('medical/cascade_doc.pdf', ContentFile(b'cascade doc'))
+
+        PetImage.objects.create(pet=self.pet, image_url=img_path)
+        PetMedicalRecord.objects.create(
+            pet=self.pet,
+            title='Checkup Record',
+            record_date='2026-01-01',
+            description=f'Document: {doc_path}'
+        )
+
+        self.assertTrue(default_storage.exists(img_path))
+        self.assertTrue(default_storage.exists(doc_path))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.pet.delete()
+
+        self.assertFalse(default_storage.exists(img_path))
+        self.assertFalse(default_storage.exists(doc_path))
+
+    def test_queryset_delete_removes_files(self):
+        """Bulk queryset .delete() fires signals and deletes all associated files."""
+        from django.core.files.storage import default_storage
+        from django.core.files.base import ContentFile
+
+        img1_path = default_storage.save('pets/qs1.jpg', ContentFile(b'image 1'))
+        img2_path = default_storage.save('pets/qs2.jpg', ContentFile(b'image 2'))
+
+        PetImage.objects.create(pet=self.pet, image_url=img1_path)
+        PetImage.objects.create(pet=self.pet, image_url=img2_path)
+
+        self.assertTrue(default_storage.exists(img1_path))
+        self.assertTrue(default_storage.exists(img2_path))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            PetImage.objects.filter(pet=self.pet).delete()
+
+        self.assertFalse(default_storage.exists(img1_path))
+        self.assertFalse(default_storage.exists(img2_path))
+
+    def test_storage_error_does_not_raise(self):
+        """Storage exceptions during deletion are logged and swallowed without breaking request."""
+        from django.core.files.storage import default_storage
+        from django.core.files.base import ContentFile
+        from unittest.mock import patch
+
+        img_path = default_storage.save('pets/error_test.jpg', ContentFile(b'test bytes'))
+        img = PetImage.objects.create(pet=self.pet, image_url=img_path)
+
+        with patch.object(default_storage, 'delete', side_effect=IOError("Simulated filesystem error")):
+            with self.captureOnCommitCallbacks(execute=True):
+                img.delete()  # Must not raise IOError
+
+        self.assertFalse(PetImage.objects.filter(id=img.id).exists())
+
+
+class CloudinaryRawStorageForMedicalDocumentsTests(APITestCase):
+    """
+    Milestone 10a Task 5: Cloudinary Raw Storage for Medical Documents.
+    Asserts:
+      - Raw storage configuration in settings uses RawMediaCloudinaryStorage with RESOURCE_TYPE='raw'
+      - Local storage resolves to FileSystemStorage
+      - Medical record creation uses raw document storage, not image storage
+      - All storage operations patched with zero network calls
+    """
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='vet_shelter',
+            email='vet@example.com',
+            password='pass',
+            role='shelter'
+        )
+        self.shelter = ShelterProfile.objects.create(
+            user=self.user,
+            organization_name='Vet Shelter',
+            is_verified=True
+        )
+        self.pet = Pet.objects.create(
+            shelter=self.shelter,
+            name='Luna',
+            species='cat',
+            age_months=8,
+            status='available'
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def test_cloudinary_raw_storage_backend_and_resource_type(self):
+        """When USE_CLOUDINARY is True, named storage raw_documents uses RawMediaCloudinaryStorage (RESOURCE_TYPE='raw')."""
+        from cloudinary_storage.storage import RawMediaCloudinaryStorage, MediaCloudinaryStorage
+        from django.core.files.storage import StorageHandler
+
+        custom_storages = {
+            'default': {
+                'BACKEND': 'cloudinary_storage.storage.MediaCloudinaryStorage',
+            },
+            'raw_documents': {
+                'BACKEND': 'cloudinary_storage.storage.RawMediaCloudinaryStorage',
+            },
+            'staticfiles': {
+                'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+            },
+        }
+        with override_settings(STORAGES=custom_storages, USE_CLOUDINARY=True):
+            handler = StorageHandler()
+            raw_storage = handler['raw_documents']
+            default_img_storage = handler['default']
+
+            self.assertIsInstance(raw_storage, RawMediaCloudinaryStorage)
+            self.assertEqual(raw_storage.RESOURCE_TYPE, 'raw')
+            self.assertIsInstance(default_img_storage, MediaCloudinaryStorage)
+            self.assertEqual(default_img_storage.RESOURCE_TYPE, 'image')
+
+    def test_local_storage_mode_uses_filesystem_storage(self):
+        """In local development (USE_CLOUDINARY=False), raw_documents resolves to FileSystemStorage."""
+        from django.core.files.storage import StorageHandler, FileSystemStorage
+
+        custom_storages = {
+            'default': {
+                'BACKEND': 'django.core.files.storage.FileSystemStorage',
+            },
+            'raw_documents': {
+                'BACKEND': 'django.core.files.storage.FileSystemStorage',
+            },
+        }
+        with override_settings(STORAGES=custom_storages, USE_CLOUDINARY=False):
+            handler = StorageHandler()
+            self.assertIsInstance(handler['raw_documents'], FileSystemStorage)
+
+    def test_medical_record_upload_calls_raw_document_storage_not_image_storage(self):
+        """Uploading a PDF/DOCX routes through get_document_storage (mocked raw storage), not image storage."""
+        from unittest.mock import MagicMock, patch
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        mock_raw_storage = MagicMock()
+        mock_raw_storage.save.return_value = 'medical/1/cert.pdf'
+        mock_raw_storage.url.return_value = 'https://res.cloudinary.com/cloud/raw/upload/v12345/medical/1/cert.pdf'
+
+        pdf_content = b"%PDF-1.4 sample pdf content for medical test"
+        uploaded_doc = SimpleUploadedFile("cert.pdf", pdf_content, content_type="application/pdf")
+
+        with patch('apps.pets.storage.get_document_storage', return_value=mock_raw_storage), \
+             patch('apps.pets.serializers.get_document_storage', return_value=mock_raw_storage), \
+             patch('apps.pets.views.get_document_storage', return_value=mock_raw_storage):
+            with patch('django.core.files.storage.default_storage.save') as mock_default_save:
+                url = reverse('pet_medical_records', kwargs={'pet_public_id': self.pet.public_id})
+                data = {
+                    'title': 'Vaccination Certificate',
+                    'record_date': '2026-05-01',
+                    'description': 'Annual rabies vaccination',
+                    'document': uploaded_doc,
+                }
+                response = self.client.post(url, data, format='multipart')
+
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+                # Verify raw storage was used
+                mock_raw_storage.save.assert_called_once()
+                mock_raw_storage.url.assert_called_once()
+                # Default image storage was NOT called for document save
+                mock_default_save.assert_not_called()
+
+
+
+
+
+
+
 
 

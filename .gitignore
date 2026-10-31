@@ -39,9 +39,18 @@ venv.bak/
 .env.*
 !.env.example
 
-# Databases
+# Databases & Backups
 *.sqlite3
 db.sqlite3
+*.dump
+backup_*
+backup_*.dump
+
+# One-off scratch scripts & artifacts
+scratch/
+walkthrough*.py
+test_webhook*.py
+walk_urls*.py
 
 # Django media and static files
 media/
@@ -65,4 +74,4 @@ backend/staticfiles/
 Thumbs.db
 
 # Root IDE junction
-apps
+/apps

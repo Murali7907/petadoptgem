@@ -1,0 +1,184 @@
+name: CI
+
+'on':
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test & Schema Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: pet_adoption_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres_ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DEBUG: "True"
+      SECRET_KEY: "django-insecure-ci-test-key-for-github-actions-petadopt"
+      DB_NAME: "pet_adoption_test"
+      DB_USER: "postgres"
+      DB_PASSWORD: "postgres_ci_password"
+      DB_HOST: "127.0.0.1"
+      DB_PORT: "5432"
+      RAZORPAY_KEY_ID: "ci-dummy-razorpay-key-id-0001"
+      RAZORPAY_KEY_SECRET: "ci-dummy-razorpay-key-secret-0002"
+      RAZORPAY_WEBHOOK_SECRET: "ci-dummy-razorpay-webhook-secret-0003"
+      USE_CLOUDINARY: "False"
+      EMAIL_BACKEND: "django.core.mail.backends.locmem.EmailBackend"
+      DEFAULT_FROM_EMAIL: "KindHeart <noreply@example.invalid>"
+      FRONTEND_BASE_URL: "http://localhost:3000"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if ! pip install -r backend/requirements.lock.txt; then
+            echo "::warning::requirements.lock.txt failed to install on Linux, falling back to requirements.txt"
+            pip install -r backend/requirements.txt
+          fi
+
+      - name: Check Django configuration
+        env:
+          DEBUG: "True"
+          SECRET_KEY: "django-insecure-ci-test-key-for-github-actions-petadopt"
+          DB_NAME: "pet_adoption_test"
+          DB_USER: "postgres"
+          DB_PASSWORD: "postgres_ci_password"
+          DB_HOST: "127.0.0.1"
+          DB_PORT: "5432"
+        run: python backend/manage.py check
+
+      - name: Check pending migrations
+        env:
+          DEBUG: "True"
+          SECRET_KEY: "django-insecure-ci-test-key-for-github-actions-petadopt"
+          DB_NAME: "pet_adoption_test"
+          DB_USER: "postgres"
+          DB_PASSWORD: "postgres_ci_password"
+          DB_HOST: "127.0.0.1"
+          DB_PORT: "5432"
+        run: python backend/manage.py makemigrations --check --dry-run
+
+      - name: Validate OpenAPI schema
+        env:
+          DEBUG: "True"
+          SECRET_KEY: "django-insecure-ci-test-key-for-github-actions-petadopt"
+          DB_NAME: "pet_adoption_test"
+          DB_USER: "postgres"
+          DB_PASSWORD: "postgres_ci_password"
+          DB_HOST: "127.0.0.1"
+          DB_PORT: "5432"
+        run: python -X utf8 backend/manage.py spectacular --validate --fail-on-warn
+
+      - name: Run test suite
+        env:
+          DEBUG: "True"
+          SECRET_KEY: "django-insecure-ci-test-key-for-github-actions-petadopt"
+          DB_NAME: "pet_adoption_test"
+          DB_USER: "postgres"
+          DB_PASSWORD: "postgres_ci_password"
+          DB_HOST: "127.0.0.1"
+          DB_PORT: "5432"
+          RAZORPAY_KEY_ID: "ci-dummy-razorpay-key-id-0001"
+          RAZORPAY_KEY_SECRET: "ci-dummy-razorpay-key-secret-0002"
+          RAZORPAY_WEBHOOK_SECRET: "ci-dummy-razorpay-webhook-secret-0003"
+          USE_CLOUDINARY: "False"
+          EMAIL_BACKEND: "django.core.mail.backends.locmem.EmailBackend"
+          DEFAULT_FROM_EMAIL: "KindHeart <noreply@example.invalid>"
+          FRONTEND_BASE_URL: "http://localhost:3000"
+        run: python backend/manage.py test --noinput
+
+  deploy-check:
+    name: Production Deployment Security Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      DEBUG: "False"
+      SECRET_KEY: "ci-production-deploy-check-secret-key-64chars-long-random-string-a1b2c3d4"
+      ALLOWED_HOSTS: "petadopt.example.invalid,localhost"
+      DB_NAME: "pet_adoption_prod"
+      DB_USER: "prod_user"
+      DB_PASSWORD: "prod_password_dummy"
+      DB_HOST: "127.0.0.1"
+      DB_PORT: "5432"
+      RAZORPAY_KEY_ID: "ci-dummy-razorpay-key-id-0001"
+      RAZORPAY_KEY_SECRET: "ci-dummy-razorpay-key-secret-0002"
+      RAZORPAY_WEBHOOK_SECRET: "ci-dummy-razorpay-webhook-secret-0003"
+      USE_CLOUDINARY: "False"
+      EMAIL_BACKEND: "django.core.mail.backends.smtp.EmailBackend"
+      EMAIL_HOST: "smtp.sendgrid.net"
+      DEFAULT_FROM_EMAIL: "KindHeart <no-reply@example.invalid>"
+      FRONTEND_BASE_URL: "https://petadopt.example.invalid"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if ! pip install -r backend/requirements.lock.txt; then
+            echo "::warning::requirements.lock.txt failed to install on Linux, falling back to requirements.txt"
+            pip install -r backend/requirements.txt
+          fi
+
+      - name: Run deployment security check
+        env:
+          DEBUG: "False"
+          SECRET_KEY: "ci-production-deploy-check-secret-key-64chars-long-random-string-a1b2c3d4"
+          ALLOWED_HOSTS: "petadopt.example.invalid,localhost"
+          DB_NAME: "pet_adoption_prod"
+          DB_USER: "prod_user"
+          DB_PASSWORD: "prod_password_dummy"
+          DB_HOST: "127.0.0.1"
+          DB_PORT: "5432"
+          RAZORPAY_KEY_ID: "ci-dummy-razorpay-key-id-0001"
+          RAZORPAY_KEY_SECRET: "ci-dummy-razorpay-key-secret-0002"
+          RAZORPAY_WEBHOOK_SECRET: "ci-dummy-razorpay-webhook-secret-0003"
+          USE_CLOUDINARY: "False"
+          EMAIL_BACKEND: "django.core.mail.backends.smtp.EmailBackend"
+          EMAIL_HOST: "smtp.sendgrid.net"
+          DEFAULT_FROM_EMAIL: "KindHeart <no-reply@example.invalid>"
+          FRONTEND_BASE_URL: "https://petadopt.example.invalid"
+        run: python backend/manage.py check --deploy --fail-level WARNING

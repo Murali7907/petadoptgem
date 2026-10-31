@@ -1,5 +1,7 @@
+import re
 import uuid
 from decimal import Decimal
+from django.core import mail
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -35,9 +37,22 @@ class EndToEndContractFlowTestCase(TestCase):
             'phone': '9876543210',
             'address': '100 Koramangala 4th Block, Bangalore'
         }
-        res_cust_reg = self.client.post('/api/auth/register/', data=cust_payload, format='json')
+        with self.captureOnCommitCallbacks(execute=True):
+            res_cust_reg = self.client.post('/api/auth/register/', data=cust_payload, format='json')
         self.assertEqual(res_cust_reg.status_code, status.HTTP_201_CREATED)
+
+        # 1.1b Adopter verifies email via real endpoint using outbox token
+        self.assertGreaterEqual(len(mail.outbox), 1)
+        v_mail = [m for m in mail.outbox if 'e2e_customer@example.com' in m.to][-1]
+        token_match = re.search(r'token=([A-Za-z0-9_:-]+)', v_mail.body)
+        self.assertIsNotNone(token_match)
+        v_token = token_match.group(1)
+
+        res_verify = self.client.post('/api/auth/verify-email/', data={'token': v_token}, format='json')
+        self.assertEqual(res_verify.status_code, status.HTTP_200_OK)
+
         customer_user = User.objects.get(username='e2e_customer')
+        self.assertTrue(customer_user.email_verified)
 
         # 1.2 Register Shelter
         shelter_payload = {
@@ -57,6 +72,8 @@ class EndToEndContractFlowTestCase(TestCase):
         self.assertEqual(res_shelter_reg.status_code, status.HTTP_201_CREATED)
         shelter_user = User.objects.get(username='e2e_shelter')
         shelter_profile = ShelterProfile.objects.get(user=shelter_user)
+        shelter_profile.is_verified = True
+        shelter_profile.save()
 
         # 1.3 Shelter Login (JWT token pair check)
         res_login = self.client.post('/api/auth/login/', data={
@@ -112,8 +129,12 @@ class EndToEndContractFlowTestCase(TestCase):
         pet_public_id = res_pet_create.data['public_id']
 
         # 2.2 Upload Pet Image (/api/pets/<id>/images/)
+        import io
+        from PIL import Image
         from django.core.files.uploadedfile import SimpleUploadedFile
-        test_img = SimpleUploadedFile("rocky.jpg", b"fake_image_bytes", content_type="image/jpeg")
+        img_io = io.BytesIO()
+        Image.new('RGB', (10, 10), color='blue').save(img_io, format='JPEG')
+        test_img = SimpleUploadedFile("rocky.jpg", img_io.getvalue(), content_type="image/jpeg")
         res_img = self.client.post(
             f'/api/pets/{pet_public_id}/images/',
             data={'images': [test_img], 'is_primary': 'true'},
@@ -213,6 +234,7 @@ class EndToEndContractFlowTestCase(TestCase):
         res_assign = self.client.post('/api/deliveries/assign/', data=assign_payload, format='json')
         self.assertEqual(res_assign.status_code, status.HTTP_201_CREATED)
         delivery_public_id = res_assign.data['public_id']
+        pickup_code = res_assign.data['pickup_otp']
         delivery_obj = PetDelivery.objects.get(public_id=delivery_public_id)
 
         # 4.2 Driver Logs In and Views Active Task (/api/deliveries/driver-active/)
@@ -227,11 +249,11 @@ class EndToEndContractFlowTestCase(TestCase):
         self.assertEqual(res_drv_active.status_code, status.HTTP_200_OK)
         self.assertEqual(res_drv_active.data['public_id'], str(delivery_public_id))
 
-        # 4.3 Driver verifies Pickup OTP at shelter
-        pickup_code = delivery_obj.pickup_otp
-        res_pickup = self.client.post(f'/api/deliveries/{delivery_public_id}/pickup/', data={
-            'otp': pickup_code
-        }, format='json')
+        # 4.3 Driver Verifies Pickup OTP at shelter (returned once to shelter in assign response body)
+        with self.captureOnCommitCallbacks(execute=True):
+            res_pickup = self.client.post(f'/api/deliveries/{delivery_public_id}/pickup/', data={
+                'otp': pickup_code
+            }, format='json')
         self.assertEqual(res_pickup.status_code, status.HTTP_200_OK)
 
         # 4.4 Driver Sends Location Breadcrumbs (/api/deliveries/<id>/ping/)
@@ -248,14 +270,25 @@ class EndToEndContractFlowTestCase(TestCase):
         self.assertEqual(res_track.status_code, status.HTTP_200_OK)
         self.assertEqual(res_track.data['current_coordinates']['latitude'], '12.950000')
         self.assertEqual(res_track.data['current_coordinates']['longitude'], '77.660000')
-        customer_doorstep_otp = res_track.data['delivery']['doorstep_otp']
+        # Hardened architecture: plaintext OTP stripped from tracking payload; dispatched via secure email
+        self.assertNotIn('doorstep_otp', res_track.data['delivery'])
+        self.assertTrue(bool(res_track.data['delivery']['doorstep_otp_sent_at']))
+        match = re.search(r"OTP is:\s*(\d{6})", mail.outbox[-1].body)
+        customer_doorstep_otp = match.group(1) if match else ''
         self.assertTrue(bool(customer_doorstep_otp))
 
-        # 4.6 Driver Verifies Doorstep OTP (/api/deliveries/<id>/verify-otp/)
+        # 4.5b Driver Collects COD Cash (/api/deliveries/<id>/collect-cash/)
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {driver_token}')
-        res_verify_otp = self.client.post(f'/api/deliveries/{delivery_public_id}/verify-otp/', data={
-            'otp': customer_doorstep_otp
+        res_cash = self.client.post(f'/api/deliveries/{delivery_public_id}/collect-cash/', data={
+            'amount': str(delivery_obj.application.total_amount)
         }, format='json')
+        self.assertEqual(res_cash.status_code, status.HTTP_200_OK)
+
+        # 4.6 Driver Verifies Doorstep OTP (/api/deliveries/<id>/verify-otp/)
+        with self.captureOnCommitCallbacks(execute=True):
+            res_verify_otp = self.client.post(f'/api/deliveries/{delivery_public_id}/verify-otp/', data={
+                'otp': customer_doorstep_otp
+            }, format='json')
         self.assertEqual(res_verify_otp.status_code, status.HTTP_200_OK)
 
         # Verify delivery is delivered and application is completed

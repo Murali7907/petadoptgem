@@ -1,8 +1,10 @@
 from django.urls import path, include
 from rest_framework.routers import SimpleRouter
-from rest_framework_simplejwt.views import TokenRefreshView, TokenVerifyView
+from rest_framework_simplejwt.views import TokenVerifyView
 from .views import (
     CustomTokenObtainPairView, 
+    CustomTokenRefreshView,
+    LogoutView,
     RegisterView, 
     UserProfileView,
     ShelterDriverCreateView,
@@ -11,6 +13,11 @@ from .views import (
     NotificationListView,
     NotificationMarkReadView,
     NotificationMarkAllReadView,
+    PasswordResetView,
+    PasswordResetConfirmView,
+    PasswordChangeView,
+    EmailVerifyView,
+    ResendVerificationEmailView,
 )
 
 router = SimpleRouter()
@@ -19,9 +26,15 @@ router.register(r'admin/shelters', AdminShelterVerificationViewSet, basename='ad
 urlpatterns = [
     path('register/', RegisterView.as_view(), name='auth_register'),
     path('login/', CustomTokenObtainPairView.as_view(), name='auth_login'),
+    path('logout/', LogoutView.as_view(), name='auth_logout'),
     path('drivers/create/', ShelterDriverCreateView.as_view(), name='auth_driver_create'),
-    path('token/refresh/', TokenRefreshView.as_view(), name='auth_token_refresh'),
+    path('token/refresh/', CustomTokenRefreshView.as_view(), name='auth_token_refresh'),
     path('token/verify/', TokenVerifyView.as_view(), name='auth_token_verify'),
+    path('password-reset/', PasswordResetView.as_view(), name='auth_password_reset'),
+    path('password-reset/confirm/', PasswordResetConfirmView.as_view(), name='auth_password_reset_confirm'),
+    path('password/change/', PasswordChangeView.as_view(), name='auth_password_change'),
+    path('verify-email/', EmailVerifyView.as_view(), name='auth_verify_email'),
+    path('resend-verification/', ResendVerificationEmailView.as_view(), name='auth_resend_verification'),
     path('me/', UserProfileView.as_view(), name='auth_me'),
     path('notifications/', NotificationListView.as_view(), name='notification-list'),
     path('notifications/<uuid:public_id>/read/', NotificationMarkReadView.as_view(), name='notification-mark-read'),
@@ -29,3 +42,4 @@ urlpatterns = [
     path('admin/dashboard/stats/', AdminPlatformDashboardView.as_view(), name='admin-dashboard-stats'),
     path('', include(router.urls)),
 ]
+

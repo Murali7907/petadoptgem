@@ -6,6 +6,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from decimal import Decimal
 from django.shortcuts import get_object_or_404
 from django.db import transaction, models, DatabaseError, IntegrityError, InternalError
 from rest_framework import viewsets, mixins, status, permissions
@@ -13,6 +14,7 @@ from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, PermissionDenied, NotFound
+from drf_spectacular.utils import extend_schema
 from .models import AdoptionApplication, AdoptionReview
 from .permissions import IsCustomer, IsApplicationOwner, IsShelterForApplication, IsDeliveredApplicationCustomer
 from .serializers import (
@@ -25,10 +27,13 @@ from .serializers import (
 )
 from apps.pets.models import Pet
 from apps.pets.permissions import IsShelterOwner
+from apps.accounts.permissions import IsVerifiedShelter
+from apps.adoptions.services import assert_application_refund_safe
 
 class CustomerApplicationViewSet(mixins.ListModelMixin, 
                                 mixins.RetrieveModelMixin, 
                                 mixins.CreateModelMixin, 
+                                mixins.UpdateModelMixin,
                                 viewsets.GenericViewSet):
     """
     ViewSet for Customer users to view their application history, submit new applications,
@@ -36,12 +41,13 @@ class CustomerApplicationViewSet(mixins.ListModelMixin,
     """
     lookup_field = 'public_id'
     permission_classes = [permissions.IsAuthenticated, IsCustomer]
+    ordering = ['-submitted_at', '-id']
 
     def get_queryset(self):
         user = self.request.user
         if not user.is_authenticated:
             return AdoptionApplication.objects.none()
-        return AdoptionApplication.objects.filter(applicant=user).select_related('pet', 'pet__shelter')
+        return AdoptionApplication.objects.filter(applicant=user).select_related('pet', 'pet__shelter').order_by('-submitted_at', '-id')
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -59,8 +65,22 @@ class CustomerApplicationViewSet(mixins.ListModelMixin,
     def cancel(self, request, public_id=None):
         application = self.get_object()
 
-        if application.status not in ['submitted', 'reviewing']:
+        if application.status not in ['submitted', 'reviewing', 'approved']:
             raise ValidationError(f"Cannot cancel application with status '{application.get_status_display()}'.")
+
+        if application.status == 'approved':
+            assert_application_refund_safe(application)
+            from apps.logistics.models import PetDelivery
+            deliv = PetDelivery.objects.filter(application=application).first()
+
+            if deliv and deliv.status in ['out_for_delivery', 'delivered']:
+                raise ValidationError("Cannot cancel application while delivery is in progress or completed.")
+            if deliv and deliv.status == 'assigned':
+                deliv.status = 'failed'
+                deliv.save(update_fields=['status'])
+                if deliv.driver:
+                    deliv.driver.is_available = True
+                    deliv.driver.save(update_fields=['is_available'])
 
         application.status = 'cancelled'
         application.save()
@@ -79,13 +99,19 @@ class ShelterApplicationViewSet(viewsets.ReadOnlyModelViewSet):
     lookup_field = 'public_id'
     permission_classes = [permissions.IsAuthenticated, IsShelterOwner]
     serializer_class = ShelterApplicationSerializer
+    ordering = ['-submitted_at', '-id']
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve']:
+            return [permissions.IsAuthenticated(), IsShelterOwner()]
+        return [permissions.IsAuthenticated(), IsVerifiedShelter(), IsShelterOwner()]
 
     def get_queryset(self):
         user = self.request.user
         if not user.is_authenticated or not hasattr(user, 'shelter_profile'):
             return AdoptionApplication.objects.none()
 
-        qs = AdoptionApplication.objects.filter(pet__shelter=user.shelter_profile).select_related('applicant', 'pet', 'pet__shelter')
+        qs = AdoptionApplication.objects.filter(pet__shelter=user.shelter_profile).select_related('applicant', 'pet', 'pet__shelter').order_by('-submitted_at', '-id')
 
         # Filter by status query param
         app_status = self.request.query_params.get('status')
@@ -102,6 +128,9 @@ class ShelterApplicationViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['post'], url_path='review')
     def review(self, request, public_id=None):
         application = self.get_object()
+
+        if application.status == 'approved':
+            assert_application_refund_safe(application)
 
         if application.status != 'submitted':
             raise ValidationError(f"Only applications with status 'submitted' can be moved to reviewing (current status: '{application.get_status_display()}').")
@@ -163,8 +192,18 @@ class ShelterApplicationViewSet(viewsets.ReadOnlyModelViewSet):
         decision_serializer.is_valid(raise_exception=True)
         notes = decision_serializer.validated_data.get('notes', '')
 
-        if application.status in ['approved', 'completed', 'cancelled']:
+        if application.status in ['completed', 'cancelled']:
             raise ValidationError(f"Cannot reject an application with status '{application.get_status_display()}'.")
+
+        if application.status == 'approved':
+            assert_application_refund_safe(application)
+            from apps.logistics.models import PetDelivery
+            active_delivery = PetDelivery.objects.filter(
+                application=application,
+                status__in=['assigned', 'out_for_delivery']
+            ).first()
+            if active_delivery:
+                raise ValidationError("Cannot reject an approved application with an active delivery task. Please cancel the delivery task first.")
 
         application.status = 'rejected'
         if notes:
@@ -245,7 +284,7 @@ class ShelterReviewListView(APIView):
             return Response({"detail": "User is not associated with a shelter profile."}, status=status.HTTP_403_FORBIDDEN)
 
         shelter = request.user.shelter_profile
-        reviews = AdoptionReview.objects.filter(application__pet__shelter=shelter).order_by('-created_at')
+        reviews = AdoptionReview.objects.filter(application__pet__shelter=shelter).order_by('-created_at', '-id')
         avg_score = reviews.aggregate(models.Avg('shelter_rating'))['shelter_rating__avg']
 
         return Response({
@@ -268,7 +307,7 @@ class DeliveryReviewListView(APIView):
             return Response({"detail": "User is not associated with a delivery profile."}, status=status.HTTP_403_FORBIDDEN)
 
         driver = request.user.delivery_profile
-        reviews = AdoptionReview.objects.filter(application__delivery__driver=driver).order_by('-created_at')
+        reviews = AdoptionReview.objects.filter(application__delivery__driver=driver).order_by('-created_at', '-id')
         avg_score = reviews.aggregate(models.Avg('driver_rating'))['driver_rating__avg']
 
         return Response({
@@ -295,11 +334,16 @@ def resolve_application(identifier):
     return app
 
 
+@extend_schema(
+    request=ApplicationCreateSerializer,
+    responses={201: CustomerApplicationSerializer}
+)
 class CustomerApplicationApplyView(APIView):
     """
     POST /api/adoptions/apply/
     Customer application submission with duplicate checks and distance calculation.
     """
+    serializer_class = ApplicationCreateSerializer
     permission_classes = [permissions.IsAuthenticated, IsCustomer]
 
     def post(self, request):
@@ -309,30 +353,38 @@ class CustomerApplicationApplyView(APIView):
         return Response(CustomerApplicationSerializer(application, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema(
+    responses={200: CustomerApplicationSerializer(many=True)}
+)
 class CustomerMyApplicationsView(APIView):
     """
     GET /api/adoptions/my-applications/
     Returns authenticated customer's application history.
     """
+    serializer_class = CustomerApplicationSerializer
     permission_classes = [permissions.IsAuthenticated, IsCustomer]
 
     def get(self, request):
-        applications = AdoptionApplication.objects.filter(applicant=request.user).select_related('pet', 'pet__shelter').order_by('-submitted_at')
+        applications = AdoptionApplication.objects.filter(applicant=request.user).select_related('pet', 'pet__shelter').order_by('-submitted_at', '-id')
         return Response(CustomerApplicationSerializer(applications, many=True, context={'request': request}).data, status=status.HTTP_200_OK)
 
 
+@extend_schema(
+    responses={200: ShelterApplicationSerializer(many=True)}
+)
 class ShelterApplicationsListView(APIView):
     """
     GET /api/adoptions/shelter-applications/
     Returns applications for pets belonging to the shelter.
     """
+    serializer_class = ShelterApplicationSerializer
     permission_classes = [permissions.IsAuthenticated, IsShelterOwner]
 
     def get(self, request):
         if not hasattr(request.user, 'shelter_profile') or not request.user.shelter_profile:
             return Response({"detail": "User is not associated with a shelter profile."}, status=status.HTTP_403_FORBIDDEN)
 
-        qs = AdoptionApplication.objects.filter(pet__shelter=request.user.shelter_profile).select_related('applicant', 'pet', 'pet__shelter').order_by('-submitted_at')
+        qs = AdoptionApplication.objects.filter(pet__shelter=request.user.shelter_profile).select_related('applicant', 'pet', 'pet__shelter').order_by('-submitted_at', '-id')
         app_status = request.query_params.get('status')
         if app_status:
             qs = qs.filter(status=app_status)
@@ -350,12 +402,17 @@ class ShelterApplicationsListView(APIView):
         return Response(ShelterApplicationSerializer(qs, many=True).data, status=status.HTTP_200_OK)
 
 
+@extend_schema(
+    request=ApplicationDecisionSerializer,
+    responses={200: ShelterApplicationSerializer}
+)
 class AdoptionStatusUpdateView(APIView):
     """
     PATCH /api/adoptions/<id>/status/
     Shelter approve/reject action.
     """
-    permission_classes = [permissions.IsAuthenticated, IsShelterOwner]
+    serializer_class = ApplicationDecisionSerializer
+    permission_classes = [permissions.IsAuthenticated, IsVerifiedShelter, IsShelterOwner]
 
     def patch(self, request, id):
         application = resolve_application(id)
@@ -367,6 +424,9 @@ class AdoptionStatusUpdateView(APIView):
 
         if new_status not in ['approved', 'rejected', 'reviewing']:
             raise ValidationError({"status": "Status must be 'approved', 'rejected', or 'reviewing'."})
+
+        if application.status == 'approved' and new_status != 'approved':
+            assert_application_refund_safe(application)
 
         if new_status == 'approved':
             with transaction.atomic():
@@ -393,6 +453,8 @@ class AdoptionStatusUpdateView(APIView):
                     comp.save()
 
         elif new_status == 'rejected':
+
+
             application.status = 'rejected'
             if notes:
                 application.application_notes = f"{application.application_notes}\n[Rejection Reason]: {notes}".strip()
@@ -408,4 +470,9 @@ class AdoptionStatusUpdateView(APIView):
             "message": f"Application status updated to '{new_status}'.",
             "application": ShelterApplicationSerializer(application).data
         }, status=status.HTTP_200_OK)
+
+
+AdoptionApplicationDetailView = AdoptionStatusUpdateView
+
+
 

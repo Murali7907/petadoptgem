@@ -16,7 +16,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
-from django.db.models import F, Value, FloatField, Expression
+from django.db.models import F, Value, FloatField, Expression, Q
 from django.db.models.functions import Radians, Sin, Cos, ASin, Sqrt, Power
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiTypes
 from .models import Pet, PetImage, PetMedicalRecord, FavoritePet
@@ -33,7 +33,9 @@ from .serializers import (
     PetSummarySerializer,
     FavoritePetSerializer,
 )
-from apps.accounts.permissions import IsShelterRole, IsAdminRole
+from apps.accounts.permissions import IsShelterRole, IsAdminRole, IsVerifiedShelter
+from apps.accounts.models import ShelterProfile
+from .storage import get_document_storage
 
 class Point:
     """
@@ -54,7 +56,7 @@ class Distance(Expression):
     """
     Geodesic distance calculation in meters between shelter (latitude, longitude)
     and a reference Point using the spherical Haversine formula.
-    Provides standard PostGIS Distance('shelter__location', Point(...)) interface.
+    Provides drop-in Distance('shelter__location', Point(...)) interface with distance computed with the Haversine formula in SQL.
     """
     def __init__(self, field_name, point, output_field=None):
         self.field_name = field_name
@@ -92,17 +94,48 @@ class PetViewSet(viewsets.ModelViewSet):
     ordering_fields = ['created_at', 'adoption_fee', 'age_months', 'name']
     ordering = ['-created_at']
 
+    def get_queryset(self):
+        user = self.request.user if hasattr(self, 'request') else None
+        qs = Pet.objects.all().select_related('shelter', 'shelter__user').prefetch_related('images', 'medical_records')
+        if user and user.is_authenticated:
+            if user.is_superuser or user.role == 'admin':
+                pass
+            elif user.role == 'shelter' and hasattr(user, 'shelter_profile'):
+                qs = qs.filter(Q(shelter=user.shelter_profile) | Q(shelter__is_verified=True))
+            else:
+                qs = qs.filter(shelter__is_verified=True)
+                if self.action == 'list':
+                    qs = qs.filter(status='available')
+        else:
+            qs = qs.filter(shelter__is_verified=True)
+            if self.action == 'list':
+                qs = qs.filter(status='available')
+
+        if hasattr(self, 'request') and self.request:
+            lat = self.request.query_params.get('lat')
+            lng = self.request.query_params.get('lng')
+            if lat is not None and lng is not None:
+                try:
+                    lat_val = float(lat)
+                    lng_val = float(lng)
+                    qs = qs.annotate(
+                        distance_meters=Distance('shelter__location', Point(float(lng_val), float(lat_val), srid=4326))
+                    ).order_by('distance_meters')
+                except (ValueError, TypeError):
+                    pass
+        return qs
+
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
             return [permissions.AllowAny()]
-        return [(IsShelterRole | IsAdminRole)()]
+        return [IsVerifiedShelter()]
 
     def get_serializer_class(self):
         if self.action == 'list':
-            return PetListSerializer
+            return PublicPetListSerializer
         elif self.action in ['create', 'update', 'partial_update']:
             return PetWriteSerializer
-        return PetDetailSerializer
+        return PublicPetDetailSerializer
 
     def get_object(self):
         queryset = self.filter_queryset(self.get_queryset())
@@ -121,9 +154,6 @@ class PetViewSet(viewsets.ModelViewSet):
             obj = queryset.filter(id=int(lookup_val)).first()
 
         if not obj:
-            obj = queryset.filter(public_id=lookup_val).first()
-
-        if not obj:
             raise NotFound("Pet not found.")
 
         self.check_object_permissions(self.request, obj)
@@ -131,15 +161,16 @@ class PetViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         user = self.request.user
-        if user.is_superuser or user.role == 'admin':
-            shelter = getattr(user, 'shelter_profile', None)
+        shelter = getattr(user, 'shelter_profile', None)
+        if (user.is_superuser or user.role == 'admin') and not shelter:
+            shelter_id = self.request.data.get('shelter') or self.request.data.get('shelter_id')
+            if shelter_id:
+                shelter = ShelterProfile.objects.filter(id=shelter_id).first()
             if not shelter:
-                raise PermissionDenied("Admin user must have a ShelterProfile associated to post pets.")
-        else:
-            if not hasattr(user, 'shelter_profile'):
-                raise PermissionDenied("Only registered shelters can create pet listings.")
-            shelter = user.shelter_profile
-        
+                raise PermissionDenied("Admin user must have a ShelterProfile associated or specify a valid shelter to post pets.")
+        elif not shelter:
+            raise PermissionDenied("Only registered shelters can create pet listings.")
+
         serializer.save(shelter=shelter)
 
 
@@ -151,6 +182,17 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
     lookup_field = 'public_id'
     permission_classes = [IsShelterOwner]
     filterset_class = PetFilter
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve'] and self.request.method in permissions.SAFE_METHODS:
+            return [IsShelterOwner()]
+        if self.action in ['medical', 'images']:
+            if self.request.method in permissions.SAFE_METHODS:
+                return [IsShelterOwner()]
+            return [IsVerifiedShelter(), IsShelterOwner()]
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'delete_image']:
+            return [IsVerifiedShelter(), IsShelterOwner()]
+        return [IsVerifiedShelter(), IsShelterOwner()]
     search_fields = ['name', 'breed', 'description']
     ordering_fields = ['created_at', 'adoption_fee', 'age_months', 'name']
     ordering = ['-created_at']
@@ -193,20 +235,19 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
         if request.method == 'GET':
             if not medical_record:
                 return Response([], status=status.HTTP_200_OK)
-            serializer = PetMedicalRecordSerializer(medical_record)
+            serializer = PetMedicalRecordSerializer(medical_record, context={'request': request})
             return Response(serializer.data)
 
         elif request.method in ['PUT', 'PATCH']:
             doc_file = request.FILES.get('document') or request.FILES.get('file')
             data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
             if doc_file:
-                from django.core.files.storage import default_storage, storages
-                try:
-                    storage = storages['raw']
-                except Exception:
-                    storage = default_storage
-                saved_path = storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
-                doc_url = storage.url(saved_path)
+                from .validators import validate_medical_document
+                validate_medical_document(doc_file)
+                from .storage import get_document_storage
+                doc_storage = get_document_storage()
+                saved_path = doc_storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
+                doc_url = doc_storage.url(saved_path)
                 curr_desc = data.get('description', '')
                 if not curr_desc and medical_record:
                     curr_desc = medical_record.clinical_description
@@ -216,13 +257,13 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
                     data['description'] = f"{data['description']}\nDocument: {medical_record.document}".strip()
 
             if not medical_record:
-                serializer = PetMedicalRecordSerializer(data=data)
+                serializer = PetMedicalRecordSerializer(data=data, context={'request': request})
                 serializer.is_valid(raise_exception=True)
                 serializer.save(pet=pet)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             else:
                 partial = (request.method == 'PATCH')
-                serializer = PetMedicalRecordSerializer(medical_record, data=data, partial=partial)
+                serializer = PetMedicalRecordSerializer(medical_record, data=data, partial=partial, context={'request': request})
                 serializer.is_valid(raise_exception=True)
                 serializer.save()
                 return Response(serializer.data)
@@ -241,6 +282,9 @@ class ShelterPetViewSet(viewsets.ModelViewSet):
             created_images = []
 
             if image_files:
+                from .validators import validate_pet_image
+                for img_file in image_files:
+                    validate_pet_image(img_file)
                 caption = request.data.get('caption', f"Gallery image for {pet.name}")
                 is_primary = str(request.data.get('is_primary', 'false')).lower() in ('true', '1') if isinstance(request.data.get('is_primary'), str) else bool(request.data.get('is_primary', False))
                 for img_file in image_files:
@@ -309,7 +353,7 @@ class PetImageCreateView(generics.CreateAPIView):
     POST /api/pets/<id>/images/
     """
     serializer_class = PetImageSerializer
-    permission_classes = [IsShelterRole | IsAdminRole]
+    permission_classes = [IsVerifiedShelter]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def create(self, request, *args, **kwargs):
@@ -321,8 +365,11 @@ class PetImageCreateView(generics.CreateAPIView):
                 raise PermissionDenied("You can only add images to your own shelter's pets.")
 
         # Support multi-image files in request.FILES
-        files = request.FILES.getlist('images') or request.FILES.getlist('image')
+        files = request.FILES.getlist('images') or request.FILES.getlist('image') or request.FILES.getlist('file')
         if files:
+            from .validators import validate_pet_image
+            for f in files:
+                validate_pet_image(f)
             created_images = []
             caption = request.data.get('caption', f"Gallery image for {pet.name}")
             is_primary = str(request.data.get('is_primary', 'false')).lower() in ('true', '1') if isinstance(request.data.get('is_primary'), str) else bool(request.data.get('is_primary', False))
@@ -364,9 +411,9 @@ class PetMedicalRecordListCreateView(generics.ListCreateAPIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_permissions(self):
-        if self.request.method == 'GET':
+        if self.request.method in permissions.SAFE_METHODS:
             return [permissions.AllowAny()]
-        return [(IsShelterRole | IsAdminRole)()]
+        return [IsVerifiedShelter()]
 
     def get_queryset(self):
         if getattr(self, 'swagger_fake_view', False):
@@ -382,13 +429,12 @@ class PetMedicalRecordListCreateView(generics.ListCreateAPIView):
 
         doc_file = self.request.FILES.get('document') or self.request.FILES.get('file')
         if doc_file and 'document' not in serializer.validated_data:
-            from django.core.files.storage import default_storage, storages
-            try:
-                storage = storages['raw']
-            except Exception:
-                storage = default_storage
-            saved_path = storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
-            doc_url = storage.url(saved_path)
+            from .validators import validate_medical_document
+            validate_medical_document(doc_file)
+            from .storage import get_document_storage
+            doc_storage = get_document_storage()
+            saved_path = doc_storage.save(f"medical/{pet.id}/{doc_file.name}", doc_file)
+            doc_url = doc_storage.url(saved_path)
             desc = serializer.validated_data.get('description', '')
             desc_with_doc = f"{desc}\nDocument: {doc_url}".strip() if desc else f"Document: {doc_url}"
             serializer.save(pet=pet, description=desc_with_doc)
@@ -399,7 +445,7 @@ class PetMedicalRecordListCreateView(generics.ListCreateAPIView):
 @extend_schema_view(
     list=extend_schema(
         summary="Browse available pets",
-        description="Public discovery catalog of available pets. Supports filtering by species, breed, gender, size, age ranges, and shelter city. If lat and lng are provided, results are ordered by PostGIS proximity.",
+        description="Public discovery catalog of available pets. Supports filtering by species, breed, gender, size, age ranges, and shelter city. If lat and lng are provided, results are ordered by geographic proximity (Haversine formula).",
         parameters=[
             OpenApiParameter('lat', OpenApiTypes.FLOAT, description='Latitude for proximity sorting'),
             OpenApiParameter('lng', OpenApiTypes.FLOAT, description='Longitude for proximity sorting'),
@@ -426,7 +472,21 @@ class PublicPetViewSet(viewsets.ReadOnlyModelViewSet):
     ordering = ['-created_at']
 
     def get_queryset(self):
-        queryset = Pet.objects.filter(status='available').select_related('shelter', 'shelter__user').prefetch_related('images', 'medical_records')
+        queryset = Pet.objects.all().select_related('shelter', 'shelter__user').prefetch_related('images', 'medical_records')
+        user = self.request.user if hasattr(self, 'request') else None
+        if user and user.is_authenticated:
+            if user.is_superuser or user.role == 'admin':
+                pass
+            elif user.role == 'shelter' and hasattr(user, 'shelter_profile'):
+                queryset = queryset.filter(Q(shelter=user.shelter_profile) | Q(shelter__is_verified=True))
+            else:
+                queryset = queryset.filter(shelter__is_verified=True)
+                if self.action == 'list':
+                    queryset = queryset.filter(status='available')
+        else:
+            queryset = queryset.filter(shelter__is_verified=True)
+            if self.action == 'list':
+                queryset = queryset.filter(status='available')
 
         if hasattr(self, 'request') and self.request:
             lat = self.request.query_params.get('lat')
@@ -442,6 +502,28 @@ class PublicPetViewSet(viewsets.ReadOnlyModelViewSet):
                     pass
 
         return queryset
+
+    def get_object(self):
+        queryset = self.filter_queryset(self.get_queryset())
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        lookup_val = self.kwargs[lookup_url_kwarg]
+
+        obj = None
+        try:
+            import uuid
+            uuid_val = uuid.UUID(str(lookup_val))
+            obj = queryset.filter(public_id=uuid_val).first()
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+        if not obj and str(lookup_val).isdigit():
+            obj = queryset.filter(id=int(lookup_val)).first()
+
+        if not obj:
+            raise NotFound("Pet not found.")
+
+        self.check_object_permissions(self.request, obj)
+        return obj
 
     def filter_queryset(self, queryset):
         qs = super().filter_queryset(queryset)

@@ -19,6 +19,11 @@ class PetDelivery(models.Model):
     doorstep_otp = models.CharField(max_length=6, blank=True, default='')
     secret_otp = models.CharField(max_length=6, blank=True, default='') # Fallback alias
 
+    # Cryptographic HMAC-SHA256 OTP hashes & dispatch timestamps
+    pickup_otp_hash = models.CharField(max_length=64, null=True, blank=True)
+    doorstep_otp_hash = models.CharField(max_length=64, null=True, blank=True)
+    doorstep_otp_sent_at = models.DateTimeField(null=True, blank=True)
+
     pickup_otp_attempts = models.IntegerField(default=0)
     doorstep_otp_attempts = models.IntegerField(default=0)
 
@@ -34,7 +39,23 @@ class PetDelivery(models.Model):
     # Doorstep COD collection
     cash_collected = models.DecimalField(max_digits=8, decimal_places=2, default=0.00)
     is_cash_settled_with_shelter = models.BooleanField(default=False)
-    payment_status = models.CharField(max_length=20, default='pending')
+    cash_settled_at = models.DateTimeField(null=True, blank=True)
+    cash_settled_by = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='settled_cash_deliveries',
+        db_column='cash_settled_by_id'
+    )
+
+    PAYMENT_STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('paid', 'Paid'),
+        ('failed', 'Failed'),
+        ('refunded', 'Refunded'),
+    )
+    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='pending')
 
     scheduled_date = models.DateTimeField(null=True, blank=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
@@ -43,14 +64,27 @@ class PetDelivery(models.Model):
     class Meta:
         db_table = 'pet_deliveries'
         managed = True
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['status'], name='pet_delivery_status_idx'),
+            models.Index(fields=['driver', 'status'], name='pet_delivery_drv_status_idx'),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(pickup_otp_attempts__gte=0),
+                name='check_pickup_otp_attempts_gte_0'
+            ),
+            models.CheckConstraint(
+                condition=models.Q(doorstep_otp_attempts__gte=0),
+                name='check_doorstep_otp_attempts_gte_0'
+            ),
+            models.CheckConstraint(
+                condition=models.Q(status='delivered', delivered_at__isnull=False) | ~models.Q(status='delivered'),
+                name='check_delivered_has_delivered_at'
+            ),
+        ]
 
     def save(self, *args, **kwargs):
-        if not self.pickup_otp:
-            self.pickup_otp = str(secrets.randbelow(900000) + 100000)
-        if not self.doorstep_otp:
-            self.doorstep_otp = str(secrets.randbelow(900000) + 100000)
-        if not self.secret_otp:
-            self.secret_otp = self.doorstep_otp
         super().save(*args, **kwargs)
 
     @property
@@ -64,6 +98,24 @@ class PetDelivery(models.Model):
     def __str__(self):
         driver_str = self.driver.user.username if self.driver else "Unassigned"
         return f"Delivery #{self.id} for App #{self.application_id} ({driver_str}) - Status: {self.get_status_display()}"
+
+
+class PaymentStatus:
+    CREATED = 'created'
+    PENDING = 'pending'
+    CAPTURED = 'captured'
+    FAILED = 'failed'
+    REFUNDED = 'refunded'
+    # Legacy alias
+    PAID = 'paid'
+
+    CHOICES = (
+        (CREATED, 'Created'),
+        (PENDING, 'Pending'),
+        (CAPTURED, 'Captured'),
+        (FAILED, 'Failed'),
+        (REFUNDED, 'Refunded'),
+    )
 
 
 class Payment(models.Model):
@@ -116,3 +168,57 @@ class DeliveryLocationPing(models.Model):
 
     def __str__(self):
         return f"Ping at ({self.latitude}, {self.longitude}) for Delivery #{self.delivery_id}"
+
+
+class RefundStatus:
+    CREATED = 'created'
+    PROCESSING = 'processing'
+    PROCESSED = 'processed'
+    FAILED = 'failed'
+
+    CHOICES = (
+        (CREATED, 'Created'),
+        (PROCESSING, 'Processing'),
+        (PROCESSED, 'Processed'),
+        (FAILED, 'Failed'),
+    )
+
+
+class RefundSource:
+    MANUAL = 'manual'
+    LATE_CAPTURE = 'late_capture'
+
+    CHOICES = (
+        (MANUAL, 'Manual'),
+        (LATE_CAPTURE, 'Late Capture'),
+    )
+
+
+class Refund(models.Model):
+    public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    payment = models.ForeignKey(Payment, on_delete=models.CASCADE, related_name='refunds', db_column='payment_id')
+    application = models.ForeignKey('adoptions.AdoptionApplication', on_delete=models.CASCADE, related_name='refunds', db_column='application_id')
+    amount_in_paise = models.PositiveIntegerField(help_text="Refund amount in paise")
+    status = models.CharField(max_length=20, choices=RefundStatus.CHOICES, default=RefundStatus.CREATED)
+    razorpay_refund_id = models.CharField(max_length=100, null=True, blank=True, unique=True)
+    reason = models.TextField()
+    initiated_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='initiated_refunds', db_column='initiated_by_id')
+    source = models.CharField(max_length=20, choices=RefundSource.CHOICES, default=RefundSource.MANUAL)
+    failure_reason = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'refunds'
+        managed = True
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['payment'],
+                condition=~models.Q(status='failed'),
+                name='unique_active_refund_per_payment'
+            ),
+        ]
+
+    def __str__(self):
+        return f"Refund #{self.id} for Payment #{self.payment_id} ({self.amount_in_paise} paise) - Status: {self.status}"

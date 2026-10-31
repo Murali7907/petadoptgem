@@ -3,12 +3,27 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from django.db.models import Sum, Avg
-from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiTypes
+import logging
+import threading
+from django.conf import settings
+from django.core.mail import send_mail
+from django.contrib.auth.tokens import default_token_generator
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from django.utils.encoding import force_bytes, force_str
+from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiTypes, OpenApiResponse
 from django.db import transaction
+from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 from .models import User, ShelterProfile, DeliveryProfile, Notification
-from .permissions import IsAdminRole, IsShelterRole
+from .permissions import IsAdminRole, IsShelterRole, IsVerifiedShelter
 from apps.pets.models import Pet
 from apps.logistics.models import PetDelivery, Payment
 from apps.adoptions.models import AdoptionReview
@@ -20,27 +35,95 @@ from .serializers import (
     AdminPlatformStatsSerializer,
     NotificationSerializer,
     DriverCreateSerializer,
+    LogoutSerializer,
+    PasswordResetRequestSerializer,
+    PasswordResetConfirmSerializer,
+    PasswordChangeSerializer,
+    EmailVerificationSerializer,
 )
+from .email_verification import send_verification_email, verify_email_token
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     """
     Login endpoint returning access and refresh JWT tokens with custom embedded role claims.
+    Throttled per IP via auth_login scope.
     """
     serializer_class = CustomTokenObtainPairSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_login'
+
+
+class CustomTokenRefreshView(TokenRefreshView):
+    """
+    Token refresh endpoint generating new access token from refresh token.
+    Throttled per IP via auth_refresh scope.
+    """
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_refresh'
+
+
+class LogoutView(views.APIView):
+    """
+    Logout endpoint blacklisting the provided refresh token.
+    Logging out twice is harmless (idempotent).
+    """
+    permission_classes = [AllowAny]
+    serializer_class = LogoutSerializer
+
+    @extend_schema(
+        summary="Logout and blacklist refresh token",
+        description="Blacklists the provided refresh token. Logging out twice is harmless.",
+        request=LogoutSerializer,
+        responses={
+            200: OpenApiResponse(description="Successfully logged out"),
+            400: OpenApiResponse(description="Missing or invalid token")
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = LogoutSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        refresh_token = serializer.validated_data['refresh']
+        try:
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+        except TokenError as e:
+            if 'blacklisted' in str(e).lower():
+                return Response({
+                    "message": "Successfully logged out (token already blacklisted)."
+                }, status=status.HTTP_200_OK)
+            return Response({
+                "error": str(e),
+                "code": "invalid_token"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            return Response({
+                "error": "Invalid token.",
+                "code": "invalid_token"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            "message": "Successfully logged out."
+        }, status=status.HTTP_200_OK)
 
 
 class RegisterView(generics.CreateAPIView):
     """
     User registration endpoint open to all applicants.
+    Throttled per IP via auth_register scope.
     """
     queryset = User.objects.all()
     serializer_class = UserRegistrationSerializer
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_register'
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
+        transaction.on_commit(lambda: send_verification_email(user))
         response_serializer = UserProfileSerializer(user)
         return Response(
             {
@@ -51,15 +134,70 @@ class RegisterView(generics.CreateAPIView):
         )
 
 
-class UserProfileView(generics.RetrieveAPIView):
+@extend_schema_view(
+    get=extend_schema(summary="Retrieve current user profile"),
+    put=extend_schema(summary="Update current user profile"),
+    patch=extend_schema(summary="Partially update current user profile"),
+)
+class UserProfileView(generics.RetrieveUpdateAPIView):
     """
-    Endpoint returning authenticated user profile and identity.
+    Endpoint returning and updating authenticated user profile and identity.
+    Changing email requires current_password in the body.
     """
     serializer_class = UserProfileSerializer
     permission_classes = [IsAuthenticated]
 
     def get_object(self):
         return self.request.user
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+
+        # Check if email is being changed
+        new_email = request.data.get('email')
+        email_changing = False
+        old_email = (instance.email or '').strip()
+
+        if new_email is not None:
+            new_email_clean = new_email.strip().lower()
+            current_email_clean = (instance.email or '').strip().lower()
+            if new_email_clean != current_email_clean:
+                email_changing = True
+                current_password = request.data.get('current_password')
+                if not current_password or not instance.check_password(current_password):
+                    return Response({
+                        "code": "invalid_password",
+                        "detail": "Current password is required to change email address."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+
+        with transaction.atomic():
+            self.perform_update(serializer)
+
+            if email_changing and old_email:
+                def _send_old_email_notice():
+                    try:
+                        send_mail(
+                            subject="Security Alert: Email address changed",
+                            message=(
+                                f"Hello {instance.username},\n\n"
+                                f"The email address associated with your KindHeart account was recently updated.\n"
+                                f"If you did not initiate this change, please contact support immediately.\n\n"
+                                f"KindHeart Pet Adoption Platform"
+                            ),
+                            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@kindheart.org'),
+                            recipient_list=[old_email],
+                            fail_silently=False,
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to dispatch email change notice to old address: %s", exc)
+
+                transaction.on_commit(_send_old_email_notice)
+
+        return Response(serializer.data)
 
 
 class ShelterDriverCreateView(views.APIView):
@@ -68,7 +206,7 @@ class ShelterDriverCreateView(views.APIView):
     Drivers cannot self-register; they are created by their shelter.
     POST /api/auth/drivers/create/
     """
-    permission_classes = [IsAuthenticated, IsShelterRole]
+    permission_classes = [IsAuthenticated, IsVerifiedShelter]
 
     @extend_schema(
         summary="Create a new delivery driver for shelter fleet",
@@ -76,11 +214,17 @@ class ShelterDriverCreateView(views.APIView):
         responses={201: UserProfileSerializer}
     )
     def post(self, request):
-        if not hasattr(request.user, 'shelter_profile') or not request.user.shelter_profile:
-            return Response(
-                {"detail": "Authenticated user is not associated with a shelter profile."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        shelter = getattr(request.user, 'shelter_profile', None)
+        if not shelter:
+            if request.user.role == 'admin' or request.user.is_superuser or request.user.is_staff:
+                shelter_id = request.data.get('shelter_id')
+                if shelter_id:
+                    shelter = ShelterProfile.objects.filter(id=shelter_id).first()
+            if not shelter:
+                return Response(
+                    {"detail": "Authenticated user is not associated with a shelter profile."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
 
         serializer = DriverCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -101,7 +245,7 @@ class ShelterDriverCreateView(views.APIView):
 
             delivery_profile = DeliveryProfile.objects.create(
                 user=driver_user,
-                shelter=request.user.shelter_profile,
+                shelter=shelter,
                 vehicle_type=data.get('vehicle_type', 'car'),
                 vehicle_number=data['vehicle_number'],
                 is_available=True
@@ -316,5 +460,277 @@ class NotificationMarkAllReadView(views.APIView):
             'message': f'{updated_count} notification(s) marked as read.',
             'updated_count': updated_count
         }, status=status.HTTP_200_OK)
+
+
+class PasswordResetView(views.APIView):
+    """
+    Password reset request endpoint.
+    POST /api/v1/auth/password-reset/
+    Always returns uniform 200 OK to prevent account enumeration.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_password_reset'
+    serializer_class = PasswordResetRequestSerializer
+
+    @extend_schema(
+        summary="Request password reset link",
+        description="Initiates password reset workflow. Always returns 200 OK to prevent user enumeration.",
+        request=PasswordResetRequestSerializer,
+        responses={
+            200: OpenApiResponse(description="Password reset email dispatched if account exists and is active.")
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email'].strip().lower()
+
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        if user:
+            uid = urlsafe_base64_encode(force_bytes(user.pk))
+            token = default_token_generator.make_token(user)
+            frontend_url = getattr(settings, 'FRONTEND_BASE_URL', 'http://localhost:3000').rstrip('/')
+            reset_link = f"{frontend_url}/reset-password?uid={uid}&token={token}"
+            timeout_minutes = getattr(settings, 'PASSWORD_RESET_TIMEOUT', 3600) // 60
+
+            def send_reset_email():
+                try:
+                    send_mail(
+                        subject="Reset Your Password - KindHeart Pet Adoption",
+                        message=(
+                            f"Hello {user.first_name or user.username},\n\n"
+                            f"We received a request to reset your password. Click the link below to set a new password:\n"
+                            f"{reset_link}\n\n"
+                            f"This link expires in {timeout_minutes} minutes.\n"
+                            f"If you did not make this request, you can safely ignore this email.\n"
+                        ),
+                        from_email=settings.DEFAULT_FROM_EMAIL,
+                        recipient_list=[user.email],
+                        fail_silently=True,
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to dispatch password reset email: {exc}")
+
+            def dispatch_reset():
+                if getattr(settings, 'AUTH_PASSWORD_RESET_ASYNC_EMAIL', False):
+                    email_thread = threading.Thread(
+                        target=send_reset_email,
+                        name=f"pwd-reset-email-{user.pk}",
+                        daemon=True
+                    )
+                    email_thread.start()
+                else:
+                    send_reset_email()
+
+            transaction.on_commit(dispatch_reset)
+
+        return Response({
+            "message": "If an account with that email exists, a password reset link has been sent."
+        }, status=status.HTTP_200_OK)
+
+
+class PasswordResetConfirmView(views.APIView):
+    """
+    Password reset confirmation endpoint.
+    POST /api/v1/auth/password-reset/confirm/
+    Validates token and password complexity, resets credentials, and revokes active sessions.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_password_reset_confirm'
+    serializer_class = PasswordResetConfirmSerializer
+
+    @extend_schema(
+        summary="Confirm password reset",
+        description="Resets user password with valid one-time token and invalidates all existing JWT sessions.",
+        request=PasswordResetConfirmSerializer,
+        responses={
+            200: OpenApiResponse(description="Password reset successful"),
+            400: OpenApiResponse(description="Invalid or expired token, or weak password"),
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = PasswordResetConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        uid_b64 = serializer.validated_data['uid']
+        token = serializer.validated_data['token']
+        new_password = serializer.validated_data['new_password']
+
+        try:
+            uid = force_str(urlsafe_base64_decode(uid_b64))
+            user = User.objects.get(pk=uid, is_active=True)
+        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+            return Response({
+                "code": "invalid_token",
+                "detail": "Invalid or expired password reset token."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if not default_token_generator.check_token(user, token):
+            return Response({
+                "code": "invalid_token",
+                "detail": "Invalid or expired password reset token."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            validate_password(new_password, user)
+        except ValidationError as err:
+            return Response({
+                "code": "weak_password",
+                "detail": "Password does not meet security requirements.",
+                "messages": list(err.messages)
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
+        user.save()
+
+        # Revoke all outstanding SimpleJWT refresh tokens across all sessions
+        try:
+            for ot in OutstandingToken.objects.filter(user=user):
+                BlacklistedToken.objects.get_or_create(token=ot)
+        except Exception as exc:
+            logger.warning(f"Failed to blacklist tokens after password reset: {exc}")
+
+        return Response({
+            "message": "Password has been reset successfully. Please log in with your new password."
+        }, status=status.HTTP_200_OK)
+
+
+class PasswordChangeView(views.APIView):
+    """
+    Authenticated password change endpoint.
+    POST /api/v1/auth/password/change/
+    Validates current password, updates to new password, and revokes outstanding sessions.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = PasswordChangeSerializer
+
+    @extend_schema(
+        summary="Change account password",
+        description="Changes password for authenticated user and revokes active refresh tokens.",
+        request=PasswordChangeSerializer,
+        responses={
+            200: OpenApiResponse(description="Password changed successfully"),
+            400: OpenApiResponse(description="Invalid current password or weak new password"),
+            401: OpenApiResponse(description="Authentication required"),
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = PasswordChangeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        old_password = serializer.validated_data['old_password']
+        new_password = serializer.validated_data['new_password']
+        user = request.user
+
+        if not user.check_password(old_password):
+            return Response({
+                "code": "invalid_password",
+                "detail": "Current password is incorrect."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            validate_password(new_password, user)
+        except ValidationError as err:
+            return Response({
+                "code": "weak_password",
+                "detail": "Password does not meet security requirements.",
+                "messages": list(err.messages)
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
+        user.save()
+
+        # Revoke all outstanding SimpleJWT refresh tokens across all sessions
+        try:
+            for ot in OutstandingToken.objects.filter(user=user):
+                BlacklistedToken.objects.get_or_create(token=ot)
+        except Exception as exc:
+            logger.warning(f"Failed to blacklist tokens after password change: {exc}")
+
+        return Response({
+            "message": "Password changed successfully. Please log in again."
+        }, status=status.HTTP_200_OK)
+
+
+class EmailVerifyView(views.APIView):
+    """
+    Email verification endpoint.
+    POST /api/v1/auth/verify-email/
+    Validates token, sets email_verified and timestamp; idempotent.
+    """
+    permission_classes = [AllowAny]
+    serializer_class = EmailVerificationSerializer
+
+    @extend_schema(
+        summary="Verify user email address",
+        description="Validates email verification token and marks user email as verified. Idempotent.",
+        request=EmailVerificationSerializer,
+        responses={
+            200: OpenApiResponse(description="Email address successfully verified"),
+            400: OpenApiResponse(description="Invalid or expired verification token"),
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = EmailVerificationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        token = serializer.validated_data['token']
+
+        try:
+            payload = verify_email_token(token)
+        except ValueError:
+            return Response({
+                "code": "invalid_token",
+                "detail": "Invalid or expired email verification token."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(pk=payload.get('user_id')).first()
+        if not user or (user.email or '').strip().lower() != (payload.get('email') or '').strip().lower():
+            return Response({
+                "code": "invalid_token",
+                "detail": "The verification token does not match the user's current email address."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user.email_verified = True
+        if not user.email_verified_at:
+            user.email_verified_at = timezone.now()
+        user.save(update_fields=['email_verified', 'email_verified_at'])
+
+        return Response({
+            "message": "Email address verified successfully."
+        }, status=status.HTTP_200_OK)
+
+
+class ResendVerificationEmailView(views.APIView):
+    """
+    Resend verification email endpoint for authenticated users.
+    POST /api/v1/auth/resend-verification/
+    Throttled via auth_resend_verification scope.
+    Always returns 200 OK; only sends when not yet verified.
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_resend_verification'
+
+    @extend_schema(
+        summary="Resend email verification link",
+        description="Resends email verification link to authenticated user's email if not already verified. Always returns 200 OK.",
+        request=None,
+        responses={
+            200: OpenApiResponse(description="Verification email dispatched if unverified.")
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        user = request.user
+        if not user.email_verified:
+            transaction.on_commit(lambda: send_verification_email(user))
+            message = "Verification email dispatched."
+        else:
+            message = "Email is already verified."
+
+        return Response({
+            "message": message
+        }, status=status.HTTP_200_OK)
+
+
 
 

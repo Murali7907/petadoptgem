@@ -6,6 +6,7 @@ from apps.accounts.models import User, ShelterProfile, DeliveryProfile
 from apps.pets.models import Pet
 from apps.adoptions.models import AdoptionApplication, AdoptionReview
 from apps.logistics.models import PetDelivery
+from apps.logistics.otp import issue_otp
 
 
 class AdoptionReviewAPITestCase(TestCase):
@@ -35,7 +36,8 @@ class AdoptionReviewAPITestCase(TestCase):
             user=self.shelter_user,
             organization_name='Review Shelter Org',
             pickup_address='123 Shelter St, Bangalore',
-            city='Bangalore'
+            city='Bangalore',
+            is_verified=True
         )
 
         self.driver_user = User.objects.create_user(
@@ -76,10 +78,10 @@ class AdoptionReviewAPITestCase(TestCase):
             application=self.application,
             driver=self.delivery_profile,
             status='delivered',
-            pickup_otp='123456',
-            doorstep_otp='654321',
             delivered_at=timezone.now()
         )
+        issue_otp(self.delivery, 'pickup')
+        issue_otp(self.delivery, 'doorstep')
 
     def test_submit_review_success(self):
         self.client.force_authenticate(user=self.customer)
@@ -117,7 +119,7 @@ class AdoptionReviewAPITestCase(TestCase):
         response = self.client.post('/api/reviews/', data=payload, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_submit_review_unauthorized_user(self):
+    def test_submit_review_foreign_applicant_forbidden(self):
         self.client.force_authenticate(user=self.other_customer)
         payload = {
             'application_id': str(self.application.public_id),
@@ -125,9 +127,10 @@ class AdoptionReviewAPITestCase(TestCase):
             'driver_rating': 5
         }
         response = self.client.post('/api/reviews/', data=payload, format='json')
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertNotEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    def test_submit_review_delivery_not_completed(self):
+    def test_submit_review_delivery_not_delivered_clean_400(self):
         self.delivery.status = 'out_for_delivery'
         self.delivery.save()
 
@@ -139,3 +142,20 @@ class AdoptionReviewAPITestCase(TestCase):
         }
         response = self.client.post('/api/reviews/', data=payload, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertNotEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertIn('Reviews can only be submitted for completed deliveries', str(response.data))
+
+    def test_submit_review_no_delivery_row_clean_400(self):
+        self.delivery.delete()
+
+        self.client.force_authenticate(user=self.customer)
+        payload = {
+            'application_id': str(self.application.public_id),
+            'shelter_rating': 5,
+            'driver_rating': 5
+        }
+        response = self.client.post('/api/reviews/', data=payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertNotEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertIn('Reviews can only be submitted for completed deliveries', str(response.data))
+

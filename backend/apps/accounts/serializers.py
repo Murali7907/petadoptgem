@@ -54,6 +54,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             'public_id': str(user.public_id),
             'username': user.username,
             'email': user.email,
+            'email_verified': user.email_verified,
             'role': user.role,
             'shelter_id': shelter_id,
             'delivery_id': delivery_id,
@@ -80,6 +81,7 @@ class DeliveryProfileSerializer(serializers.ModelSerializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     shelter_profile = ShelterProfileSerializer(read_only=True)
     delivery_profile = DeliveryProfileSerializer(read_only=True)
+    current_password = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
         model = User
@@ -88,6 +90,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'public_id', 
             'username', 
             'email', 
+            'email_verified',
+            'email_verified_at',
             'role', 
             'first_name', 
             'last_name', 
@@ -96,12 +100,33 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'is_staff',
             'date_joined', 
             'shelter_profile', 
-            'delivery_profile'
+            'delivery_profile',
+            'current_password',
         ]
-        read_only_fields = ['id', 'public_id', 'is_staff', 'date_joined']
+        read_only_fields = ['id', 'public_id', 'role', 'email_verified', 'email_verified_at', 'is_staff', 'date_joined']
+        extra_kwargs = {
+            'username': {'required': False},
+        }
+
+    def validate_email(self, value):
+        if value:
+            normalized = value.strip().lower()
+            user = self.instance
+            qs = User.objects.filter(email__iexact=normalized)
+            if user:
+                qs = qs.exclude(pk=user.pk)
+            if qs.exists():
+                raise serializers.ValidationError("A user with this email address already exists.")
+            return normalized
+        return value
+
+    def update(self, instance, validated_data):
+        validated_data.pop('current_password', None)
+        return super().update(instance, validated_data)
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(required=True, allow_blank=False)
     password = serializers.CharField(write_only=True, min_length=6)
     organization_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
     license_no = serializers.CharField(write_only=True, required=False, allow_blank=True)
@@ -128,6 +153,14 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             'latitude',
             'longitude',
         ]
+
+    def validate_email(self, value):
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("Email is required.")
+        email_clean = str(value).strip().lower()
+        if User.objects.filter(email__iexact=email_clean).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return email_clean
 
     def validate_role(self, value):
         if value not in ('customer', 'shelter'):
@@ -181,9 +214,12 @@ class DriverCreateSerializer(serializers.Serializer):
         return value
 
     def validate_email(self, value):
-        if User.objects.filter(email=value).exists():
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("Email is required.")
+        email_clean = str(value).strip().lower()
+        if User.objects.filter(email__iexact=email_clean).exists():
             raise serializers.ValidationError("A user with this email already exists.")
-        return value
+        return email_clean
 
 
 class AdminShelterDetailSerializer(serializers.ModelSerializer):
@@ -266,5 +302,31 @@ class NotificationSerializer(serializers.ModelSerializer):
             'created_at',
         ]
         read_only_fields = ['public_id', 'created_at']
+
+
+class LogoutSerializer(serializers.Serializer):
+    refresh = serializers.CharField(help_text="The refresh JWT token to blacklist.")
+
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField(help_text="Registered account email address.")
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    uid = serializers.CharField(help_text="URL-safe base64-encoded user primary key.")
+    token = serializers.CharField(help_text="One-time password reset token.")
+    new_password = serializers.CharField(write_only=True, help_text="New secure password.")
+
+
+class PasswordChangeSerializer(serializers.Serializer):
+    old_password = serializers.CharField(write_only=True, help_text="Current account password.")
+    new_password = serializers.CharField(write_only=True, help_text="New secure password.")
+
+
+class EmailVerificationSerializer(serializers.Serializer):
+    token = serializers.CharField(help_text="Signed email verification token.")
+
+
+
 
 

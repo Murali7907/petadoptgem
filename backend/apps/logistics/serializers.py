@@ -6,7 +6,9 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from decimal import Decimal
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_field, OpenApiTypes
 from .models import PetDelivery, DeliveryLocationPing, Payment
 from apps.accounts.models import DeliveryProfile
 from apps.adoptions.models import AdoptionApplication
@@ -15,20 +17,45 @@ from apps.adoptions.models import AdoptionApplication
 class DeliveryAssignSerializer(serializers.Serializer):
     application_public_id = serializers.UUIDField(required=False)
     application_id = serializers.CharField(required=False)
+    application_ref = serializers.CharField(required=False)
     driver_public_id = serializers.UUIDField(required=False)
     driver_id = serializers.CharField(required=False)
+    driver_ref = serializers.CharField(required=False)
     payment_method = serializers.CharField(required=False, default='unset')
 
     def validate(self, attrs):
-        app_ref = attrs.get('application_public_id') or attrs.get('application_id')
-        driver_ref = attrs.get('driver_public_id') or attrs.get('driver_id')
+        app_ref = attrs.get('application_ref') or attrs.get('application_public_id') or attrs.get('application_id')
+        driver_ref = attrs.get('driver_ref') or attrs.get('driver_public_id') or attrs.get('driver_id')
         if not app_ref:
-            raise serializers.ValidationError("Either application_id or application_public_id is required.")
+            raise serializers.ValidationError("Either application_id, application_public_id, or application_ref is required.")
         if not driver_ref:
-            raise serializers.ValidationError("Either driver_id or driver_public_id is required.")
+            raise serializers.ValidationError("Either driver_id, driver_public_id, or driver_ref is required.")
         attrs['application_ref'] = str(app_ref)
         attrs['driver_ref'] = str(driver_ref)
         return attrs
+
+
+class DriverTaskPetSummarySerializer(serializers.Serializer):
+    public_id = serializers.UUIDField(help_text="Public UUID of the pet")
+    name = serializers.CharField(help_text="Pet name")
+    species = serializers.CharField(help_text="Pet species (e.g. dog, cat)")
+    breed = serializers.CharField(help_text="Pet breed")
+    age_months = serializers.IntegerField(help_text="Pet age in months")
+
+
+class CustomerTrackingPetSummarySerializer(serializers.Serializer):
+    public_id = serializers.UUIDField(help_text="Public UUID of the pet")
+    name = serializers.CharField(help_text="Pet name")
+    species = serializers.CharField(help_text="Pet species")
+    breed = serializers.CharField(help_text="Pet breed")
+
+
+class DeliveryDriverDetailsSerializer(serializers.Serializer):
+    public_id = serializers.UUIDField(help_text="Public UUID of the delivery driver")
+    driver_name = serializers.CharField(help_text="Driver full name or username")
+    driver_phone = serializers.CharField(allow_blank=True, help_text="Driver contact phone")
+    vehicle_type = serializers.CharField(help_text="Driver vehicle type display")
+    vehicle_number = serializers.CharField(allow_blank=True, help_text="Driver vehicle registration number")
 
 
 class DeliveryDriverTaskSerializer(serializers.ModelSerializer):
@@ -47,7 +74,6 @@ class DeliveryDriverTaskSerializer(serializers.ModelSerializer):
         fields = [
             'public_id',
             'status',
-            'pickup_otp',
             'destination_address',
             'delivery_address',
             'delivery_city',
@@ -66,6 +92,7 @@ class DeliveryDriverTaskSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.CharField())
     def get_destination_address(self, obj):
         if obj.application:
             app = obj.application
@@ -81,31 +108,37 @@ class DeliveryDriverTaskSerializer(serializers.ModelSerializer):
                 return app.applicant.address
         return "N/A"
 
+    @extend_schema_field(serializers.CharField())
     def get_delivery_address(self, obj):
         if obj.application:
             return obj.application.delivery_address or obj.application.dropoff_address or ""
         return ""
 
+    @extend_schema_field(serializers.CharField())
     def get_delivery_city(self, obj):
         if obj.application:
             return obj.application.delivery_city or ""
         return ""
 
+    @extend_schema_field(serializers.CharField())
     def get_delivery_pincode(self, obj):
         if obj.application:
             return obj.application.delivery_pincode or ""
         return ""
 
+    @extend_schema_field(serializers.FloatField(allow_null=True))
     def get_destination_latitude(self, obj):
         if obj.application:
-            return obj.application.destination_latitude if obj.application.destination_latitude is not None else obj.application.customer_latitude
+            return float(obj.application.destination_latitude) if obj.application.destination_latitude is not None else (float(obj.application.customer_latitude) if obj.application.customer_latitude is not None else None)
         return None
 
+    @extend_schema_field(serializers.FloatField(allow_null=True))
     def get_destination_longitude(self, obj):
         if obj.application:
-            return obj.application.destination_longitude if obj.application.destination_longitude is not None else obj.application.customer_longitude
+            return float(obj.application.destination_longitude) if obj.application.destination_longitude is not None else (float(obj.application.customer_longitude) if obj.application.customer_longitude is not None else None)
         return None
 
+    @extend_schema_field(serializers.CharField())
     def get_customer_phone(self, obj):
         if obj.application:
             if obj.application.contact_phone:
@@ -114,12 +147,14 @@ class DeliveryDriverTaskSerializer(serializers.ModelSerializer):
                 return obj.application.applicant.phone
         return ""
 
+    @extend_schema_field(serializers.CharField())
     def get_customer_name(self, obj):
         if obj.application and obj.application.applicant:
             user = obj.application.applicant
             return user.get_full_name() or user.username
         return ""
 
+    @extend_schema_field(DriverTaskPetSummarySerializer)
     def get_pet_summary(self, obj):
         if obj.application and obj.application.pet:
             pet = obj.application.pet
@@ -142,8 +177,9 @@ class DeliveryCustomerSerializer(serializers.ModelSerializer):
         fields = [
             'public_id',
             'status',
-            'doorstep_otp',
             'expires_at',
+            'doorstep_otp_expires_at',
+            'doorstep_otp_sent_at',
             'dispatched_at',
             'delivered_at',
             'current_latitude',
@@ -155,6 +191,7 @@ class DeliveryCustomerSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(DeliveryDriverDetailsSerializer)
     def get_driver_details(self, obj):
         driver = obj.driver or obj.delivery_partner
         if driver and driver.user:
@@ -167,6 +204,7 @@ class DeliveryCustomerSerializer(serializers.ModelSerializer):
             }
         return None
 
+    @extend_schema_field(CustomerTrackingPetSummarySerializer)
     def get_pet_summary(self, obj):
         if obj.application and obj.application.pet:
             pet = obj.application.pet
@@ -196,29 +234,36 @@ class ShelterDeliverySerializer(serializers.ModelSerializer):
             'customer_name',
             'pet_name',
             'status',
-            'pickup_otp',
-            'doorstep_otp',
             'pickup_otp_attempts',
             'doorstep_otp_attempts',
             'expires_at',
+            'doorstep_otp_expires_at',
+            'doorstep_otp_sent_at',
             'dispatched_at',
             'delivered_at',
             'current_latitude',
             'current_longitude',
+            'cash_collected',
+            'is_cash_settled_with_shelter',
+            'cash_settled_at',
+            'cash_settled_by',
             'created_at',
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_driver_name(self, obj):
         if obj.driver and obj.driver.user:
             return obj.driver.user.get_full_name() or obj.driver.user.username
         return None
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_customer_name(self, obj):
         if obj.application and obj.application.applicant:
             return obj.application.applicant.get_full_name() or obj.application.applicant.username
         return None
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_pet_name(self, obj):
         if obj.application and obj.application.pet:
             return obj.application.pet.name
@@ -245,6 +290,7 @@ class DriverListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.CharField())
     def get_name(self, obj):
         return obj.user.get_full_name() or obj.user.username
 
@@ -286,8 +332,15 @@ class OTPVerificationSerializer(serializers.Serializer):
 
 
 class PaymentOrderCreateSerializer(serializers.Serializer):
-    delivery_public_id = serializers.UUIDField()
-    amount_in_paise = serializers.IntegerField(min_value=1)
+    delivery_public_id = serializers.UUIDField(required=False)
+    delivery_id = serializers.UUIDField(required=False)
+    amount_in_paise = serializers.IntegerField(required=False, min_value=1)
+    amount = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+
+    def validate(self, attrs):
+        if not attrs.get('delivery_public_id') and not attrs.get('delivery_id'):
+            raise serializers.ValidationError({"delivery_id": "delivery_id or delivery_public_id is required."})
+        return attrs
 
 
 class PaymentVerifySerializer(serializers.Serializer):
@@ -319,4 +372,129 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
         read_only_fields = fields
+
+
+class DeliveryAssignResponseSerializer(ShelterDeliverySerializer):
+    pickup_otp = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Plaintext 6-digit pickup OTP returned once upon assignment to shelter."
+    )
+
+    class Meta(ShelterDeliverySerializer.Meta):
+        fields = ShelterDeliverySerializer.Meta.fields + ['pickup_otp']
+        read_only_fields = fields
+
+
+class DeliveryReissueOTPRequestSerializer(serializers.Serializer):
+    purpose = serializers.ChoiceField(choices=['pickup', 'doorstep'])
+
+
+class DeliveryReissueOTPResponseSerializer(serializers.Serializer):
+    message = serializers.CharField(required=False)
+    detail = serializers.CharField(required=False)
+    purpose = serializers.CharField()
+    pickup_otp = serializers.CharField(required=False, allow_blank=True)
+    doorstep_otp = serializers.CharField(required=False, allow_blank=True)
+    email_dispatched = serializers.BooleanField(required=False)
+    expires_at = serializers.DateTimeField()
+
+
+class DeliveryStatusUpdateRequestSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=['failed'])
+
+
+class DeliveryPickupResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    delivery = DeliveryDriverTaskSerializer()
+
+
+class DeliveryDoorstepResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    delivery = DeliveryDriverTaskSerializer()
+
+
+class DeliveryLocationCurrentLocationSerializer(serializers.Serializer):
+    latitude = serializers.CharField()
+    longitude = serializers.CharField()
+    updated_at = serializers.CharField()
+
+
+class DeliveryPingResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    ping = LocationPingSerializer()
+    current_location = DeliveryLocationCurrentLocationSerializer()
+
+
+class DeliveryTrackingCoordinatesSerializer(serializers.Serializer):
+    latitude = serializers.CharField(allow_null=True)
+    longitude = serializers.CharField(allow_null=True)
+    last_updated = serializers.DateTimeField(allow_null=True)
+
+
+class DeliveryTrackingResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    delivery = serializers.DictField()
+    current_coordinates = DeliveryTrackingCoordinatesSerializer()
+    breadcrumbs = LocationPingSerializer(many=True)
+
+
+class CollectCashRequestSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=8, decimal_places=2, min_value=Decimal('0.01'))
+
+
+class CollectCashResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    cash_collected = serializers.DecimalField(max_digits=8, decimal_places=2)
+    remaining_amount = serializers.DecimalField(max_digits=8, decimal_places=2)
+    payment_status = serializers.CharField()
+    payment_id = serializers.UUIDField(required=False)
+
+
+class DeliveryCancelResponseSerializer(serializers.Serializer):
+    detail = serializers.CharField()
+    delivery_id = serializers.CharField()
+    status = serializers.CharField()
+    idempotent = serializers.BooleanField(required=False)
+
+
+class ErrorResponseSerializer(serializers.Serializer):
+    code = serializers.CharField(required=False, help_text="Machine-readable stable error code")
+    detail = serializers.CharField(help_text="Human-readable error description")
+
+
+class OTPInvalidErrorResponseSerializer(serializers.Serializer):
+    code = serializers.CharField(default="otp_invalid", help_text="Machine-readable error code")
+    detail = serializers.CharField(help_text="Human-readable error description")
+    attempts_remaining = serializers.IntegerField(help_text="Remaining failed attempts before lockout")
+
+
+class CancelAndRefundRequestSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=500, required=True, allow_blank=False, trim_whitespace=True)
+
+
+class CancelAndRefundResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    code = serializers.CharField()
+    detail = serializers.CharField()
+    refund_id = serializers.CharField(allow_null=True)
+    delivery_id = serializers.CharField()
+    application_id = serializers.CharField(allow_null=True)
+    amount_refunded_paise = serializers.IntegerField()
+
+
+class DeliveryCashReconciliationResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    code = serializers.CharField()
+    detail = serializers.CharField()
+    delivery_id = serializers.CharField()
+    is_cash_settled_with_shelter = serializers.BooleanField()
+    cash_settled_at = serializers.DateTimeField(allow_null=True)
+    cash_settled_by = serializers.IntegerField(allow_null=True)
+    cash_collected = serializers.CharField()
+
+
+
+
+
 

@@ -1,7 +1,8 @@
 import uuid
 from decimal import Decimal
 from datetime import timedelta
-from django.core.management.base import BaseCommand
+from django.conf import settings
+from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 from django.db import transaction
 
@@ -9,6 +10,7 @@ from apps.accounts.models import User, ShelterProfile, DeliveryProfile
 from apps.pets.models import Pet, PetImage, PetMedicalRecord
 from apps.adoptions.models import AdoptionApplication, AdoptionReview
 from apps.logistics.models import PetDelivery, DeliveryLocationPing, Payment
+from apps.logistics.otp import issue_otp
 
 
 class Command(BaseCommand):
@@ -16,6 +18,9 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def handle(self, *args, **options):
+        if not getattr(settings, 'DEBUG', False):
+            raise CommandError("seed_platform creates demo credentials and is strictly forbidden when DEBUG is False.")
+
         self.stdout.write(self.style.MIGRATE_HEADING("Seeding KindHeart Pet Adoption & Logistics Platform..."))
 
         # -------------------------------------------------------------------------
@@ -36,6 +41,8 @@ class Command(BaseCommand):
         admin_user.role = 'admin'
         admin_user.is_staff = True
         admin_user.is_superuser = True
+        admin_user.email_verified = True
+        admin_user.email_verified_at = timezone.now()
         admin_user.save()
 
         # -------------------------------------------------------------------------
@@ -54,6 +61,8 @@ class Command(BaseCommand):
         )
         kochi_user.set_password('ShelterPass123!')
         kochi_user.role = 'shelter'
+        kochi_user.email_verified = True
+        kochi_user.email_verified_at = timezone.now()
         kochi_user.save()
 
         shelter_kochi, _ = ShelterProfile.objects.update_or_create(
@@ -83,6 +92,8 @@ class Command(BaseCommand):
         )
         blr_user.set_password('ShelterPass123!')
         blr_user.role = 'shelter'
+        blr_user.email_verified = True
+        blr_user.email_verified_at = timezone.now()
         blr_user.save()
 
         shelter_blr, _ = ShelterProfile.objects.update_or_create(
@@ -115,6 +126,8 @@ class Command(BaseCommand):
         )
         driver1_user.set_password('DriverPass123!')
         driver1_user.role = 'delivery'
+        driver1_user.email_verified = True
+        driver1_user.email_verified_at = timezone.now()
         driver1_user.save()
 
         driver1_profile, _ = DeliveryProfile.objects.update_or_create(
@@ -142,6 +155,8 @@ class Command(BaseCommand):
         )
         driver2_user.set_password('DriverPass123!')
         driver2_user.role = 'delivery'
+        driver2_user.email_verified = True
+        driver2_user.email_verified_at = timezone.now()
         driver2_user.save()
 
         driver2_profile, _ = DeliveryProfile.objects.update_or_create(
@@ -169,6 +184,8 @@ class Command(BaseCommand):
         )
         driver3_user.set_password('DriverPass123!')
         driver3_user.role = 'delivery'
+        driver3_user.email_verified = True
+        driver3_user.email_verified_at = timezone.now()
         driver3_user.save()
 
         DeliveryProfile.objects.update_or_create(
@@ -199,6 +216,8 @@ class Command(BaseCommand):
         )
         customer1.set_password('CustomerPass123!')
         customer1.role = 'customer'
+        customer1.email_verified = True
+        customer1.email_verified_at = timezone.now()
         customer1.save()
 
         customer2, _ = User.objects.get_or_create(
@@ -214,6 +233,8 @@ class Command(BaseCommand):
         )
         customer2.set_password('CustomerPass123!')
         customer2.role = 'customer'
+        customer2.email_verified = True
+        customer2.email_verified_at = timezone.now()
         customer2.save()
 
         # -------------------------------------------------------------------------
@@ -449,9 +470,9 @@ class Command(BaseCommand):
             defaults={
                 'driver': driver2_profile,
                 'status': 'out_for_delivery',
-                'pickup_otp': '582910',
-                'doorstep_otp': '419283',
-                'secret_otp': '419283',
+                'pickup_otp': '',
+                'doorstep_otp': '',
+                'secret_otp': '',
                 'current_latitude': Decimal('12.960000'),
                 'current_longitude': Decimal('77.610000'),
                 'dispatched_at': timezone.now() - timedelta(minutes=25),
@@ -460,6 +481,9 @@ class Command(BaseCommand):
                 'payment_status': 'paid',
             }
         )
+        active_doorstep_otp = issue_otp(active_delivery, 'doorstep')
+        if getattr(settings, 'DEBUG', False):
+            self.stdout.write(self.style.NOTICE(f"  [DEV OTP] Active Delivery #{active_delivery.id} Doorstep OTP: {active_doorstep_otp}"))
 
         # 3 Location Pings for Real-Time Tracking
         DeliveryLocationPing.objects.filter(delivery=active_delivery).delete()
@@ -526,9 +550,9 @@ class Command(BaseCommand):
             defaults={
                 'driver': driver1_profile,
                 'status': 'delivered',
-                'pickup_otp': '111222',
-                'doorstep_otp': '333444',
-                'secret_otp': '333444',
+                'pickup_otp': '',
+                'doorstep_otp': '',
+                'secret_otp': '',
                 'current_latitude': Decimal('9.965000'),
                 'current_longitude': Decimal('76.280000'),
                 'dispatched_at': timezone.now() - timedelta(days=6),
@@ -549,23 +573,24 @@ class Command(BaseCommand):
         )
 
         # -------------------------------------------------------------------------
-        # Clean Terminal Summary (Secrets/Passwords are NOT displayed raw)
+        # Clean Terminal Summary (Displayed only in DEBUG mode)
         # -------------------------------------------------------------------------
-        self.stdout.write(self.style.SUCCESS("\n" + "=" * 70))
-        self.stdout.write(self.style.SUCCESS("  KindHeart Pet Adoption Platform - Database Seeding Complete"))
-        self.stdout.write(self.style.SUCCESS("=" * 70))
-        self.stdout.write(self.style.NOTICE("[1] System Administrator:"))
-        self.stdout.write(f"    - Email: {admin_user.email} (Role: {admin_user.role}) [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(self.style.NOTICE("[2] Shelters (2 profiles):"))
-        self.stdout.write(f"    - {shelter_kochi.organization_name} ({shelter_kochi.city}) -> {kochi_user.email} [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(f"    - {shelter_blr.organization_name} ({shelter_blr.city}) -> {blr_user.email} [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(self.style.NOTICE("[3] Delivery Partners (3 fleet drivers):"))
-        self.stdout.write(f"    - {driver1_user.email} (KL-07-CD-1234, Car) [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(f"    - {driver2_user.email} (KA-03-AB-5678, Two-Wheeler) [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(f"    - {driver3_user.email} (KA-01-EF-9012, Van) [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(self.style.NOTICE("[4] Customers (2 users):"))
-        self.stdout.write(f"    - {customer1.email} ({customer1.phone}) [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(f"    - {customer2.email} ({customer2.phone}) [PASSWORD SECURELY CONFIGURED]")
-        self.stdout.write(self.style.NOTICE(f"[5] Pets Catalog: {len(seeded_pets)} pets populated with images and health records."))
-        self.stdout.write(self.style.NOTICE(f"[6] Active Delivery Task: 1 delivery 'out_for_delivery' with 3 GPS pings."))
-        self.stdout.write(self.style.SUCCESS("=" * 70 + "\n"))
+        if getattr(settings, 'DEBUG', False):
+            self.stdout.write(self.style.SUCCESS("\n" + "=" * 70))
+            self.stdout.write(self.style.SUCCESS("  KindHeart Pet Adoption Platform - Database Seeding Complete"))
+            self.stdout.write(self.style.SUCCESS("=" * 70))
+            self.stdout.write(self.style.NOTICE("[1] System Administrator:"))
+            self.stdout.write(f"    - Email: {admin_user.email} (Role: {admin_user.role}) [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(self.style.NOTICE("[2] Shelters (2 profiles):"))
+            self.stdout.write(f"    - {shelter_kochi.organization_name} ({shelter_kochi.city}) -> {kochi_user.email} [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(f"    - {shelter_blr.organization_name} ({shelter_blr.city}) -> {blr_user.email} [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(self.style.NOTICE("[3] Delivery Partners (3 fleet drivers):"))
+            self.stdout.write(f"    - {driver1_user.email} (KL-07-CD-1234, Car) [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(f"    - {driver2_user.email} (KA-03-AB-5678, Two-Wheeler) [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(f"    - {driver3_user.email} (KA-01-EF-9012, Van) [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(self.style.NOTICE("[4] Customers (2 users):"))
+            self.stdout.write(f"    - {customer1.email} ({customer1.phone}) [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(f"    - {customer2.email} ({customer2.phone}) [PASSWORD SECURELY CONFIGURED]")
+            self.stdout.write(self.style.NOTICE(f"[5] Pets Catalog: {len(seeded_pets)} pets populated with images and health records."))
+            self.stdout.write(self.style.NOTICE(f"[6] Active Delivery Task: 1 delivery 'out_for_delivery' with 3 GPS pings."))
+            self.stdout.write(self.style.SUCCESS("=" * 70 + "\n"))
